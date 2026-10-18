@@ -20,6 +20,7 @@
  * Environment: QUOIN_SSH replaces the ssh command (tests: a fake that runs quoin-serve
  * locally); QUOIN_SERVE names the quoin-serve to send (default: next to this program). */
 #pragma once
+#include "loc.h"
 #include "proto.h"
 
 typedef enum
@@ -35,14 +36,9 @@ G_DECLARE_FINAL_TYPE (GbkConn, gbk_conn, GBK, CONN, GObject)
 /* Signals:
  *   "state-changed"   gbk_conn_state() changed */
 
-/* Is `host` acceptable as an ssh destination? Not empty, at most 255 bytes, not starting
- * with '-' (it would be read as an option: -oProxyCommand=... runs a command), and only
- * [A-Za-z0-9._@:%+-[]]. */
-bool gbk_conn_host_valid (const char *host);
-
 /* Start connecting to `host` (an ssh destination, as typed to ssh). Listings are typed with
  * `types` (referenced). Fails at once (G_IO_ERROR_INVALID_ARGUMENT) for a host
- * gbk_conn_host_valid() refuses. */
+ * gbk_host_valid() refuses. */
 [[nodiscard]] GbkConn *gbk_conn_new (const char *host, GbkTypeTable *types, GError **error);
 const char *gbk_conn_host (const GbkConn *c);
 GbkConnState gbk_conn_state (const GbkConn *c);
@@ -72,6 +68,14 @@ void gbk_conn_unwatch (GbkConnWatch *w);
  * alive then: with the details, or with nullptr and why (a lost connection included). */
 typedef void (*GbkConnInfoFn) (GbkFileInfo *info, const GError *error, void *data);
 void gbk_conn_info (GbkConn *c, const char *path, GObject *owner, GbkConnInfoFn fn, void *data);
+
+/* For a terminal (interactive: the user's own ssh config and prompts apply): a login shell
+ * in `path` on `host`, through the installed quoin-serve (the path travels hex-encoded, so
+ * no name reaches a shell parser). nullptr for an invalid host. g_strfreev. */
+[[nodiscard]] char **gbk_conn_shell_argv (const char *host, const char *path);
+/* For a terminal: log in once and do nothing, so a person can unlock a key (it's then
+ * added to the agent) or accept a host key. nullptr for an invalid host. g_strfreev. */
+[[nodiscard]] char **gbk_conn_login_argv (const char *host);
 
 /* This machine's /etc/machine-id (hex), or "" without one. g_free. */
 [[nodiscard]] char *gbk_conn_local_machine_id (void);

@@ -204,6 +204,24 @@ on_scan (GbkScanMsg *msg, void *data G_GNUC_UNUSED)
 }
 
 static void
+test_ssh_config (void)
+{
+  const char text[] = "# my machines\n"
+                      "Host ws1 ws2\n"
+                      "  HostName 10.0.0.2\n"
+                      "host=laptop\n"
+                      "  Host *.lan !bad ws1 gw # a comment\n"
+                      "Match host x\n"
+                      "Host -oProxyCommand=evil\n"
+                      "HostName notahostline\n";
+  g_autoptr (GPtrArray) hosts = gbk_ssh_config_hosts (text, strlen (text));
+  g_assert_cmpuint (hosts->len, ==, 4);
+  const char *want[] = { "ws1", "ws2", "laptop", "gw" };
+  for (guint i = 0; i < hosts->len; i++)
+    g_assert_cmpstr (g_ptr_array_index (hosts, i), ==, want[i]);
+}
+
+static void
 test_idle_close (void)
 {
   gbk_remote_set_idle_for_test (50, 300);
@@ -239,6 +257,7 @@ main (int argc, char **argv)
   g_test_add_func ("/remote/sleep-closes", test_sleep_closes);
   g_test_add_func ("/remote/network-up", test_network_up);
   g_test_add_func ("/remote/idle-close", test_idle_close);
+  g_test_add_func ("/remote/ssh-config", test_ssh_config);
   int status = g_test_run ();
   g_assert_true (wait_until (no_conns, nullptr, 10000));
   gbk_type_table_unref (types);

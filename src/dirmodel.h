@@ -26,6 +26,11 @@ typedef enum
   GBK_DIR_READY,
   GBK_DIR_ERROR,       /* couldn't be read: see gbk_dir_model_error() */
   GBK_DIR_GONE,        /* deleted, moved or unmounted; entries are the last known state */
+  /* On another machine, and the connection is down: entries are the last known state,
+   * and it reconnects by itself (after a while, when the network comes back, or on
+   * gbk_dir_model_reconnect). Not final, unlike ERROR and GONE: a new listing replaces
+   * the old one in place, so handles to entries still there keep resolving. */
+  GBK_DIR_DISCONNECTED,
 } GbkDirState;
 
 #define GBK_TYPE_DIR_MODEL (gbk_dir_model_get_type ())
@@ -40,6 +45,13 @@ const GbkLoc *gbk_dir_model_loc (const GbkDirModel *m); /* nullptr when detached
 GbkDirState gbk_dir_model_state (const GbkDirModel *m);
 int gbk_dir_model_error (const GbkDirModel *m);          /* errno value in GBK_DIR_ERROR */
 bool gbk_dir_model_live (const GbkDirModel *m);          /* live updates active */
+/* On another machine: reconnect now if DISCONNECTED (Reload, the window coming back). */
+void gbk_dir_model_reconnect (GbkDirModel *m);
+/* DISCONNECTED: why (one line), and whether logging in once in a terminal may fix it. */
+const char *gbk_dir_model_conn_error (const GbkDirModel *m);
+bool gbk_dir_model_needs_login (const GbkDirModel *m);
+/* Still connecting to the folder's machine. */
+bool gbk_dir_model_connecting (const GbkDirModel *m);
 /* Free space on the directory's filesystem, if known yet. */
 bool gbk_dir_model_free_space (const GbkDirModel *m, uint64_t *bytes);
 

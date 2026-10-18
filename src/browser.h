@@ -9,13 +9,24 @@
 #define GBK_TYPE_BROWSER (gbk_browser_get_type ())
 G_DECLARE_FINAL_TYPE (GbkBrowser, gbk_browser, GBK, BROWSER, GtkBox)
 
-/* Signals:
+/* An info bar under the path bar says when the folder's machine can't be reached, with
+ * Retry and, when ssh needs a person, "Log in in a terminal".
+ *
+ * Signals:
  *   "path-changed"    the directory changed (navigation, or walking up after it vanished)
  *   "status-changed"  the status text (gbk_browser_status) may have changed */
 
 GbkBrowser *gbk_browser_new (GbkContext *ctx, bool show_hidden, GbkSortMode sort);
 
 void gbk_browser_open (GbkBrowser *b, GbkLoc *loc);    /* records history */
+/* What a person typed (GbkAddress): on the machine it names, or the one being looked at.
+ * Another machine's home folder is known once it has answered: until then the status says
+ * "Connecting…", and the tab goes there when it does (or says why it couldn't). */
+void gbk_browser_open_address (GbkBrowser *b, const GbkAddress *a);
+/* The home folder of the machine being looked at. */
+void gbk_browser_home (GbkBrowser *b);
+/* A folder on another machine that can't be reached: try again now. */
+void gbk_browser_reconnect (GbkBrowser *b);
 void gbk_browser_back (GbkBrowser *b);
 void gbk_browser_forward (GbkBrowser *b);
 void gbk_browser_up (GbkBrowser *b);

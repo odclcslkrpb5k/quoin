@@ -56,6 +56,68 @@ all_dirs (const GPtrArray *items)
   return items->len > 0;
 }
 
+bool
+gbk_menu_works_remote (GbkMenuKind kind, bool on_file)
+{
+  switch (kind)
+    {
+    case GBK_MENU_SEPARATOR:
+    case GBK_MENU_OPEN_TAB:
+    case GBK_MENU_OPEN_WINDOW:
+    case GBK_MENU_TERMINAL_HERE:
+    case GBK_MENU_COPY_PATH:
+    case GBK_MENU_PROPERTIES:
+    case GBK_MENU_SORT_NAME:
+    case GBK_MENU_SORT_MTIME:
+    case GBK_MENU_SORT_SIZE:
+    case GBK_MENU_SHOW_HIDDEN: return true;
+    case GBK_MENU_OPEN: return !on_file;          /* entering a folder; opening files: next */
+    case GBK_MENU_OPEN_WITH:
+    case GBK_MENU_EXECUTE:
+    case GBK_MENU_EXECUTE_TERMINAL:
+    case GBK_MENU_ACTION:
+    case GBK_MENU_CUT:
+    case GBK_MENU_COPY:
+    case GBK_MENU_PASTE:
+    case GBK_MENU_PASTE_INTO:
+    case GBK_MENU_TRASH:
+    case GBK_MENU_DELETE:
+    case GBK_MENU_RENAME:
+    case GBK_MENU_EXECUTABLE:
+    case GBK_MENU_CREATE_FOLDER:
+    case GBK_MENU_CREATE_FILE: return false;
+    default: gbk_fatal ("bad menu entry kind %d", (int) kind);
+    }
+}
+
+static bool
+any_remote (const GPtrArray *items)
+{
+  for (guint i = 0; i < items->len; i++)
+    if (!gbk_loc_is_local (((const GbkItem *) g_ptr_array_index (items, i))->loc))
+      return true;
+  return false;
+}
+
+/* Keep what works on another machine; then no separator first, last or twice in a row. */
+static void
+keep_remote (GArray *entries, const GPtrArray *items)
+{
+  bool files = !all_dirs (items);
+  GArray *kept = g_array_new (false, false, sizeof (GbkMenuEntry));
+  for (guint i = 0; i < entries->len; i++)
+    {
+      const GbkMenuEntry *e = &g_array_index (entries, GbkMenuEntry, i);
+      if (gbk_menu_works_remote (e->kind, files))
+        add (kept, e->kind, e->action);
+    }
+  if (kept->len > 0 && g_array_index (kept, GbkMenuEntry, kept->len - 1).kind == GBK_MENU_SEPARATOR)
+    g_array_set_size (kept, kept->len - 1);
+  g_array_set_size (entries, 0);
+  g_array_append_vals (entries, kept->data, kept->len);
+  g_array_unref (kept);
+}
+
 GArray *
 gbk_menu_entries (const GbkConfig *config, GPtrArray *items, GbkMenuTarget target)
 {
@@ -147,5 +209,7 @@ gbk_menu_entries (const GbkConfig *config, GPtrArray *items, GbkMenuTarget targe
 
   if (out->len > 0 && g_array_index (out, GbkMenuEntry, out->len - 1).kind == GBK_MENU_SEPARATOR)
     g_array_set_size (out, out->len - 1);
+  if (any_remote (items))
+    keep_remote (out, items);
   return out;
 }

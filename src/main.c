@@ -5,6 +5,7 @@ typedef struct
 {
   GbkContext *ctx;
   GbkLoc *start;
+  GbkAddress remote;     /* host:folder on the command line (host nullptr: none) */
 } App;
 
 /* Also the icon's name (data/icons), as Galley's is. */
@@ -18,6 +19,8 @@ on_activate (GtkApplication *gtk_app, App *app)
 
   GbkWindow *w = gbk_window_new (gtk_app, app->ctx, app->start);
   gtk_widget_show_all (GTK_WIDGET (w));
+  if (app->remote.host != nullptr)
+    gbk_window_open_address (w, &app->remote);   /* says "Connecting…" until it can go */
 
   for (guint i = 0; i < app->ctx->config_errors->len; i++)
     g_printerr ("quoin: config: %s\n",
@@ -34,14 +37,21 @@ main (int argc, char **argv)
     }
   if (argc > 2)
     {
-      fprintf (stderr, "usage: quoin [DIRECTORY]\n");
+      fprintf (stderr, "usage: quoin [FOLDER | HOST:FOLDER]\n");
       return 2;
     }
 
   App app = { .ctx = gbk_context_new (nullptr) };
   /* Relative paths resolve against where we were started; default: the current dir. */
   g_autofree char *cwd = g_get_current_dir ();
-  g_autofree char *start = g_canonicalize_filename (argc == 2 ? argv[1] : cwd, cwd);
+  /* host:folder (scp's rule) opens there; the window starts here meanwhile. */
+  GbkAddress a = { 0 };
+  if (argc == 2 && gbk_address_parse (argv[1], &a) && a.host != nullptr)
+    app.remote = a;
+  else
+    gbk_address_clear (&a);
+  g_autofree char *start
+      = g_canonicalize_filename (argc == 2 && app.remote.host == nullptr ? argv[1] : cwd, cwd);
   app.start = gbk_loc_new_local (start);
 
   /* NON_UNIQUE: each invocation is its own process, so a crash can't take other windows
@@ -53,6 +63,7 @@ main (int argc, char **argv)
   g_object_unref (gtk_app);
   gbk_context_unref (app.ctx);
   gbk_loc_unref (app.start);
+  gbk_address_clear (&app.remote);
 
   /* Everything has been torn down; any registration still alive is a lifetime bug.
    * (Scanner workers are detached and may still be finishing; they hold no callbacks.) */

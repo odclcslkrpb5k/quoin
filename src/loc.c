@@ -29,12 +29,85 @@ gbk_loc_new_like (const GbkLoc *like, const char *path)
   return loc_new (like->host, g_canonicalize_filename (path, like->path));
 }
 
-GbkLoc *
-gbk_loc_new_remote_for_test (const char *host, const char *path)
+bool
+gbk_host_valid (const char *host)
 {
-  if (host == nullptr || path[0] != '/')
-    gbk_fatal ("a remote location needs a host and an absolute path");
+  size_t len = strlen (host);
+  if (len == 0 || len > 255 || host[0] == '-')
+    return false;
+  for (size_t i = 0; i < len; i++)
+    if (!g_ascii_isalnum (host[i]) && strchr ("._@:%+-[]", host[i]) == nullptr)
+      return false;
+  return true;
+}
+
+GbkLoc *
+gbk_loc_new_remote (const char *host, const char *path)
+{
+  if (!gbk_host_valid (host) || path[0] != '/')
+    return nullptr;
   return loc_new (host, g_canonicalize_filename (path, "/"));
+}
+
+const char *
+gbk_loc_host (const GbkLoc *loc)
+{
+  return loc->host;
+}
+
+void
+gbk_address_clear (GbkAddress *a)
+{
+  g_free (a->host);
+  g_free (a->path);
+  a->host = a->path = nullptr;
+}
+
+bool
+gbk_address_parse (const char *text, GbkAddress *out)
+{
+  *out = (GbkAddress) { 0 };
+  if (text[0] == '\0')
+    return false;
+  const char *path = text;
+  /* scp's rule: a colon before any '/' names a machine ("[::1]:" in brackets). A local
+   * name with a colon is written "./name:x". */
+  if (text[0] != '/' && text[0] != '.' && text[0] != '~')
+    {
+      const char *colon = nullptr;
+      if (text[0] == '[')
+        {
+          const char *close = strchr (text, ']');
+          colon = close != nullptr && close[1] == ':' ? close + 1 : nullptr;
+        }
+      else
+        {
+          colon = strchr (text, ':');
+          const char *slash = strchr (text, '/');
+          if (colon != nullptr && slash != nullptr && slash < colon)
+            colon = nullptr;
+        }
+      if (colon != nullptr)
+        {
+          g_autofree char *host = g_strndup (text, (size_t) (colon - text));
+          if (!gbk_host_valid (host))
+            return false;
+          out->host = g_steal_pointer (&host);
+          path = colon + 1;
+        }
+    }
+  if (path[0] == '/')
+    out->base = GBK_ADDRESS_ABSOLUTE;
+  else if (path[0] == '~' && (path[1] == '\0' || path[1] == '/'))
+    {
+      out->base = GBK_ADDRESS_HOME;
+      path += path[1] == '/' ? 2 : 1;
+    }
+  else
+    /* Relative: to the current folder here; on another machine, to its home (as scp). */
+    out->base = out->host != nullptr ? GBK_ADDRESS_HOME : GBK_ADDRESS_CURRENT;
+  out->path = g_strdup (path);
+  return true;
 }
 
 GbkLoc *

@@ -65,6 +65,17 @@ program that won't start. On anything else, [build from source](#building).
   and the like. Open one (mounting it first if needed, with a password prompt if the
   system asks), unmount it, or eject it. Before a device is unmounted, tabs showing it move off it, so Quoin itself
   never keeps it busy. Uses udisks2 through gvfs where installed, as Thunar does.
+- **Other machines, over ssh, without mounting anything.** Type `ws1:` (that machine's
+  home), `ws1:/srv/music` or `ws1:notes` in the location bar (Ctrl+L), run
+  `quoin ws1:/srv`, or pick a machine from **Network** in the ☰ menu (the hosts in your
+  `~/.ssh/config`). Folders there list and update live, as here. A laptop going to sleep
+  or changing networks never freezes anything: the folder keeps its last listing while
+  Quoin reconnects by itself. The first visit sends a small helper program, quoin-serve,
+  to `~/.cache/quoin/serve/` on that machine; nothing needs installing there. Logins use
+  your ssh keys and agent; when ssh needs a passphrase or a host key accepted, **Log in
+  in a terminal** does it once. For now you can look around, see Properties, copy a
+  path (`ws1:/srv/x`, as scp takes it) and open a terminal there (F4); opening and
+  copying files come next (see [docs/remote-plan.md](docs/remote-plan.md)).
 - **Properties** (right-click menu or Alt+Enter): dates (modified, accessed, changed,
   created), size, owner, group, link target, and read / write / execute permissions you can
   change with Apply. For files, the right-click menu also has an **Executable** check

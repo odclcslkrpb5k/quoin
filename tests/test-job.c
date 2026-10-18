@@ -266,8 +266,8 @@ test_remote_refused (void)
   g_autofree char *local = g_build_filename (root, "r/f.txt", nullptr);
   g_autofree char *local_dir = g_build_filename (root, "r/d", nullptr);
   g_autoptr (GPtrArray) src = gbk_loc_array_new ();
-  g_ptr_array_add (src, gbk_loc_new_remote_for_test ("ws", local));
-  g_autoptr (GbkLoc) remote_dir = gbk_loc_new_remote_for_test ("ws", local_dir);
+  g_ptr_array_add (src, gbk_loc_new_remote ("ws", local));
+  g_autoptr (GbkLoc) remote_dir = gbk_loc_new_remote ("ws", local_dir);
   g_autoptr (GPtrArray) here = gbk_loc_array_new ();
   g_ptr_array_add (here, L ("r/f.txt"));
 

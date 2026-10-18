@@ -22,10 +22,24 @@ G_DECLARE_FINAL_TYPE (GbkRemote, gbk_remote, GBK, REMOTE, GObject)
 /* Listings are typed with `types`. Starts the monitors. */
 [[nodiscard]] GbkRemote *gbk_remote_new (GbkTypeTable *types);
 /* The connection to `host`, connecting or ready, made if there is none (or only a dead
- * one). New reference. Fails only for a host gbk_conn_host_valid() refuses. */
+ * one). New reference. Fails only for a host gbk_host_valid() refuses. */
 [[nodiscard]] GbkConn *gbk_remote_conn (GbkRemote *r, const char *host, GError **error);
+/* Hosts this process has connected to (char*, sorted). */
+[[nodiscard]] GPtrArray *gbk_remote_hosts (GbkRemote *r);
+/* The machine names in an ssh config file (char*, in order, once each): every name on a
+ * Host line that isn't a pattern (*, ?, !) and that gbk_host_valid() takes. Pure; Include
+ * and Match lines are not followed. */
+[[nodiscard]] GPtrArray *gbk_ssh_config_hosts (const char *text, size_t len);
+
+/* The connection to `host` if there is one (any state), without making one. Borrowed. */
+GbkConn *gbk_remote_peek (GbkRemote *r, const char *host);
 /* Close every connection (also what happens before sleep). */
 void gbk_remote_close_all (GbkRemote *r);
+
+/* The process's registry, which folder models on other machines use (nullptr: none, and
+ * such folders can't be read). Set once by whoever owns it (the GUI context); referenced. */
+void gbk_remote_set_default (GbkRemote *r);
+GbkRemote *gbk_remote_default (void);
 
 #define GBK_REMOTE_IDLE_MS (5 * 60 * 1000)
 

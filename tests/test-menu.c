@@ -164,6 +164,37 @@ test_no_actions_no_dangling_separator (void)
       " | hidden | properties");
 }
 
+static GbkItem *
+remote_item (const char *path, const char *mime, bool dir)
+{
+  GbkItem *it = item (path, mime, dir, !dir, false);
+  gbk_loc_unref (it->loc);
+  it->loc = gbk_loc_new_remote ("ws", path);
+  return it;
+}
+
+/* On another machine, only browsing: nothing that changes, runs or opens files. */
+static void
+test_remote_menus (void)
+{
+  assert_menu (items_of (remote_item ("/d/a.zip", "application/zip", false), (GbkItem *) nullptr),
+               ITEMS, "copy-path | properties");
+  assert_menu (items_of (remote_item ("/d/sub", "inode/directory", true), (GbkItem *) nullptr),
+               ITEMS, "open open-tab open-window term-here | copy-path | properties");
+  assert_menu (items_of (remote_item ("/d", "inode/directory", true), (GbkItem *) nullptr), BG,
+               "copy-path | term-here | sort-name sort-mtime sort-size | hidden | properties");
+  assert_menu (items_of (remote_item ("/d", "inode/directory", true), (GbkItem *) nullptr), BAR,
+               "open open-tab open-window term-here | copy-path | properties");
+  /* Every kind is decided (an unknown one is fatal), and files open nowhere yet. */
+  int works = 0;
+  for (int k = GBK_MENU_SEPARATOR; k <= GBK_MENU_SHOW_HIDDEN; k++)
+    works += gbk_menu_works_remote ((GbkMenuKind) k, true) ? 1 : 0;
+  g_assert_cmpint (works, ==,
+                   10);   /* separator, tab, window, terminal, path, details, 3 sorts, hidden */
+  g_assert_false (gbk_menu_works_remote (GBK_MENU_OPEN, true));
+  g_assert_true (gbk_menu_works_remote (GBK_MENU_OPEN, false));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -175,6 +206,7 @@ main (int argc, char **argv)
   g_assert_cmpuint (errors->len, ==, 0);
   g_test_add_func ("/menu/contents", test_menus);
   g_test_add_func ("/menu/no-actions", test_no_actions_no_dangling_separator);
+  g_test_add_func ("/menu/remote", test_remote_menus);
   int status = g_test_run ();
   gbk_config_free (config);
   return status;

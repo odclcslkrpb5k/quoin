@@ -542,7 +542,7 @@ test_errors (void)
   /* A folder on another machine is never read here, even though the same path exists on
    * this one: no scanner starts, and the model says why. */
   int workers = gbk_scanner_live_workers ();
-  g_autoptr (GbkLoc) elsewhere = gbk_loc_new_remote_for_test ("ws", "/tmp");
+  g_autoptr (GbkLoc) elsewhere = gbk_loc_new_remote ("ws", "/tmp");
   g_autoptr (GbkDirModel) remote = gbk_dir_model_new (elsewhere, types);
   g_assert_cmpint (gbk_dir_model_state (remote), ==, GBK_DIR_ERROR);
   g_assert_cmpint (gbk_dir_model_error (remote), ==, EREMOTE);

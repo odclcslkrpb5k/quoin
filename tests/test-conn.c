@@ -269,14 +269,14 @@ test_refusals (void)
   const char *bad[] = { "-oProxyCommand=touch /tmp/x", "", "a b", "ws;id", "ws\n" };
   for (size_t i = 0; i < G_N_ELEMENTS (bad); i++)
     {
-      g_assert_false (gbk_conn_host_valid (bad[i]));
+      g_assert_false (gbk_host_valid (bad[i]));
       g_autoptr (GError) error = nullptr;
       g_assert_null (gbk_conn_new (bad[i], types, &error));
       g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
     }
   g_assert_cmpuint (runs (), ==, before);
-  g_assert_true (gbk_conn_host_valid ("gbk@ws1.local"));
-  g_assert_true (gbk_conn_host_valid ("[::1]"));
+  g_assert_true (gbk_host_valid ("gbk@ws1.local"));
+  g_assert_true (gbk_host_valid ("[::1]"));
   g_assert_true (wait_until (no_conns, nullptr, 10000));
 }
 

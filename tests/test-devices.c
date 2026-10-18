@@ -881,6 +881,12 @@ test_unmounted_elsewhere (void)
 
 /* The window closes while a mount is still in progress: it finishes quietly. */
 static void
+set_true (void *flag)
+{
+  *(bool *) flag = true;
+}
+
+static void
 test_window_closes_mid_mount (void)
 {
   use_fake_monitor ();
@@ -895,6 +901,10 @@ test_window_closes_mid_mount (void)
   wait_count (&vb->calls, 1);
   GtkWidget *alive = GTK_WIDGET (w);
   g_object_add_weak_pointer (G_OBJECT (w), (void **) &alive);
+  /* Object data is released at finalize: proof the window is freed, not only destroyed
+   * (GtkMountOperation used to keep it, see device_action). */
+  bool finalized = false;
+  g_object_set_data_full (G_OBJECT (w), "test-finalized", &finalized, set_true);
   gtk_widget_destroy (GTK_WIDGET (w));
   drain ();
   g_assert_null (alive);
@@ -902,6 +912,7 @@ test_window_closes_mid_mount (void)
   hold_mounts = false;
   drain ();
   g_assert_null (visible_dialog ());
+  g_assert_true (finalized);
   end_fakes ();
   rm_rf (media);
 }

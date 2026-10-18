@@ -3,6 +3,9 @@
 static void
 context_free (GbkContext *c)
 {
+  if (gbk_remote_default () == c->remote)
+    gbk_remote_set_default (nullptr);
+  g_object_unref (c->remote);
   gbk_type_table_unref (c->types);
   gbk_config_free (c->config);
   g_ptr_array_unref (c->config_errors);
@@ -21,6 +24,8 @@ gbk_context_new (const char *config_path)
   GbkTypeBuilder *b = gbk_type_builder_new_system ();
   gbk_config_apply_types (c->config, b);
   c->types = gbk_type_builder_finish (b);
+  c->remote = gbk_remote_new (c->types);
+  gbk_remote_set_default (c->remote);
   return c;
 }
 

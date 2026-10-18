@@ -116,7 +116,7 @@ check() {
   meson test -C out/release --print-errorlogs
   # The GUI suites again, several times: a test that reads state before the main loop has
   # delivered it passes or fails by timing, and the fast release build is where it shows.
-  meson test -C out/release --print-errorlogs --repeat 3 window view devices
+  meson test -C out/release --print-errorlogs --repeat 3 window view devices remotewin
 }
 
 release() {

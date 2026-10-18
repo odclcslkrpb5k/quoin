@@ -65,10 +65,10 @@ static void
 test_machines (void)
 {
   g_autoptr (GbkLoc) here = gbk_loc_new_local ("/home/u/x");
-  g_autoptr (GbkLoc) there = gbk_loc_new_remote_for_test ("ws", "/home/u/x");
-  g_autoptr (GbkLoc) there2 = gbk_loc_new_remote_for_test ("ws", "/home/u/x");
-  g_autoptr (GbkLoc) other = gbk_loc_new_remote_for_test ("ws2", "/home/u/x");
-  g_autoptr (GbkLoc) home_there = gbk_loc_new_remote_for_test ("ws", "/home/u");
+  g_autoptr (GbkLoc) there = gbk_loc_new_remote ("ws", "/home/u/x");
+  g_autoptr (GbkLoc) there2 = gbk_loc_new_remote ("ws", "/home/u/x");
+  g_autoptr (GbkLoc) other = gbk_loc_new_remote ("ws2", "/home/u/x");
+  g_autoptr (GbkLoc) home_there = gbk_loc_new_remote ("ws", "/home/u");
   g_autoptr (GbkLoc) home_here = gbk_loc_new_local ("/home/u");
   g_assert_false (gbk_loc_equal (here, there));
   g_assert_true (gbk_loc_equal (there, there2));
@@ -115,7 +115,7 @@ test_arrays (void)
   g_assert_cmpstr (g_ptr_array_index (back, 1), ==, "/b/c");
 
   /* One location elsewhere: no paths at all, never a partial list. */
-  g_ptr_array_add (locs, gbk_loc_new_remote_for_test ("ws", "/d"));
+  g_ptr_array_add (locs, gbk_loc_new_remote ("ws", "/d"));
   g_autoptr (GPtrArray) none = gbk_loc_array_as_local (locs);
   g_assert_null (none);
 }
@@ -132,6 +132,57 @@ test_display (void)
   g_assert_true (g_utf8_validate (name, -1, nullptr));
 }
 
+static void
+test_address (void)
+{
+  const struct
+  {
+    const char *text;
+    const char *host;
+    GbkAddressBase base;
+    const char *path;
+  } ok[] = {
+    { "/srv/x", nullptr, GBK_ADDRESS_ABSOLUTE, "/srv/x" },
+    { "~", nullptr, GBK_ADDRESS_HOME, "" },
+    { "~/notes", nullptr, GBK_ADDRESS_HOME, "notes" },
+    { "notes", nullptr, GBK_ADDRESS_CURRENT, "notes" },
+    { "./a:b", nullptr, GBK_ADDRESS_CURRENT, "./a:b" },     /* a local name with a colon */
+    { "dir/a:b", nullptr, GBK_ADDRESS_CURRENT, "dir/a:b" }, /* a '/' first: local */
+    { "~user", nullptr, GBK_ADDRESS_CURRENT, "~user" },     /* not "home" */
+    { "ws1:/srv/x", "ws1", GBK_ADDRESS_ABSOLUTE, "/srv/x" },
+    { "ws1:", "ws1", GBK_ADDRESS_HOME, "" },
+    { "ws1:notes", "ws1", GBK_ADDRESS_HOME, "notes" },      /* relative: to its home, as scp */
+    { "ws1:~/notes", "ws1", GBK_ADDRESS_HOME, "notes" },
+    { "gbk@ws1.local:/x", "gbk@ws1.local", GBK_ADDRESS_ABSOLUTE, "/x" },
+    { "[::1]:/x", "[::1]", GBK_ADDRESS_ABSOLUTE, "/x" },
+  };
+  for (size_t i = 0; i < G_N_ELEMENTS (ok); i++)
+    {
+      GbkAddress a;
+      g_test_message ("%s", ok[i].text);
+      g_assert_true (gbk_address_parse (ok[i].text, &a));
+      g_assert_cmpstr (a.host, ==, ok[i].host);
+      g_assert_cmpint (a.base, ==, ok[i].base);
+      g_assert_cmpstr (a.path, ==, ok[i].path);
+      gbk_address_clear (&a);
+    }
+  /* A machine name ssh would read as an option, or that isn't one. */
+  const char *bad[] = { "", "-oProxyCommand=x:/", "a b:/x", "ws;id:/x" };
+  for (size_t i = 0; i < G_N_ELEMENTS (bad); i++)
+    {
+      GbkAddress a;
+      g_assert_false (gbk_address_parse (bad[i], &a));
+    }
+
+  g_assert_true (gbk_host_valid ("ws1"));
+  g_assert_false (gbk_host_valid ("-ws1"));
+  g_assert_null (gbk_loc_new_remote ("-oX", "/"));
+  g_assert_null (gbk_loc_new_remote ("ws1", "relative"));
+  g_autoptr (GbkLoc) r = gbk_loc_new_remote ("ws1", "/a/../b");
+  g_assert_cmpstr (gbk_loc_host (r), ==, "ws1");
+  g_assert_cmpstr (gbk_loc_path (r), ==, "/b");
+}
+
 int
 main (int argc, char **argv)
 {
@@ -142,5 +193,6 @@ main (int argc, char **argv)
   g_test_add_func ("/loc/machines", test_machines);
   g_test_add_func ("/loc/arrays", test_arrays);
   g_test_add_func ("/loc/display", test_display);
+  g_test_add_func ("/loc/address", test_address);
   return g_test_run ();
 }

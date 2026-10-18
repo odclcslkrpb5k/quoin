@@ -428,6 +428,14 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   g_dbus_connection_signal_subscribe poisoned elsewhere). Tests: tests/fake-ssh (modes via
   a file), test-conn, test-remote (GTestDBus), test-sshd (real sshd as non-root +
   nss_wrapper; image has openssh-client/server, libnss-wrapper).
+  Phase 4: GbkAddress (loc.h, scp rule) + gbk_browser_open_address (pending until the
+  remote home is known); dirmodel remote source (gbk_remote_default set by GbkContext),
+  GBK_DIR_DISCONNECTED (keeps entries, retry backoff 1..30 s, network-up, window
+  focus-in, info bar Retry / Log in in a terminal); gbk_menu_works_remote = the one list of
+  what works remotely (menu + shortcuts + drag/drop); pathbar host button; props via
+  gbk_conn_info; F4 remote = TerminalRun ssh -t ... --shell-at HEX; Network ☰ submenu
+  (~/.ssh/config Host names + used hosts). GtkMountOperation parent-ref leak worked around
+  in window.c device_action (found because the registry made the leaked context visible).
 - CHAIN with && : a check run after a failing edit script tests unchanged code (did it
   2026-10-17). Edits then `./build format && ./build check`.
 - FORMAT before CHECK: `./build format` rewrites C with clang-format; run it before every

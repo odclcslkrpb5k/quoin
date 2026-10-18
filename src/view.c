@@ -948,6 +948,10 @@ gbk_view_motion (GtkWidget *w, GdkEventMotion *ev)
     return true;
   v->press_armed = false;
   v->press_pending = false;
+  /* Files on another machine can't be handed to other apps (yet): no drag at all. */
+  const GbkLoc *here = v->model != nullptr ? gbk_dir_model_loc (v->model) : nullptr;
+  if (here != nullptr && !gbk_loc_is_local (here))
+    return true;
   g_autoptr (GtkTargetList) targets = gbk_dnd_source_targets ();
   gtk_drag_begin_with_coordinates (w, targets, GBK_DND_ACTIONS, GDK_BUTTON_PRIMARY, (GdkEvent *) ev,
                                    (int) v->press_x, (int) v->press_y);
@@ -1015,6 +1019,10 @@ drop_target (GbkView *v, double x, double y, bool from_self, GbkHandle *folder)
 {
   *folder = GBK_HANDLE_NONE;
   if (v->model == nullptr || gbk_dir_model_state (v->model) == GBK_DIR_ERROR)
+    return false;
+  /* Nothing can be copied to another machine yet: no drops there. */
+  const GbkLoc *here = gbk_dir_model_loc (v->model);
+  if (here != nullptr && !gbk_loc_is_local (here))
     return false;
   GbkHandle h = gbk_view_item_at (v, x, y);
   const GbkEntry *e = h != GBK_HANDLE_NONE ? gbk_dir_model_get (v->model, h) : nullptr;

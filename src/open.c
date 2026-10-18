@@ -1,4 +1,5 @@
 #include "open.h"
+#include "conn.h"
 #include "launch.h"
 
 void
@@ -207,13 +208,47 @@ gbk_open_action (const GbkAction *a, GPtrArray *items, const GbkLoc *cwd_loc, GE
   return gbk_launch_command (a->command, &args, error);
 }
 
+/* Run `argv` in the configured terminal (TerminalRun), started in the local home. */
+[[nodiscard]] static bool
+run_in_terminal (const GbkConfig *config, char **argv, GError **error)
+{
+  GbkCommandArgs args = {
+    .dir = g_get_home_dir (),          /* %d is always a folder on this machine */
+    .run = (const char *const *) argv,
+    .n_run = g_strv_length (argv),
+  };
+  return gbk_launch_command (config->terminal_run, &args, error);
+}
+
 bool
 gbk_open_terminal (const GbkConfig *config, const GbkLoc *dir_loc, GError **error)
 {
-  g_autofree char *shown = gbk_loc_display (dir_loc);
   const char *dir;
-  if (!local_path (dir_loc, shown, &dir, error))
-    return false;
+  if (!gbk_loc_as_local (dir_loc, &dir))
+    {
+      /* Another machine: ssh, in a terminal, to a shell in that folder there. */
+      g_auto (GStrv) argv = gbk_conn_shell_argv (gbk_loc_host (dir_loc), gbk_loc_path (dir_loc));
+      if (argv == nullptr)
+        {
+          g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                               "Not a machine ssh can reach");
+          return false;
+        }
+      return run_in_terminal (config, argv, error);
+    }
   GbkCommandArgs args = { .dir = dir };
   return gbk_launch_command (config->terminal, &args, error);
+}
+
+bool
+gbk_open_ssh_login (const GbkConfig *config, const char *host, GError **error)
+{
+  g_auto (GStrv) argv = gbk_conn_login_argv (host);
+  if (argv == nullptr)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                           "Not a machine ssh can reach");
+      return false;
+    }
+  return run_in_terminal (config, argv, error);
 }

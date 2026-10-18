@@ -1,4 +1,5 @@
 #include "pathbar.h"
+#include "remote.h"
 #include "cliptext.h"
 #include "dnd.h"
 #include "lifetime.h"
@@ -23,6 +24,7 @@ G_DEFINE_FINAL_TYPE (GbkPathbar, gbk_pathbar, GTK_TYPE_BOX)
 enum
 {
   SIGNAL_NAVIGATE,
+  SIGNAL_NAVIGATE_ADDRESS,
   SIGNAL_CONTEXT_MENU,
   SIGNAL_DROP,
   N_SIGNALS
@@ -142,16 +144,29 @@ rebuild (GbkPathbar *bar)
   for (GList *l = old; l != nullptr; l = l->next)
     gtk_widget_destroy (l->data);
 
-  /* Home is this machine's: a location elsewhere starts at its root. */
-  g_autoptr (GbkLoc) home = gbk_loc_is_local (bar->deep) && g_get_home_dir () != nullptr
-                                ? gbk_loc_new_like (bar->deep, g_get_home_dir ())
-                                : nullptr;
+  /* Buttons start at the home folder of the location's machine when inside it (another
+   * machine's home is known once connected), else at its root. Another machine's first
+   * button says which machine. */
+  const char *host = gbk_loc_host (bar->deep);
+  const char *home_path = g_get_home_dir ();
+  if (host != nullptr)
+    {
+      GbkRemote *r = gbk_remote_default ();
+      const GbkConn *c = r != nullptr ? gbk_remote_peek (r, host) : nullptr;
+      home_path
+          = c != nullptr && gbk_conn_hello (c) != nullptr ? gbk_conn_hello (c)->home : nullptr;
+    }
+  g_autoptr (GbkLoc) home
+      = home_path != nullptr ? gbk_loc_new_like (bar->deep, home_path) : nullptr;
   bool in_home = home != nullptr && !gbk_loc_is_root (home) && gbk_loc_is_under (bar->deep, home);
   g_autoptr (GbkLoc) start = in_home ? gbk_loc_ref (home) : gbk_loc_new_like (bar->deep, "/");
-  g_autofree char *start_label = in_home ? gbk_loc_display_name (home) : g_strdup ("File System");
-  gtk_box_pack_start (
-      bar->buttons, make_button (bar, start, start_label, in_home ? "user-home" : "drive-harddisk"),
-      false, false, 0);
+  g_autofree char *home_name = in_home ? gbk_loc_display_name (home) : nullptr;
+  g_autofree char *start_label
+      = host != nullptr ? (in_home ? g_strdup_printf ("%s: %s", host, home_name) : g_strdup (host))
+        : in_home       ? g_strdup (home_name)
+                        : g_strdup ("File System");
+  const char *icon = in_home ? "user-home" : host != nullptr ? "network-server" : "drive-harddisk";
+  gtk_box_pack_start (bar->buttons, make_button (bar, start, start_label, icon), false, false, 0);
 
   /* One button per component below the start. */
   const char *rest = gbk_loc_path (bar->deep) + (in_home ? strlen (gbk_loc_path (start)) : 0);
@@ -208,6 +223,16 @@ gbk_pathbar_set_loc (GbkPathbar *bar, GbkLoc *loc)
   gbk_idle_add (G_OBJECT (bar), scroll_to_current, bar);
 }
 
+void
+gbk_pathbar_refresh (GbkPathbar *bar)
+{
+  if (bar->loc == nullptr)
+    return;
+  g_autoptr (GbkLoc) loc = gbk_loc_ref (bar->loc);
+  g_clear_pointer (&bar->deep, gbk_loc_unref);   /* forces a rebuild */
+  gbk_pathbar_set_loc (bar, loc);
+}
+
 /* ---- text entry mode ---- */
 
 static void
@@ -241,21 +266,15 @@ gbk_pathbar_editing (GbkPathbar *bar)
 static void
 on_entry_activate (GtkEntry *entry, GbkPathbar *bar)
 {
-  const char *text = gtk_entry_get_text (entry);
-  g_autofree char *expanded = nullptr;
-  if (text[0] == '~' && (text[1] == '\0' || text[1] == '/'))
-    expanded = g_strconcat (g_get_home_dir (), text + 1, nullptr);
-  else
-    expanded = g_strdup (text);
-  g_autofree char *fs = g_filename_from_utf8 (expanded, -1, nullptr, nullptr, nullptr);
+  /* The entry holds UTF-8; locations are filename bytes. */
+  g_autofree char *fs
+      = g_filename_from_utf8 (gtk_entry_get_text (entry), -1, nullptr, nullptr, nullptr);
   show_buttons (bar);
-  if (fs == nullptr || fs[0] == '\0')
+  GbkAddress a;
+  if (fs == nullptr || !gbk_address_parse (fs, &a))
     return;
-  if (bar->loc == nullptr)
-    return;
-  /* Relative input is relative to the current folder. */
-  g_autoptr (GbkLoc) target = gbk_loc_new_like (bar->loc, fs);
-  g_signal_emit (bar, signals[SIGNAL_NAVIGATE], 0, target);
+  g_signal_emit (bar, signals[SIGNAL_NAVIGATE_ADDRESS], 0, &a);
+  gbk_address_clear (&a);
 }
 
 static gboolean
@@ -358,6 +377,9 @@ gbk_pathbar_class_init (GbkPathbarClass *klass)
   signals[SIGNAL_NAVIGATE]
       = g_signal_new ("navigate", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, nullptr, nullptr,
                       nullptr, G_TYPE_NONE, 1, G_TYPE_POINTER);
+  signals[SIGNAL_NAVIGATE_ADDRESS]
+      = g_signal_new ("navigate-address", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, nullptr,
+                      nullptr, nullptr, G_TYPE_NONE, 1, G_TYPE_POINTER);
   /* GDK_TYPE_EVENT | G_SIGNAL_TYPE_STATIC_SCOPE: the event is passed through, not copied. */
   signals[SIGNAL_CONTEXT_MENU] = g_signal_new (
       "context-menu", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, nullptr, nullptr, nullptr,

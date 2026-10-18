@@ -57,6 +57,38 @@ bool gbk_loc_is_child_of (const GbkLoc *loc, const GbkLoc *dir);
 /* The local paths (char*, owned) of `locs`, or nullptr if any is not on this machine. */
 [[nodiscard]] GPtrArray *gbk_loc_array_as_local (const GPtrArray *locs);
 
-/* Tests: a location on another machine, so the "not on this machine" branches can be
- * exercised before remote connections exist. */
-[[nodiscard]] GbkLoc *gbk_loc_new_remote_for_test (const char *host, const char *path);
+/* An ssh destination we accept: not empty, at most 255 bytes, not starting with '-' (ssh
+ * would read it as an option: -oProxyCommand=... runs a command), only [A-Za-z0-9._@:%+-[]].
+ * Checked wherever a host enters: typed, on the command line, in a location. */
+bool gbk_host_valid (const char *host);
+
+/* `path` (absolute) on the machine ssh reaches as `host`; nullptr if either is invalid. */
+[[nodiscard]] GbkLoc *gbk_loc_new_remote (const char *host, const char *path);
+/* The ssh destination, or nullptr for this machine. */
+const char *gbk_loc_host (const GbkLoc *loc);
+
+/* What a person typed as a location (location bar, command line), before it can be a
+ * GbkLoc: the machine is named, the folder may depend on where they are.
+ *
+ *   host:/abs   host:rel   host:~/x   host:     another machine (scp's rule: a colon
+ *                                               before any '/'; "./a:b" is a local name)
+ *   /abs   ~   ~/x   rel                        the machine being looked at
+ *
+ * Pure: resolving `base` needs the current folder or a home folder (gbk_browser does it). */
+typedef enum
+{
+  GBK_ADDRESS_ABSOLUTE,   /* `path` is absolute */
+  GBK_ADDRESS_HOME,       /* `path` is relative to the home folder ("" for home itself) */
+  GBK_ADDRESS_CURRENT,    /* `path` is relative to the current folder */
+} GbkAddressBase;
+
+typedef struct
+{
+  char *host;             /* nullptr: the machine being looked at */
+  GbkAddressBase base;
+  char *path;             /* bytes as typed (after the host and any "~/") */
+} GbkAddress;
+
+/* False for empty text, or a machine name gbk_host_valid() refuses. */
+[[nodiscard]] bool gbk_address_parse (const char *text, GbkAddress *out);
+void gbk_address_clear (GbkAddress *a);

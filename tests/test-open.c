@@ -156,9 +156,9 @@ test_remote_refused (void)
   g_autoptr (GbkItem) text = item ("remote.txt", "text/plain", false, false);
   g_clear_pointer (&script->loc, gbk_loc_unref);
   g_clear_pointer (&text->loc, gbk_loc_unref);
-  script->loc = gbk_loc_new_remote_for_test ("ws", script_path);
-  text->loc = gbk_loc_new_remote_for_test ("ws", text_path);
-  g_autoptr (GbkLoc) remote_dir = gbk_loc_new_remote_for_test ("ws", tmp);
+  script->loc = gbk_loc_new_remote ("ws", script_path);
+  text->loc = gbk_loc_new_remote ("ws", text_path);
+  g_autoptr (GbkLoc) remote_dir = gbk_loc_new_remote ("ws", tmp);
 
   g_assert_null (gbk_open_exec_argv (config, script));
   g_autoptr (GError) e1 = nullptr;
@@ -176,14 +176,41 @@ test_remote_refused (void)
   g_autoptr (GError) e4 = nullptr;
   g_assert_false (gbk_open_action (g_ptr_array_index (config->actions, 0), items, tmp_loc, &e4));
   g_assert_error (e4, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
-  g_autoptr (GError) e5 = nullptr;
-  g_assert_false (gbk_open_terminal (config, remote_dir, &e5));
-  g_assert_error (e5, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
 
   g_usleep (G_USEC_PER_SEC / 5);   /* anything launched by mistake has had time to run */
   g_assert_false (g_file_test (marker, G_FILE_TEST_EXISTS));
   g_autofree char *opened = path_in ("remote.txt.opened");
   g_assert_false (g_file_test (opened, G_FILE_TEST_EXISTS));
+}
+
+/* A terminal on another machine: TerminalRun runs ssh to a shell there; the folder travels
+ * hex-encoded, so even a name made of shell syntax is only a name. %d is a local folder. */
+static void
+test_remote_terminal (void)
+{
+  g_autofree char *record = path_in ("ssh-args");
+  g_autoptr (GbkLoc) odd = gbk_loc_new_remote ("ws", "/srv/x';rm -rf ~;'");
+  g_autoptr (GError) error = nullptr;
+  g_assert_true (gbk_open_terminal (config, odd, &error));
+  g_assert_no_error (error);
+  g_assert_true (wait_for (record));
+  g_usleep (G_USEC_PER_SEC / 10);  /* written in one go, but let it finish */
+  g_autofree char *got = nullptr;
+  g_assert_true (g_file_get_contents (record, &got, nullptr, nullptr));
+  g_autofree char *want
+      = g_strdup_printf ("-t\n--\nws\n.cache/quoin/serve/%s/quoin-serve\n--shell-at\n%s\n",
+                         GBK_VERSION, "2f7372762f78273b726d202d7266207e3b27");
+  g_assert_cmpstr (got, ==, want);
+
+  /* Logging in once: interactive, nothing run there. */
+  g_assert_cmpint (unlink (record), ==, 0);
+  g_assert_true (gbk_open_ssh_login (config, "ws", &error));
+  g_assert_true (wait_for (record));
+  g_usleep (G_USEC_PER_SEC / 10);
+  g_autofree char *login = nullptr;
+  g_assert_true (g_file_get_contents (record, &login, nullptr, nullptr));
+  g_assert_cmpstr (login, ==, "-o\nAddKeysToAgent=yes\n--\nws\ntrue\n");
+  g_assert_false (gbk_open_ssh_login (config, "-oProxyCommand=x", &error));
 }
 
 int
@@ -215,6 +242,14 @@ main (int argc, char **argv)
       mimeapps, "[Default Applications]\ntext/plain=gbk-test-opener.desktop\n", -1, nullptr));
   g_setenv ("XDG_DATA_HOME", data, true);
   g_setenv ("XDG_CONFIG_HOME", conf_home, true);
+  /* "ssh" here records its arguments, one per line. */
+  g_autofree char *fake_ssh = path_in ("record-ssh");
+  g_autofree char *record = path_in ("ssh-args");
+  g_autofree char *fake_body
+      = g_strdup_printf ("#!/bin/sh\nprintf '%%s\\n' \"$@\" > '%s'\n", record);
+  g_assert_true (g_file_set_contents (fake_ssh, fake_body, -1, nullptr));
+  chmod (fake_ssh, 0755);
+  g_setenv ("QUOIN_SSH", fake_ssh, true);
 
   g_test_init (&argc, &argv, nullptr);
   const char conf[] = "[General]\nTerminalRun=env %c\n"
@@ -228,6 +263,7 @@ main (int argc, char **argv)
   g_test_add_func ("/open/default-app", test_default_app);
   g_test_add_func ("/open/action-and-missing-program", test_action_and_missing_program);
   g_test_add_func ("/open/remote-refused", test_remote_refused);
+  g_test_add_func ("/open/remote-terminal", test_remote_terminal);
   int status = g_test_run ();
 
   gbk_config_free (config);

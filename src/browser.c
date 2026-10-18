@@ -1,5 +1,7 @@
 #include "browser.h"
 #include "lifetime.h"
+#include "open.h"
+#include "remote.h"
 
 #define HISTORY_MAX 100
 #define PENDING_SELECT_MS 2000
@@ -12,6 +14,14 @@ struct _GbkBrowser
   GtkBox *toolbar;
   GbkPathbar *pathbar;
   GbkView *view;
+  GtkInfoBar *bar;            /* a folder on another machine that can't be reached */
+  GtkLabel *bar_label;
+  GtkWidget *login_button;
+
+  /* An address waiting for its machine's home folder (host:, host:~/x, host:rel). */
+  bool has_pending;
+  GbkAddress pending;
+  GbkConn *pending_conn;
 
   GbkLoc *loc;
   GbkDirModel *model;
@@ -64,10 +74,16 @@ gbk_browser_status (GbkBrowser *b)
     g_string_append (s, b->message);
   else if (search[0] != '\0')
     g_string_append_printf (s, "Find: %s", search);
+  else if (b->has_pending)
+    g_string_append_printf (s, "Connecting to %s…", b->pending.host);
   else if (m == nullptr)
     ;
   else if (gbk_dir_model_state (m) == GBK_DIR_ERROR)
     g_string_append_printf (s, "Can't open: %s", g_strerror (gbk_dir_model_error (m)));
+  else if (gbk_dir_model_state (m) == GBK_DIR_DISCONNECTED)
+    g_string_append_printf (s, "Disconnected from %s. Reconnecting…", gbk_loc_host (b->loc));
+  else if (gbk_dir_model_state (m) == GBK_DIR_LOADING && gbk_dir_model_connecting (m))
+    g_string_append_printf (s, "Connecting to %s…", gbk_loc_host (b->loc));
   else
     {
       size_t n_sel;
@@ -198,14 +214,61 @@ on_model_changed (GbkDirModel *m, GbkBrowser *b)
   status_changed (b);
 }
 
+/* The info bar: shown while the folder's machine can't be reached. */
+static void
+update_bar (GbkBrowser *b)
+{
+  bool down = b->model != nullptr && gbk_dir_model_state (b->model) == GBK_DIR_DISCONNECTED;
+  if (down)
+    {
+      g_autofree char *text = g_strdup_printf ("Can't reach %s: %s", gbk_loc_host (b->loc),
+                                               gbk_dir_model_conn_error (b->model));
+      gtk_label_set_text (b->bar_label, text);
+      gtk_widget_set_visible (b->login_button, gbk_dir_model_needs_login (b->model));
+    }
+  gtk_widget_set_visible (GTK_WIDGET (b->bar), down);
+}
+
+enum
+{
+  RESPONSE_RETRY = 1,
+  RESPONSE_LOGIN = 2,
+};
+
+static void
+on_bar_response (GtkInfoBar *bar G_GNUC_UNUSED, int response, GbkBrowser *b)
+{
+  if (b->model == nullptr || b->loc == nullptr || gbk_loc_is_local (b->loc))
+    return;
+  if (response == RESPONSE_LOGIN)
+    {
+      g_autoptr (GError) error = nullptr;
+      if (!gbk_open_ssh_login (b->ctx->config, gbk_loc_host (b->loc), &error))
+        gbk_browser_set_message (b, error->message);
+      return;       /* the retry comes when the window has the focus back (see window.c) */
+    }
+  if (response == RESPONSE_RETRY)
+    gbk_dir_model_reconnect (b->model);
+}
+
+void
+gbk_browser_reconnect (GbkBrowser *b)
+{
+  if (b->model != nullptr)
+    gbk_dir_model_reconnect (b->model);
+}
+
 static void
 on_model_state (GbkDirModel *m, GbkBrowser *b)
 {
   if (m != b->model)
     return;
+  update_bar (b);
   GbkDirState state = gbk_dir_model_state (m);
   if (state == GBK_DIR_READY)
     g_clear_pointer (&b->focus_on_load, g_free);   /* it never appeared: forget it */
+  if (state == GBK_DIR_READY && !gbk_loc_is_local (b->loc))
+    gbk_pathbar_refresh (b->pathbar);   /* its home folder is known now */
 
   /* The directory vanished (deleted, moved, unmounted) or never existed: walk up to the
    * nearest ancestor. Each level is another async attempt, so nothing blocks. */
@@ -242,6 +305,7 @@ set_model (GbkBrowser *b, GbkDirModel *m)
           = gbk_connect (G_OBJECT (b), m, "changed", G_CALLBACK (on_model_changed), b);
     }
   gbk_view_set_model (b->view, m);
+  update_bar (b);
 }
 
 /* Replace the current directory without touching history. */
@@ -316,6 +380,116 @@ gbk_browser_up (GbkBrowser *b)
   open_loc (b, parent, child);
 }
 
+/* ---- addresses ---- */
+
+static void
+clear_pending (GbkBrowser *b)
+{
+  if (b->has_pending)
+    gbk_address_clear (&b->pending);
+  b->has_pending = false;
+  g_clear_object (&b->pending_conn);   /* its handler checks this, so it does nothing now */
+}
+
+/* `a`, now that `home` (its machine's home folder, or nullptr) is known. */
+static void
+open_resolved (GbkBrowser *b, const GbkAddress *a, const char *host, const char *home)
+{
+  g_autoptr (GbkLoc) loc = nullptr;
+  switch (a->base)
+    {
+    case GBK_ADDRESS_ABSOLUTE:
+      loc = host != nullptr ? gbk_loc_new_remote (host, a->path) : gbk_loc_new_local (a->path);
+      break;
+    case GBK_ADDRESS_CURRENT:
+      loc = b->loc != nullptr ? gbk_loc_new_like (b->loc, a->path) : gbk_loc_new_local (a->path);
+      break;
+    case GBK_ADDRESS_HOME:
+      {
+        g_autofree char *path = g_build_filename (home, a->path, nullptr);
+        loc = host != nullptr ? gbk_loc_new_remote (host, path) : gbk_loc_new_local (path);
+        break;
+      }
+    default: gbk_fatal ("bad address base %d", (int) a->base);
+    }
+  if (loc == nullptr)
+    {
+      gbk_browser_set_message (b, "That isn't a location");
+      return;
+    }
+  gbk_browser_open (b, loc);
+}
+
+static void
+on_pending_conn (GbkConn *c, GbkBrowser *b)
+{
+  if (c != b->pending_conn)
+    return;                              /* an earlier address, since replaced */
+  if (gbk_conn_state (c) == GBK_CONN_READY)
+    {
+      GbkAddress a = b->pending;         /* moved out */
+      b->has_pending = false;
+      g_autofree char *home = g_strdup (gbk_conn_hello (c)->home);
+      g_clear_object (&b->pending_conn);
+      open_resolved (b, &a, a.host, home);
+      gbk_address_clear (&a);
+    }
+  else if (gbk_conn_state (c) == GBK_CONN_DEAD)
+    {
+      g_autofree char *msg
+          = g_strdup_printf ("Couldn't connect to %s: %s", b->pending.host, gbk_conn_error (c));
+      clear_pending (b);
+      if (b->loc == nullptr)             /* a new tab with nowhere to be: home, here */
+        {
+          g_autoptr (GbkLoc) home = gbk_loc_new_local (g_get_home_dir ());
+          gbk_browser_open (b, home);
+        }
+      gbk_browser_set_message (b, msg);
+    }
+}
+
+void
+gbk_browser_open_address (GbkBrowser *b, const GbkAddress *a)
+{
+  clear_pending (b);
+  const char *host = a->host != nullptr  ? a->host
+                     : b->loc != nullptr ? gbk_loc_host (b->loc)
+                                         : nullptr;
+  if (a->base != GBK_ADDRESS_HOME || host == nullptr)
+    {
+      open_resolved (b, a, host, g_get_home_dir ());
+      return;
+    }
+  /* Another machine's home: known once it has answered. */
+  GbkRemote *r = gbk_remote_default ();
+  g_autoptr (GError) error = nullptr;
+  g_autoptr (GbkConn) c = r != nullptr ? gbk_remote_conn (r, host, &error) : nullptr;
+  if (c == nullptr)
+    {
+      gbk_browser_set_message (b, error != nullptr ? error->message
+                                                   : "Other machines can't be reached from here");
+      return;
+    }
+  if (gbk_conn_state (c) == GBK_CONN_READY)
+    {
+      open_resolved (b, a, host, gbk_conn_hello (c)->home);
+      return;
+    }
+  b->has_pending = true;
+  b->pending = (GbkAddress) { g_strdup (host), a->base, g_strdup (a->path) };
+  b->pending_conn = g_object_ref (c);
+  gbk_connect (G_OBJECT (b), c, "state-changed", G_CALLBACK (on_pending_conn), b);
+  status_changed (b);
+}
+
+void
+gbk_browser_home (GbkBrowser *b)
+{
+  char here[] = "";
+  GbkAddress home = { nullptr, GBK_ADDRESS_HOME, here };
+  gbk_browser_open_address (b, &home);
+}
+
 GbkLoc *
 gbk_browser_loc (const GbkBrowser *b)
 {
@@ -379,9 +553,17 @@ on_pathbar_navigate (GbkPathbar *bar G_GNUC_UNUSED, GbkLoc *loc, GbkBrowser *b)
 }
 
 static void
+on_pathbar_address (GbkPathbar *bar G_GNUC_UNUSED, const GbkAddress *a, GbkBrowser *b)
+{
+  gbk_browser_open_address (b, a);
+  gtk_widget_grab_focus (GTK_WIDGET (b->view));
+}
+
+static void
 gbk_browser_dispose (GObject *o)
 {
   GbkBrowser *b = GBK_BROWSER (o);
+  clear_pending (b);
   if (b->model != nullptr)
     set_model (b, nullptr);
   G_OBJECT_CLASS (gbk_browser_parent_class)->dispose (o);
@@ -435,6 +617,22 @@ gbk_browser_new (GbkContext *ctx, bool show_hidden, GbkSortMode sort)
   gtk_widget_set_margin_bottom (GTK_WIDGET (b->toolbar), 4);
   gtk_box_pack_start (GTK_BOX (b), GTK_WIDGET (b->toolbar), false, false, 0);
   gbk_connect (G_OBJECT (b), b->pathbar, "navigate", G_CALLBACK (on_pathbar_navigate), b);
+  gbk_connect (G_OBJECT (b), b->pathbar, "navigate-address", G_CALLBACK (on_pathbar_address), b);
+
+  /* Shown while a folder's machine can't be reached. */
+  b->bar = GTK_INFO_BAR (gtk_info_bar_new ());
+  gtk_info_bar_set_message_type (b->bar, GTK_MESSAGE_WARNING);
+  b->bar_label = GTK_LABEL (gtk_label_new (""));
+  gtk_label_set_xalign (b->bar_label, 0);
+  gtk_label_set_line_wrap (b->bar_label, true);
+  gtk_container_add (GTK_CONTAINER (gtk_info_bar_get_content_area (b->bar)),
+                     GTK_WIDGET (b->bar_label));
+  b->login_button = gtk_info_bar_add_button (b->bar, "_Log in in a terminal", RESPONSE_LOGIN);
+  gtk_info_bar_add_button (b->bar, "_Retry", RESPONSE_RETRY);
+  gtk_widget_set_no_show_all (GTK_WIDGET (b->bar), true);
+  gtk_widget_show_all (gtk_info_bar_get_content_area (b->bar));
+  gtk_box_pack_start (GTK_BOX (b), GTK_WIDGET (b->bar), false, false, 0);
+  gbk_connect (G_OBJECT (b), b->bar, "response", G_CALLBACK (on_bar_response), b);
 
   GtkWidget *scroller = gtk_scrolled_window_new (nullptr, nullptr);
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller), GTK_POLICY_AUTOMATIC,

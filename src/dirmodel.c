@@ -1,6 +1,7 @@
 #include "dirmodel.h"
 #include "lifetime.h"
 #include "natsort.h"
+#include "remote.h"
 
 /* While a directory is still loading, re-sort for display at most this often (the first
  * chunk is always shown at once). Each re-sort is O(n log n) over everything so far. */
@@ -9,6 +10,8 @@
 /* Messages handled per main-loop wakeup before yielding (keeps the UI responsive while a
  * huge directory streams in). */
 #define DRAIN_BUDGET 16
+#define RETRY_FIRST_MS 1000          /* a lost connection: try again after this, */
+#define RETRY_MAX_MS 30000           /* doubling up to this */
 
 #define NO_POS UINT32_MAX
 
@@ -29,6 +32,15 @@ struct _GbkDirModel
   GbkTypeTable *types;
   GbkScanner *scanner;   /* nullptr once finished, failed, or detached */
   guint watch_id;
+
+  /* A folder on another machine: its listing comes through a connection instead. */
+  GbkRemote *remote;     /* referenced; nullptr for a local folder */
+  GbkConn *conn;         /* while watching */
+  GbkConnWatch *cwatch;
+  guint retry_id;
+  int retry_ms;
+  char *conn_error;      /* DISCONNECTED: why */
+  bool needs_login;
 
   GbkDirState state;
   int error;
@@ -319,6 +331,8 @@ stop_scanner (GbkDirModel *m)
   /* Cancel the watch before the scanner can close the fd it watches. */
   gbk_source_cancel (&m->watch_id);
   g_clear_pointer (&m->scanner, gbk_scanner_stop);
+  g_clear_pointer (&m->cwatch, gbk_conn_unwatch);
+  g_clear_object (&m->conn);
 }
 
 /* Applies one message. Returns true if entries changed. */
@@ -473,6 +487,8 @@ gbk_dir_model_dispose (GObject *object)
 {
   GbkDirModel *m = GBK_DIR_MODEL (object);
   stop_scanner (m);
+  gbk_source_cancel (&m->retry_id);
+  g_clear_object (&m->remote);
   G_OBJECT_CLASS (gbk_dir_model_parent_class)->dispose (object);
 }
 
@@ -489,6 +505,7 @@ gbk_dir_model_finalize (GObject *object)
   g_array_unref (m->touched);
   gbk_type_table_unref (m->types);
   g_clear_pointer (&m->loc, gbk_loc_unref);
+  g_free (m->conn_error);
   G_OBJECT_CLASS (gbk_dir_model_parent_class)->finalize (object);
 }
 
@@ -509,6 +526,7 @@ gbk_dir_model_class_init (GbkDirModelClass *klass)
 static void
 gbk_dir_model_init (GbkDirModel *m)
 {
+  m->retry_ms = RETRY_FIRST_MS;
   m->slots = g_array_new (false, false, sizeof (Slot));
   m->free_slots = g_array_new (false, false, sizeof (uint32_t));
   m->order = g_array_new (false, false, sizeof (uint32_t));
@@ -516,6 +534,104 @@ gbk_dir_model_init (GbkDirModel *m)
   m->index = g_hash_table_new (g_str_hash, g_str_equal);
   m->state = GBK_DIR_LOADING;
   m->sort = GBK_SORT_NAME;
+}
+
+/* ---- a folder on another machine ---- */
+
+static void start_remote (GbkDirModel *m);
+
+static bool
+retry_now (void *data)
+{
+  GbkDirModel *m = data;
+  m->retry_id = 0;
+  start_remote (m);
+  return false;
+}
+
+/* The connection died under the watch: keep the listing, say so, try again later. */
+static void
+lost (GbkDirModel *m)
+{
+  g_free (m->conn_error);
+  m->conn_error = g_strdup (m->conn != nullptr && gbk_conn_error (m->conn) != nullptr
+                                ? gbk_conn_error (m->conn)
+                                : "The connection ended");
+  m->needs_login = m->conn != nullptr && gbk_conn_needs_login (m->conn);
+  stop_scanner (m);
+  m->live = false;
+  gbk_source_cancel (&m->retry_id);
+  m->retry_id = gbk_timeout_add (G_OBJECT (m), (guint) m->retry_ms, retry_now, m);
+  m->retry_ms = MIN (m->retry_ms * 2, RETRY_MAX_MS);
+  set_state (m, GBK_DIR_DISCONNECTED);
+}
+
+static void
+on_remote_scan (GbkScanMsg *msg, void *data)
+{
+  GbkDirModel *m = data;
+  if (msg == nullptr)
+    {
+      lost (m);
+      return;
+    }
+  if (msg->type == GBK_SCAN_CHUNK && msg->last)
+    m->retry_ms = RETRY_FIRST_MS;      /* a whole listing: the connection works again */
+  begin_batch (m);
+  bool changed = false;
+  GbkDirState next = m->state;
+  handle_message (m, msg, &changed, &next);
+  finish_batch (m, changed, next);
+}
+
+static void
+start_remote (GbkDirModel *m)
+{
+  if (m->cwatch != nullptr)
+    return;
+  g_autoptr (GError) error = nullptr;
+  m->conn = gbk_remote_conn (m->remote, gbk_loc_host (m->loc), &error);
+  if (m->conn == nullptr)
+    {
+      m->state = GBK_DIR_ERROR;        /* a host gbk_host_valid() refused: can't happen */
+      m->error = EINVAL;
+      return;
+    }
+  m->cwatch = gbk_conn_watch (m->conn, gbk_loc_path (m->loc), G_OBJECT (m), on_remote_scan, m);
+}
+
+static void
+on_network_up (GbkRemote *r G_GNUC_UNUSED, GbkDirModel *m)
+{
+  gbk_dir_model_reconnect (m);
+}
+
+void
+gbk_dir_model_reconnect (GbkDirModel *m)
+{
+  if (m->state != GBK_DIR_DISCONNECTED)
+    return;
+  gbk_source_cancel (&m->retry_id);
+  m->retry_ms = RETRY_FIRST_MS;
+  start_remote (m);
+}
+
+const char *
+gbk_dir_model_conn_error (const GbkDirModel *m)
+{
+  return m->state == GBK_DIR_DISCONNECTED ? m->conn_error : nullptr;
+}
+
+bool
+gbk_dir_model_needs_login (const GbkDirModel *m)
+{
+  return m->state == GBK_DIR_DISCONNECTED && m->needs_login;
+}
+
+bool
+gbk_dir_model_connecting (const GbkDirModel *m)
+{
+  return m->conn != nullptr && gbk_conn_state (m->conn) == GBK_CONN_CONNECTING;
 }
 
 GbkDirModel *
@@ -534,8 +650,16 @@ gbk_dir_model_new (GbkLoc *loc, GbkTypeTable *types)
   const char *path;
   if (!gbk_loc_as_local (loc, &path))
     {
-      m->state = GBK_DIR_ERROR;      /* remote folders aren't readable yet */
-      m->error = EREMOTE;
+      GbkRemote *r = gbk_remote_default ();
+      if (r == nullptr)
+        {
+          m->state = GBK_DIR_ERROR;    /* no way to reach other machines in this process */
+          m->error = EREMOTE;
+          return m;
+        }
+      m->remote = g_object_ref (r);
+      gbk_connect (G_OBJECT (m), r, "network-up", G_CALLBACK (on_network_up), m);
+      start_remote (m);
       return m;
     }
   m->scanner = gbk_scanner_start (path, types);

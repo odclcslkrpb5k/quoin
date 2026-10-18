@@ -16,6 +16,8 @@ void gbk_window_install_accels (GtkApplication *app);
 /* Navigate the active tab to `loc`, recording history. */
 void gbk_window_open (GbkWindow *w, GbkLoc *loc);
 void gbk_window_new_tab (GbkWindow *w, GbkLoc *loc);
+/* What a person typed (see gbk_browser_open_address). */
+void gbk_window_open_address (GbkWindow *w, const GbkAddress *a);
 GbkLoc *gbk_window_loc (GbkWindow *w);
 GbkView *gbk_window_view (GbkWindow *w);
 const char *gbk_window_status (GbkWindow *w);

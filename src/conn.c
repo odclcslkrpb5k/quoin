@@ -40,18 +40,6 @@ gbk_conn_local_machine_id (void)
   return strlen (raw) <= 64 ? g_steal_pointer (&raw) : g_strdup ("");
 }
 
-bool
-gbk_conn_host_valid (const char *host)
-{
-  size_t len = strlen (host);
-  if (len == 0 || len > 255 || host[0] == '-')
-    return false;
-  for (size_t i = 0; i < len; i++)
-    if (!g_ascii_isalnum (host[i]) && strchr ("._@:%+-[]", host[i]) == nullptr)
-      return false;
-  return true;
-}
-
 /* ---- shared between the main thread and the I/O thread ---- */
 
 typedef enum
@@ -170,10 +158,10 @@ set_nonblocking (int fd)
     fcntl (fd, F_SETFL, fl | O_NONBLOCK);
 }
 
-static char **
-ssh_argv (const char *host, const char *remote_cmd)
+/* The ssh command: QUOIN_SSH split into words (no shell runs it), or "ssh". */
+static void
+add_ssh (GStrvBuilder *b)
 {
-  g_autoptr (GStrvBuilder) b = g_strv_builder_new ();
   g_auto (GStrv) custom = nullptr;
   const char *env = g_getenv ("QUOIN_SSH");
   if (env != nullptr && g_shell_parse_argv (env, nullptr, &custom, nullptr))
@@ -181,6 +169,50 @@ ssh_argv (const char *host, const char *remote_cmd)
       g_strv_builder_add (b, custom[i]);
   else
     g_strv_builder_add (b, "ssh");
+}
+
+static char *
+remote_serve (void)
+{
+  return g_strdup_printf (".cache/quoin/serve/%s/quoin-serve", GBK_VERSION);
+}
+
+char **
+gbk_conn_shell_argv (const char *host, const char *path)
+{
+  if (!gbk_host_valid (host))
+    return nullptr;
+  g_autoptr (GStrvBuilder) b = g_strv_builder_new ();
+  add_ssh (b);
+  GString *hex = g_string_new ("");
+  for (const char *c = path; *c != '\0'; c++)
+    g_string_append_printf (hex, "%02x", (unsigned) (unsigned char) *c);
+  g_autofree char *serve = remote_serve ();
+  g_autofree char *hex_s = g_string_free (hex, false);
+  const char *const tail[] = { "-t", "--", host, serve, "--shell-at", hex_s, nullptr };
+  for (size_t i = 0; tail[i] != nullptr; i++)
+    g_strv_builder_add (b, tail[i]);
+  return g_strv_builder_end (b);
+}
+
+char **
+gbk_conn_login_argv (const char *host)
+{
+  if (!gbk_host_valid (host))
+    return nullptr;
+  g_autoptr (GStrvBuilder) b = g_strv_builder_new ();
+  add_ssh (b);
+  const char *const tail[] = { "-o", "AddKeysToAgent=yes", "--", host, "true", nullptr };
+  for (size_t i = 0; tail[i] != nullptr; i++)
+    g_strv_builder_add (b, tail[i]);
+  return g_strv_builder_end (b);
+}
+
+static char **
+ssh_argv (const char *host, const char *remote_cmd)
+{
+  g_autoptr (GStrvBuilder) b = g_strv_builder_new ();
+  add_ssh (b);
   /* Ours whatever ~/.ssh/config says (docs/remote-plan.md, section 5): no terminal, no
    * escape character, no prompts, no sharing a master connection that may be dead, no
    * forwarding (nothing exposed on a long-lived background session), no RemoteCommand
@@ -367,7 +399,8 @@ typedef enum
 static char *
 remote_dir (void)
 {
-  return g_strdup_printf (".cache/quoin/serve/%s", GBK_VERSION);
+  g_autofree char *serve = remote_serve ();
+  return g_path_get_dirname (serve);
 }
 
 /* Read the magic line and HELLO from a just-started ssh. Bytes after them stay in `in`. */
@@ -788,8 +821,7 @@ io_main (void *data)
   bool connected = false, needs_login = false;
   for (int attempt = 0; attempt < 2 && !connected && error == nullptr; attempt++)
     {
-      g_autofree char *dir = remote_dir ();
-      g_autofree char *cmd = g_strconcat (dir, "/quoin-serve", nullptr);
+      g_autofree char *cmd = remote_serve ();
       if (!ssh_start (s, cmd, &l.ssh, &error))
         break;
       HelloResult r = await_hello (s, &l.ssh, deadline, l.in, &hello, &error);
@@ -1143,7 +1175,7 @@ gbk_conn_info (GbkConn *c, const char *path, GObject *owner, GbkConnInfoFn fn, v
 GbkConn *
 gbk_conn_new (const char *host, GbkTypeTable *types, GError **error)
 {
-  if (!gbk_conn_host_valid (host))
+  if (!gbk_host_valid (host))
     {
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
                    "“%s” isn't a machine name ssh would take", host);

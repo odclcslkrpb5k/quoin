@@ -264,6 +264,19 @@ on_sort_button_clicked (GtkButton *button G_GNUC_UNUSED, GbkWindow *w)
   set_sort (w, sorts[(sort_index (w->sort) + 1) % G_N_ELEMENTS (sorts)].mode);
 }
 
+/* ---- what works on another machine ---- */
+
+/* Shortcuts ask what the menu asks (gbk_menu_works_remote): on another machine, browsing
+ * only for now. True, with a message, if `kind` isn't possible in tab `b`. */
+static bool
+refused_remote (GbkBrowser *b, GbkMenuKind kind, bool on_file)
+{
+  if (gbk_loc_is_local (gbk_browser_loc (b)) || gbk_menu_works_remote (kind, on_file))
+    return false;
+  gbk_browser_set_message (b, "Not possible on another machine yet");
+  return true;
+}
+
 /* ---- opening things ---- */
 
 /* The selection as owned GbkItems: safe to keep while the model changes underneath. */
@@ -311,6 +324,12 @@ open_items (GbkWindow *w, GbkBrowser *b, GPtrArray *items)
     {
       gbk_browser_open (b, ((GbkItem *) g_ptr_array_index (items, 0))->loc);
       return;
+    }
+  for (guint i = 0; i < items->len; i++)
+    {
+      const GbkItem *it = g_ptr_array_index (items, i);
+      if (!it->is_dir && refused_remote (b, GBK_MENU_OPEN, true))
+        return;
     }
   g_autoptr (GPtrArray) by_default = g_ptr_array_new ();
   for (guint i = 0; i < items->len; i++)
@@ -939,6 +958,8 @@ ask_drop (GbkWindow *w, GbkBrowser *b, GPtrArray *locs, GbkLoc *dest, GtkWidget 
       gbk_browser_set_message (b, "Already in this folder");
       return;
     }
+  if (refused_remote (b, GBK_MENU_PASTE, true))
+    return;
   GtkWidget *menu = gtk_menu_new ();
   g_object_set_data_full (G_OBJECT (menu), KEY_DROP_LOCS, g_ptr_array_ref (locs),
                           (GDestroyNotify) g_ptr_array_unref);
@@ -1023,8 +1044,7 @@ ACTION (action_up)
 }
 ACTION (action_home)
 {
-  g_autoptr (GbkLoc) home = gbk_loc_new_local (g_get_home_dir ());
-  gbk_browser_open (active (data), home);
+  gbk_browser_home (active (data));    /* the home of the machine being looked at */
 }
 
 /* ---- devices ---- */
@@ -1083,12 +1103,24 @@ device_removed (GObject *owner, const char *path G_GNUC_UNUSED, const GError *er
 typedef bool (*DeviceOp) (GbkDevices *d, const char *id, GMountOperation *op, GObject *owner,
                           GbkDeviceDone done);
 
+/* GTK 3's GtkMountOperation holds a reference to its parent window, and if the window is
+ * destroyed first its own "destroy" handler forgets the pointer without dropping the
+ * reference: the window (and everything it holds) is never freed. Detaching the parent
+ * ourselves releases it properly; connected before set_parent, this runs before GTK's. */
+static void
+on_mount_op_parent_destroyed (GtkWidget *parent G_GNUC_UNUSED, GtkMountOperation *op)
+{
+  gtk_mount_operation_set_parent (op, nullptr);
+}
+
 /* Ids that name no device (an item from a list that has since changed, or a stray D-Bus
  * activation) do nothing. */
 static void
 device_action (GbkWindow *w, GVariant *param, DeviceOp fn, GbkDeviceDone done)
 {
-  g_autoptr (GMountOperation) op = gtk_mount_operation_new (GTK_WINDOW (w));
+  g_autoptr (GMountOperation) op = gtk_mount_operation_new (nullptr);
+  gbk_connect (G_OBJECT (op), w, "destroy", G_CALLBACK (on_mount_op_parent_destroyed), op);
+  gtk_mount_operation_set_parent (GTK_MOUNT_OPERATION (op), GTK_WINDOW (w));
   (void) fn (w->devices, g_variant_get_string (param, nullptr), op, G_OBJECT (w), done);
 }
 
@@ -1121,35 +1153,47 @@ ACTION (action_terminal)
 
 ACTION (action_copy)
 {
+  if (refused_remote (active (data), GBK_MENU_COPY, true))
+    return;
   g_autoptr (GPtrArray) items = snapshot_selection (data, active (data));
   copy_items (data, active (data), items, false);
 }
 
 ACTION (action_cut)
 {
+  if (refused_remote (active (data), GBK_MENU_CUT, true))
+    return;
   g_autoptr (GPtrArray) items = snapshot_selection (data, active (data));
   copy_items (data, active (data), items, true);
 }
 
 ACTION (action_paste)
 {
+  if (refused_remote (active (data), GBK_MENU_PASTE, true))
+    return;
   paste_into (data, gbk_browser_loc (active (data)));
 }
 
 ACTION (action_trash)
 {
+  if (refused_remote (active (data), GBK_MENU_TRASH, true))
+    return;
   g_autoptr (GPtrArray) items = snapshot_selection (data, active (data));
   trash_items (data, items);
 }
 
 ACTION (action_delete)
 {
+  if (refused_remote (active (data), GBK_MENU_DELETE, true))
+    return;
   g_autoptr (GPtrArray) items = snapshot_selection (data, active (data));
   delete_items (data, items);
 }
 
 ACTION (action_rename)
 {
+  if (refused_remote (active (data), GBK_MENU_RENAME, true))
+    return;
   g_autoptr (GPtrArray) items = snapshot_selection (data, active (data));
   if (items->len == 1)
     rename_item (data, g_ptr_array_index (items, 0));
@@ -1202,6 +1246,19 @@ ACTION (action_prev_tab)
 {
   gtk_notebook_prev_page (((GbkWindow *) data)->tabs);
 }
+static void
+action_network (GSimpleAction *a G_GNUC_UNUSED, GVariant *param, void *data)
+{
+  /* Reachable from outside the process (D-Bus): a name ssh would misread does nothing. */
+  const char *host = g_variant_get_string (param, nullptr);
+  if (!gbk_host_valid (host))
+    return;
+  g_autofree char *h = g_strdup (host);
+  char empty[] = "";
+  GbkAddress home = { h, GBK_ADDRESS_HOME, empty };
+  gbk_browser_open_address (active (data), &home);
+}
+
 ACTION (action_location)
 {
   gbk_pathbar_edit (gbk_browser_pathbar (active (data)));
@@ -1244,6 +1301,7 @@ static const GActionEntry actions[] = {
   { .name = "prev-tab", .activate = action_prev_tab },
   { .name = "location", .activate = action_location },
   { .name = "device-open", .parameter_type = "s", .activate = action_device_open },
+  { .name = "network", .parameter_type = "s", .activate = action_network },
   { .name = "device-unmount", .parameter_type = "s", .activate = action_device_unmount },
   { .name = "device-eject", .parameter_type = "s", .activate = action_device_eject },
   /* Stateful: no activate handler means a boolean toggles / a string is set. */
@@ -1292,6 +1350,20 @@ gbk_window_install_accels (GtkApplication *app)
  * instead of editing the text. So while an editable has focus, keys go to it and window
  * shortcuts don't run at all, even for keys the entry ignores (F2 must not open a rename
  * dialog for the selected file while you type a path). Escape leaves the entry. */
+/* Coming back to the window (after logging in in a terminal, after sleep): a folder whose
+ * machine couldn't be reached tries again now. */
+static gboolean
+gbk_window_focus_in (GtkWidget *widget, GdkEventFocus *ev)
+{
+  GbkWindow *w = GBK_WINDOW (widget);
+  /* Focus can come and go while the window is being built or torn down: only a window
+   * with a tab in it has anything to retry. */
+  if (!gtk_widget_in_destruction (widget) && w->tabs != nullptr
+      && gtk_notebook_get_current_page (w->tabs) >= 0)
+    gbk_browser_reconnect (active (w));
+  return GTK_WIDGET_CLASS (gbk_window_parent_class)->focus_in_event (widget, ev);
+}
+
 static gboolean
 gbk_window_key_press (GtkWidget *widget, GdkEventKey *ev)
 {
@@ -1362,11 +1434,51 @@ gbk_window_class_init (GbkWindowClass *klass)
   G_OBJECT_CLASS (klass)->dispose = gbk_window_dispose;
   G_OBJECT_CLASS (klass)->finalize = gbk_window_finalize;
   GTK_WIDGET_CLASS (klass)->key_press_event = gbk_window_key_press;
+  GTK_WIDGET_CLASS (klass)->focus_in_event = gbk_window_focus_in;
 }
 
 static void
 gbk_window_init (GbkWindow *w G_GNUC_UNUSED)
 {
+}
+
+/* Machines to open: the hosts in ~/.ssh/config, then any this process has connected to.
+ * Each opens its home folder in the current tab. */
+static GMenuModel *
+network_menu (GbkWindow *w)
+{
+  GMenu *menu = g_menu_new ();
+  g_autofree char *path = g_build_filename (g_get_home_dir (), ".ssh", "config", nullptr);
+  g_autofree char *text = nullptr;
+  gsize len = 0;
+  g_autoptr (GPtrArray) hosts = g_file_get_contents (path, &text, &len, nullptr)
+                                    ? gbk_ssh_config_hosts (text, len)
+                                    : g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (GPtrArray) used = gbk_remote_hosts (w->ctx->remote);
+  for (guint i = 0; i < used->len; i++)
+    {
+      const char *h = g_ptr_array_index (used, i);
+      bool seen = false;
+      for (guint k = 0; k < hosts->len && !seen; k++)
+        seen = g_str_equal (g_ptr_array_index (hosts, k), h);
+      if (!seen)
+        g_ptr_array_add (hosts, g_strdup (h));
+    }
+  for (guint i = 0; i < hosts->len; i++)
+    {
+      const char *h = g_ptr_array_index (hosts, i);
+      g_autoptr (GMenuItem) item = g_menu_item_new (h, nullptr);
+      g_menu_item_set_action_and_target_value (item, "win.network", g_variant_new_string (h));
+      g_menu_append_item (menu, item);
+    }
+  if (hosts->len == 0)
+    {
+      g_autoptr (GMenuItem) none
+          = g_menu_item_new ("Type host:folder in the location bar", nullptr);
+      g_menu_item_set_action_and_target_value (none, "win.location", nullptr);
+      g_menu_append_item (menu, none);
+    }
+  return G_MENU_MODEL (menu);
 }
 
 static GtkWidget *
@@ -1377,6 +1489,8 @@ app_menu_button (GbkWindow *w)
   g_menu_append (s1, "New Tab", "win.new-tab");
   g_menu_append (s1, "New Window", "win.new-window");
   g_menu_append_submenu (s1, "Devices", gbk_devices_menu (w->devices));
+  g_autoptr (GMenuModel) network = network_menu (w);
+  g_menu_append_submenu (s1, "Network", network);
   g_menu_append_section (menu, nullptr, G_MENU_MODEL (s1));
   g_autoptr (GMenu) s2 = g_menu_new ();
   g_menu_append (s2, "Show Hidden Files", "win.show-hidden");
@@ -1482,6 +1596,12 @@ void
 gbk_window_open (GbkWindow *w, GbkLoc *loc)
 {
   gbk_browser_open (active (w), loc);
+}
+
+void
+gbk_window_open_address (GbkWindow *w, const GbkAddress *a)
+{
+  gbk_browser_open_address (active (w), a);
 }
 
 void

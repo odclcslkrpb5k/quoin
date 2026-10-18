@@ -9,13 +9,17 @@
 G_DECLARE_FINAL_TYPE (GbkPathbar, gbk_pathbar, GBK, PATHBAR, GtkBox)
 
 /* Signals (each GbkLoc is borrowed for the emission; ref it to keep it):
- *   "navigate"     (GbkLoc *loc)   a button was clicked or a location was entered
+ *   "navigate"     (GbkLoc *loc)   a button was clicked
+ *   "navigate-address" (const GbkAddress *a)   a location was typed (see loc.h); the
+ *                  browser resolves it (another machine's home may need a connection)
  *   "context-menu" (GbkLoc *loc, GdkEvent *trigger)   a button was right-clicked
  *   "drop"         (GbkLoc *loc, GPtrArray *locs, GdkEvent *trigger)   local files were
  *                  dropped on the button for `loc`; nothing has been done with them yet */
 
 GtkWidget *gbk_pathbar_new (void);
 void gbk_pathbar_set_loc (GbkPathbar *bar, GbkLoc *loc);
+/* Rebuild the buttons (another machine's home became known). */
+void gbk_pathbar_refresh (GbkPathbar *bar);
 /* Switch to the text entry, focused, with the current path selected. */
 void gbk_pathbar_edit (GbkPathbar *bar);
 bool gbk_pathbar_editing (GbkPathbar *bar);

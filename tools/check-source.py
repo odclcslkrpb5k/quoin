@@ -278,7 +278,11 @@ LOC_PATH_FILES = {
     "src/loc.c": "defines it",
     "src/loc.h": "declares it",
     "src/pathbar.c": "splits the shown location into buttons and builds their locations",
+    "src/dirmodel.c": "asks the other machine to watch its own folder (gbk_conn_watch)",
+    "src/open.c": "hands another machine's folder to ssh, hex-encoded (gbk_conn_shell_argv)",
+    "src/props.c": "asks the other machine for its own file's details (gbk_conn_info)",
     "tests/test-loc.c": "tests it",
+    "tests/test-remotewin.c": "checks which folder on the other machine a window shows",
 }
 
 

@@ -1,5 +1,6 @@
 #include "props.h"
 #include "job.h"
+#include "remote.h"
 #include "jobui.h"
 #include "lifetime.h"
 
@@ -149,9 +150,12 @@ show_details (GbkProps *p, const GbkFileInfo *info)
                                     (p->loaded_rwx & (1u << (8 - (who * 3 + what)))) != 0);
   p->updating = false;
   uid_t me = geteuid ();
-  bool may_change = !info->dangling && (me == 0 || me == info->uid);
+  bool remote = !gbk_loc_is_local (p->loc);
+  bool may_change = !remote && !info->dangling && (me == 0 || me == info->uid);
   gtk_widget_set_sensitive (p->perm_box, may_change);
-  if (info->dangling)
+  if (remote)
+    gtk_label_set_text (p->perm_note, "Changing these on another machine comes later.");
+  else if (info->dangling)
     gtk_label_set_text (p->perm_note, "A broken link has no permissions.");
   else if (!may_change)
     {
@@ -166,16 +170,32 @@ show_details (GbkProps *p, const GbkFileInfo *info)
 }
 
 static void
+show_error (GbkProps *p, const GError *error)
+{
+  g_autofree char *text = g_strdup_printf ("Can't read details: %s", error->message);
+  gtk_label_set_text (p->status, text);
+  gtk_widget_set_visible (GTK_WIDGET (p->status), true);
+}
+
+static void
 on_info_finished (GbkJob *job, GError *error, GbkProps *p)
 {
   if (error != nullptr)
-    {
-      g_autofree char *text = g_strdup_printf ("Can't read details: %s", error->message);
-      gtk_label_set_text (p->status, text);
-      gtk_widget_set_visible (GTK_WIDGET (p->status), true);
-      return;
-    }
-  show_details (p, gbk_job_info (job));
+    show_error (p, error);
+  else
+    show_details (p, gbk_job_info (job));
+}
+
+/* Details of a file on another machine, read there (only while this window lives). */
+static void
+on_remote_info (GbkFileInfo *info, const GError *error, void *data)
+{
+  GbkProps *p = data;
+  if (info == nullptr)
+    show_error (p, error);
+  else
+    show_details (p, info);
+  gbk_file_info_free (info);
 }
 
 static void
@@ -183,6 +203,23 @@ read_info (GbkProps *p)
 {
   p->loaded = false;
   gtk_widget_set_sensitive (p->apply, false);
+  if (!gbk_loc_is_local (p->loc))
+    {
+      GbkRemote *r = gbk_remote_default ();
+      g_autoptr (GError) error = nullptr;
+      g_autoptr (GbkConn) c
+          = r != nullptr ? gbk_remote_conn (r, gbk_loc_host (p->loc), &error) : nullptr;
+      if (c == nullptr)
+        {
+          if (error == nullptr)
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                 "Other machines can't be reached from here");
+          show_error (p, error);
+          return;
+        }
+      gbk_conn_info (c, gbk_loc_path (p->loc), G_OBJECT (p), on_remote_info, p);
+      return;
+    }
   g_autoptr (GbkJob) job = gbk_job_new_info (p->loc);
   gbk_connect (G_OBJECT (p), job, "finished", G_CALLBACK (on_info_finished), p);
   gbk_job_start (job);         /* a running job keeps itself alive */

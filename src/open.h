@@ -70,5 +70,9 @@ bool gbk_open_can_execute (const GbkItem *it);
 [[nodiscard]] bool gbk_open_action (const GbkAction *a, GPtrArray *items, const GbkLoc *cwd,
                                     GError **error);
 
-/* F4 / "Open Terminal Here". */
+/* F4 / "Open Terminal Here". On another machine: the configured TerminalRun runs ssh to a
+ * shell in that folder there. */
 [[nodiscard]] bool gbk_open_terminal (const GbkConfig *config, const GbkLoc *dir, GError **error);
+/* "Log in in a terminal": TerminalRun runs ssh to `host` once, interactively, so a person
+ * can unlock a key or accept a host key; connections after it work by themselves. */
+[[nodiscard]] bool gbk_open_ssh_login (const GbkConfig *config, const char *host, GError **error);

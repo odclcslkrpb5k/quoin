@@ -5,6 +5,22 @@
 #define NM_STATE_CONNECTED_GLOBAL 70u
 
 static bool test_session_bus;
+static GbkRemote *default_remote;
+
+void
+gbk_remote_set_default (GbkRemote *r)
+{
+  if (r != nullptr)
+    g_object_ref (r);
+  g_clear_object (&default_remote);
+  default_remote = r;
+}
+
+GbkRemote *
+gbk_remote_default (void)
+{
+  return default_remote;
+}
 static int test_check_ms, test_idle_ms;
 
 void
@@ -49,6 +65,59 @@ gbk_remote_conn (GbkRemote *r, const char *host, GError **error)
     return nullptr;
   g_hash_table_replace (r->conns, g_strdup (host), c);
   return g_object_ref (c);
+}
+
+GPtrArray *
+gbk_remote_hosts (GbkRemote *r)
+{
+  GPtrArray *hosts = g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (GList) keys = g_hash_table_get_keys (r->conns);
+  keys = g_list_sort (keys, (GCompareFunc) g_strcmp0);
+  for (GList *l = keys; l != nullptr; l = l->next)
+    g_ptr_array_add (hosts, g_strdup (l->data));
+  return hosts;
+}
+
+GPtrArray *
+gbk_ssh_config_hosts (const char *text, size_t len)
+{
+  GPtrArray *hosts = g_ptr_array_new_with_free_func (g_free);
+  g_autofree char *copy = g_strndup (text, len);
+  g_auto (GStrv) lines = g_strsplit (copy, "\n", -1);
+  for (size_t i = 0; lines[i] != nullptr; i++)
+    {
+      /* "Host a b c" or "Host=a b", keyword in any case; the rest of the file is ssh's. */
+      const char *l = lines[i];
+      while (*l == ' ' || *l == '\t')
+        l++;
+      if (g_ascii_strncasecmp (l, "host", 4) != 0 || (l[4] != ' ' && l[4] != '\t' && l[4] != '='))
+        continue;
+      /* "Host", then blanks, at most one '=' and blanks, then the names. */
+      l += 4;
+      l += strspn (l, " \t");
+      if (*l == '=')
+        l++;
+      g_auto (GStrv) words = g_strsplit_set (l, " \t\r", -1);
+      for (size_t w = 0; words[w] != nullptr; w++)
+        {
+          const char *h = words[w];
+          if (h[0] == '#')
+            break;                       /* a comment to the end of the line */
+          bool pattern = strpbrk (h, "*?!") != nullptr;
+          bool seen = false;
+          for (guint k = 0; k < hosts->len && !seen; k++)
+            seen = g_str_equal (g_ptr_array_index (hosts, k), h);
+          if (h[0] != '\0' && !pattern && !seen && gbk_host_valid (h))
+            g_ptr_array_add (hosts, g_strdup (h));
+        }
+    }
+  return hosts;
+}
+
+GbkConn *
+gbk_remote_peek (GbkRemote *r, const char *host)
+{
+  return g_hash_table_lookup (r->conns, host);
 }
 
 void
