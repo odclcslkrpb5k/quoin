@@ -57,7 +57,7 @@ all_dirs (const GPtrArray *items)
 }
 
 bool
-gbk_menu_works_remote (GbkMenuKind kind, bool on_file)
+gbk_menu_works_remote (GbkMenuKind kind)
 {
   switch (kind)
     {
@@ -70,14 +70,14 @@ gbk_menu_works_remote (GbkMenuKind kind, bool on_file)
     case GBK_MENU_SORT_NAME:
     case GBK_MENU_SORT_MTIME:
     case GBK_MENU_SORT_SIZE:
-    case GBK_MENU_SHOW_HIDDEN: return true;
-    case GBK_MENU_OPEN: return !on_file;          /* entering a folder; opening files: next */
+    case GBK_MENU_SHOW_HIDDEN:
+    case GBK_MENU_OPEN:        /* files: a read-only copy (fetch.h) */
     case GBK_MENU_OPEN_WITH:
+    case GBK_MENU_COPY: return true;   /* pasted here, it copies from there */
     case GBK_MENU_EXECUTE:
     case GBK_MENU_EXECUTE_TERMINAL:
     case GBK_MENU_ACTION:
     case GBK_MENU_CUT:
-    case GBK_MENU_COPY:
     case GBK_MENU_PASTE:
     case GBK_MENU_PASTE_INTO:
     case GBK_MENU_TRASH:
@@ -101,14 +101,13 @@ any_remote (const GPtrArray *items)
 
 /* Keep what works on another machine; then no separator first, last or twice in a row. */
 static void
-keep_remote (GArray *entries, const GPtrArray *items)
+keep_remote (GArray *entries)
 {
-  bool files = !all_dirs (items);
   GArray *kept = g_array_new (false, false, sizeof (GbkMenuEntry));
   for (guint i = 0; i < entries->len; i++)
     {
       const GbkMenuEntry *e = &g_array_index (entries, GbkMenuEntry, i);
-      if (gbk_menu_works_remote (e->kind, files))
+      if (gbk_menu_works_remote (e->kind))
         add (kept, e->kind, e->action);
     }
   if (kept->len > 0 && g_array_index (kept, GbkMenuEntry, kept->len - 1).kind == GBK_MENU_SEPARATOR)
@@ -210,6 +209,6 @@ gbk_menu_entries (const GbkConfig *config, GPtrArray *items, GbkMenuTarget targe
   if (out->len > 0 && g_array_index (out, GbkMenuEntry, out->len - 1).kind == GBK_MENU_SEPARATOR)
     g_array_set_size (out, out->len - 1);
   if (any_remote (items))
-    keep_remote (out, items);
+    keep_remote (out);
   return out;
 }

@@ -48,11 +48,40 @@ test_foreign (void)
   g_assert_cmpstr (g_ptr_array_index (p, 1), ==, "/also ok");
 }
 
+/* Between Quoin windows: locations on any machine, names with any bytes, and nothing a
+ * hostile clipboard owner could slip in (a host that's an ssh option, a NUL, a relative
+ * path) gets through. */
+static void
+test_locations (void)
+{
+  g_autoptr (GPtrArray) locs = gbk_loc_array_new ();
+  g_ptr_array_add (locs, gbk_loc_new_local ("/home/u/a b\tc\nd%"));
+  g_ptr_array_add (locs, gbk_loc_new_remote ("ws1", "/srv/x"));
+  g_ptr_array_add (locs, gbk_loc_new_remote ("[::1]", "/caf\xe9"));
+  g_autofree char *text = gbk_clip_format_locs (locs, true);
+  bool cut = false;
+  g_autoptr (GPtrArray) back = gbk_clip_parse_locs (text, strlen (text), &cut);
+  g_assert_true (cut);
+  g_assert_cmpuint (back->len, ==, 3);
+  for (guint i = 0; i < 3; i++)
+    g_assert_true (gbk_loc_equal (g_ptr_array_index (locs, i), g_ptr_array_index (back, i)));
+
+  const char hostile[] = "copy\n-oProxyCommand=x\t/a\nws1\t/b%00c\nws1\trelative\n\t/ok\nnotab\n";
+  g_autoptr (GPtrArray) got = gbk_clip_parse_locs (hostile, strlen (hostile), &cut);
+  g_assert_false (cut);
+  g_assert_cmpuint (got->len, ==, 1);
+  g_assert_cmpstr (gbk_loc_path (g_ptr_array_index (got, 0)), ==, "/ok");
+  g_assert_true (gbk_loc_is_local (g_ptr_array_index (got, 0)));
+  g_autoptr (GPtrArray) none = gbk_clip_parse_locs ("paste\n\t/a", 9, &cut);
+  g_assert_cmpuint (none->len, ==, 0);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, nullptr);
   g_test_add_func ("/clip/round-trip", test_round_trip);
   g_test_add_func ("/clip/foreign", test_foreign);
+  g_test_add_func ("/clip/locations", test_locations);
   return g_test_run ();
 }

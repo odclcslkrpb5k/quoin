@@ -362,6 +362,201 @@ test_owner_gone (void)
   g_assert_true (wait_until (no_conns, nullptr, 10000));
 }
 
+/* ---- copying from the other machine (a worker thread's view: blocking calls) ---- */
+
+typedef struct
+{
+  int conflicts;
+  GbkChoice answer;
+  int errors;
+  int progress_calls;
+  int cancel_after;        /* >0: cancelled after this many progress calls */
+  bool kill_server;        /* at cancel_after, kill the server instead */
+  bool cancelled;
+} Hooks;
+
+static GbkChoice
+h_conflict (const char *src G_GNUC_UNUSED, const char *dst G_GNUC_UNUSED,
+            bool dst_is_dir G_GNUC_UNUSED, bool *all G_GNUC_UNUSED, void *data)
+{
+  Hooks *h = data;
+  h->conflicts++;
+  return h->answer;
+}
+
+static GbkChoice
+h_error (const char *path G_GNUC_UNUSED, const GError *error, void *data)
+{
+  Hooks *h = data;
+  h->errors++;
+  g_test_message ("copy error: %s", error->message);
+  return GBK_CHOICE_SKIP;
+}
+
+static void
+h_progress (uint64_t done G_GNUC_UNUSED, uint64_t total G_GNUC_UNUSED,
+            const char *current G_GNUC_UNUSED, void *data)
+{
+  Hooks *h = data;
+  h->progress_calls++;
+  if (h->cancel_after > 0 && h->progress_calls == h->cancel_after)
+    {
+      if (h->kill_server)
+        kill (server_pid (), SIGKILL);
+      else
+        h->cancelled = true;
+    }
+}
+
+static bool
+h_cancelled (void *data)
+{
+  return ((const Hooks *) data)->cancelled;
+}
+
+[[nodiscard]] static bool
+run_copy (GbkConn *c, const char *src_rel, const char *dst_rel, Hooks *h, GPtrArray *created,
+          GError **error)
+{
+  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, h };
+  g_autoptr (GPtrArray) srcs = g_ptr_array_new_with_free_func (g_free);
+  g_ptr_array_add (srcs, g_build_filename (home, src_rel, nullptr));
+  g_autofree char *dst = g_build_filename (home, dst_rel, nullptr);
+  g_mkdir_with_parents (dst, 0755);
+  g_autoptr (GbkSource) source = gbk_conn_source (c);
+  return gbk_ops_run_from (source, GBK_OP_COPY, srcs, dst, &hooks, created, error);
+}
+
+static void
+assert_same_file (const char *a_rel, const char *b_rel)
+{
+  g_autofree char *a = g_build_filename (home, a_rel, nullptr);
+  g_autofree char *b = g_build_filename (home, b_rel, nullptr);
+  g_autofree char *ad = nullptr, *bd = nullptr;
+  gsize al, bl;
+  g_assert_true (g_file_get_contents (a, &ad, &al, nullptr));
+  g_assert_true (g_file_get_contents (b, &bd, &bl, nullptr));
+  g_assert_cmpmem (ad, al, bd, bl);
+}
+
+static bool
+temp_left (const char *dir_rel)
+{
+  g_autofree char *dir = g_build_filename (home, dir_rel, nullptr);
+  g_autoptr (GDir) d = g_dir_open (dir, 0, nullptr);
+  const char *name;
+  while (d != nullptr && (name = g_dir_read_name (d)) != nullptr)
+    if (g_str_has_prefix (name, ".gbk-tmp-"))
+      return true;
+  return false;
+}
+
+static void
+put_big (const char *rel, size_t size)
+{
+  g_autofree char *data = g_malloc (size);
+  for (size_t i = 0; i < size; i++)
+    data[i] = (char) (i * 7 + i / 4096);
+  g_autofree char *p = g_build_filename (home, rel, nullptr);
+  g_autofree char *d = g_path_get_dirname (p);
+  g_mkdir_with_parents (d, 0755);
+  g_assert_true (g_file_set_contents (p, data, (gssize) size, nullptr));
+}
+
+static void
+test_copy_from_remote (void)
+{
+  put_big ("tree/big", 3u << 20);               /* more than the read window: credit flows */
+  put ("tree/small", "small");
+  put ("tree/empty", "");
+  put ("tree/sub/inner", "inner");
+  put ("tree/hl1", "linked");
+  put ("tree/suid", "#!/bin/sh\n");
+  g_autofree char *p_hl1 = g_build_filename (home, "tree", "hl1", nullptr);
+  g_autofree char *p_hl2 = g_build_filename (home, "tree", "hl2", nullptr);
+  g_assert_cmpint (link (p_hl1, p_hl2), ==, 0);
+  g_autofree char *p_ln = g_build_filename (home, "tree", "ln", nullptr);
+  g_assert_cmpint (symlink ("small", p_ln), ==, 0);
+  g_autofree char *p_fifo = g_build_filename (home, "tree", "pipe", nullptr);
+  g_assert_cmpint (mkfifo (p_fifo, 0640), ==, 0);
+  g_autofree char *p_suid = g_build_filename (home, "tree", "suid", nullptr);
+  g_assert_cmpint (chmod (p_suid, 04755), ==, 0);
+  const struct timespec old[2] = { { 1000000000, 0 }, { 1000000000, 0 } };
+  g_autofree char *p_small = g_build_filename (home, "tree", "small", nullptr);
+  g_assert_cmpint (utimensat (AT_FDCWD, p_small, old, 0), ==, 0);
+
+  GbkConn *c = connect_to ("ws");
+  Hooks h = { .answer = GBK_CHOICE_SKIP };
+  g_autoptr (GPtrArray) created = g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (GError) error = nullptr;
+  g_assert_true (run_copy (c, "tree", "dst", &h, created, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (h.errors, ==, 0);
+  g_assert_cmpuint (created->len, ==, 1);
+  g_assert_cmpstr (g_ptr_array_index (created, 0), ==, "tree");
+  assert_same_file ("tree/big", "dst/tree/big");
+  assert_same_file ("tree/small", "dst/tree/small");
+  assert_same_file ("tree/empty", "dst/tree/empty");
+  assert_same_file ("tree/sub/inner", "dst/tree/sub/inner");
+
+  struct stat st, st2;
+  g_autofree char *d_ln = g_build_filename (home, "dst", "tree", "ln", nullptr);
+  g_autofree char *target = g_file_read_link (d_ln, nullptr);
+  g_assert_cmpstr (target, ==, "small");
+  g_autofree char *d_small = g_build_filename (home, "dst", "tree", "small", nullptr);
+  g_assert_cmpint (stat (d_small, &st), ==, 0);
+  g_assert_cmpint (st.st_mtim.tv_sec, ==, 1000000000);          /* times travel */
+  g_autofree char *d_hl1 = g_build_filename (home, "dst", "tree", "hl1", nullptr);
+  g_autofree char *d_hl2 = g_build_filename (home, "dst", "tree", "hl2", nullptr);
+  g_assert_cmpint (stat (d_hl1, &st), ==, 0);
+  g_assert_cmpint (stat (d_hl2, &st2), ==, 0);
+  g_assert_cmpuint (st.st_ino, ==, st2.st_ino);                  /* hard links stay linked */
+  g_autofree char *d_fifo = g_build_filename (home, "dst", "tree", "pipe", nullptr);
+  g_assert_cmpint (lstat (d_fifo, &st), ==, 0);
+  g_assert_true (S_ISFIFO (st.st_mode));
+  g_autofree char *d_suid = g_build_filename (home, "dst", "tree", "suid", nullptr);
+  g_assert_cmpint (stat (d_suid, &st), ==, 0);
+  g_assert_cmpint (st.st_mode & 07777, ==, 0755);               /* no setuid from elsewhere */
+
+  /* Again: everything conflicts; Skip leaves it all. */
+  Hooks again = { .answer = GBK_CHOICE_SKIP };
+  g_assert_true (run_copy (c, "tree", "dst", &again, nullptr, &error));
+  g_assert_cmpint (again.conflicts, ==, 1);
+
+  /* Cancelled halfway through the big file: no half file left anywhere. */
+  Hooks cancel = { .answer = GBK_CHOICE_SKIP, .cancel_after = 3 };
+  g_autoptr (GError) cancelled = nullptr;
+  g_assert_false (run_copy (c, "tree/big", "dst2", &cancel, nullptr, &cancelled));
+  g_assert_error (cancelled, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_assert_false (temp_left ("dst2"));
+  g_autofree char *d2_big = g_build_filename (home, "dst2", "big", nullptr);
+  g_assert_false (g_file_test (d2_big, G_FILE_TEST_EXISTS));
+
+  /* Only copying reads from another machine for now. */
+  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, &h };
+  g_autoptr (GPtrArray) srcs = g_ptr_array_new_with_free_func (g_free);
+  g_ptr_array_add (srcs, g_build_filename (home, "tree", "small", nullptr));
+  g_autofree char *dst3 = g_build_filename (home, "dst3", nullptr);
+  g_autoptr (GbkSource) source = gbk_conn_source (c);
+  g_autoptr (GError) unsupported = nullptr;
+  g_assert_false (
+      gbk_ops_run_from (source, GBK_OP_MOVE, srcs, dst3, &hooks, nullptr, &unsupported));
+  g_assert_error (unsupported, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+  g_assert_true (g_file_test (p_small, G_FILE_TEST_EXISTS));
+
+  /* The connection dies mid-file: that item fails, nothing half-written stays. */
+  Hooks dies = { .answer = GBK_CHOICE_SKIP, .cancel_after = 3, .kill_server = true };
+  g_autoptr (GError) died = nullptr;
+  bool ok = run_copy (c, "tree/big", "dst4", &dies, nullptr, &died);
+  g_assert_true (ok || died != nullptr);
+  g_assert_cmpint (dies.errors, ==, 1);
+  g_assert_false (temp_left ("dst4"));
+  g_autofree char *d4_big = g_build_filename (home, "dst4", "big", nullptr);
+  g_assert_false (g_file_test (d4_big, G_FILE_TEST_EXISTS));
+  g_object_unref (c);
+  g_assert_true (wait_until (no_conns, nullptr, 10000));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -386,6 +581,7 @@ main (int argc, char **argv)
   g_test_add_func ("/conn/server-killed", test_server_killed);
   g_test_add_func ("/conn/server-frozen", test_server_frozen);
   g_test_add_func ("/conn/owner-gone", test_owner_gone);
+  g_test_add_func ("/conn/copy-from-remote", test_copy_from_remote);
   int status = g_test_run ();
   gbk_type_table_unref (types);
   if (gbk_lifetime_live () != 0)

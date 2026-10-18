@@ -20,10 +20,10 @@
  * open on this machine). GBK_SERVE_IDLE_MS shortens it, for tests. */
 #include "proto.h"
 
-#define READ_CHUNK (64u * 1024u)
+#define READ_CHUNK ((size_t) 64 * 1024)
 /* Output waiting for the laptop: above this, scanners aren't drained until it shrinks
  * (their messages wait in the scanners' own queues). */
-#define OUT_HIGH (4u * 1024u * 1024u)
+#define OUT_HIGH ((size_t) 4 * 1024 * 1024)
 #define SCAN_MSGS_PER_ROUND 64
 #define INFO_MAX 16                      /* file-detail reads in flight */
 #define IDLE_MS 30000
@@ -35,35 +35,67 @@ typedef struct
   GbkScanner *scanner;
 } Watch;
 
+/* A request run on a worker thread: details, a listing, or a file's contents. The worker
+ * hands back encoded frames as it goes (Out), the last one marked `finished`. */
+typedef enum
+{
+  TASK_INFO,
+  TASK_LIST,
+  TASK_LSTAT,
+  TASK_READ,
+} TaskKind;
+
+typedef struct
+{
+  gatomicrefcount rc;     /* the worker's, and the reads table's for a READ */
+  TaskKind kind;
+  uint64_t channel;
+  char *path;
+  GAsyncQueue *done;      /* Out*, referenced */
+  int done_fd;
+  /* READ: how many more bytes the laptop accepts; cancelled by CANCEL or our exit. */
+  GMutex lock;
+  GCond cond;
+  uint64_t credit;
+  bool cancelled;
+} Task;
+
 typedef struct
 {
   uint64_t channel;
-  char *path;
-  GbkFileInfo *info;     /* result, or nullptr with error */
-  GError *error;
-  GAsyncQueue *done;     /* while on the worker: where to put the result (referenced) */
-  int done_fd;
-} InfoReq;
+  GByteArray *bytes;      /* frames to send */
+  bool finished;          /* the task's last */
+} Out;
 
 typedef struct
 {
   GByteArray *in;
   GByteArray *out;
   GHashTable *watches;   /* &Watch.channel -> Watch*, owned */
+  GHashTable *reads;     /* &Task.channel -> Task* (referenced): READs that take credit */
   GbkTypeTable *types;
-  GAsyncQueue *done;     /* InfoReq*, finished */
-  int done_fd;           /* eventfd: readable when `done` has results */
-  int infos;             /* reads in flight (main thread only) */
+  GAsyncQueue *done;     /* Out*, from workers */
+  int done_fd;           /* eventfd: readable when `done` has something */
+  int tasks;             /* in flight (main thread only) */
 } Server;
 
 static void
-info_req_free (InfoReq *q)
+out_free (Out *o)
 {
-  g_clear_pointer (&q->done, g_async_queue_unref);
-  g_free (q->path);
-  g_clear_pointer (&q->info, gbk_file_info_free);
-  g_clear_error (&q->error);
-  g_free (q);
+  g_byte_array_unref (o->bytes);
+  g_free (o);
+}
+
+static void
+task_unref (Task *t)
+{
+  if (!g_atomic_ref_count_dec (&t->rc))
+    return;
+  g_async_queue_unref (t->done);
+  g_free (t->path);
+  g_mutex_clear (&t->lock);
+  g_cond_clear (&t->cond);
+  g_free (t);
 }
 
 static void
@@ -80,69 +112,312 @@ protocol_error (const char *what)
   exit (3);
 }
 
-/* ---- file details, on worker threads ---- */
+/* ---- worker threads ---- */
+
+static void
+hand_over (Task *t, GByteArray *bytes, bool finished)
+{
+  Out *o = g_new0 (Out, 1);
+  o->channel = t->channel;
+  o->bytes = bytes;
+  o->finished = finished;
+  g_async_queue_push (t->done, o);
+  uint64_t one = 1;
+  while (write (t->done_fd, &one, sizeof one) < 0 && errno == EINTR)
+    ;
+}
+
+static void
+fail_error (Task *t, const GError *error)
+{
+  GByteArray *b = g_byte_array_new ();
+  gbk_proto_put_failed (b, t->channel, error);
+  hand_over (t, b, true);
+}
+
+static void
+fail_errno (Task *t, int err)
+{
+  g_autoptr (GError) e
+      = g_error_new_literal (G_IO_ERROR, (int) g_io_error_from_errno (err), g_strerror (err));
+  GByteArray *b = g_byte_array_new ();
+  gbk_proto_put_failed (b, t->channel, e);
+  hand_over (t, b, true);
+}
+
+static void
+run_info (Task *t)
+{
+  g_autoptr (GError) error = nullptr;
+  g_autoptr (GbkFileInfo) info = gbk_ops_info (t->path, &error);
+  GByteArray *b = g_byte_array_new ();
+  if (info != nullptr)
+    gbk_proto_put_info (b, t->channel, info);
+  else
+    gbk_proto_put_failed (b, t->channel, error);
+  hand_over (t, b, true);
+}
+
+#define LIST_BATCH 1000      /* entries per handed-over batch: bounded memory for huge folders */
+
+static void
+run_list (Task *t)
+{
+  int fd = open (t->path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  DIR *d = fd >= 0 ? fdopendir (fd) : nullptr;
+  if (d == nullptr)
+    {
+      int err = errno;
+      if (fd >= 0)
+        close (fd);
+      fail_errno (t, err);
+      return;
+    }
+  int dfd = dirfd (d);
+  if (dfd < 0)
+    {
+      int err = errno;
+      closedir (d);
+      fail_errno (t, err);
+      return;
+    }
+  g_autoptr (GPtrArray) batch
+      = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_stat_entry_free);
+  const struct dirent *de;
+  g_autoptr (GError) stat_error = nullptr;
+  int err = 0;
+  errno = 0;
+  while ((de = readdir (d)) != nullptr)
+    {
+      if (g_str_equal (de->d_name, ".") || g_str_equal (de->d_name, ".."))
+        continue;
+      g_autoptr (GError) e = nullptr;
+      GbkStatEntry *entry = gbk_stat_entry_at (dfd, de->d_name, de->d_name, &e);
+      if (entry == nullptr)
+        {
+          /* Gone meanwhile: not part of it any more. Anything else fails the listing. */
+          if (!g_error_matches (e, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))
+            stat_error = g_steal_pointer (&e);
+          if (stat_error != nullptr)
+            break;
+          continue;
+        }
+      g_ptr_array_add (batch, entry);
+      if (batch->len == LIST_BATCH)
+        {
+          GByteArray *b = g_byte_array_new ();
+          gbk_proto_put_listing (b, t->channel, batch, false);
+          hand_over (t, b, false);
+          g_ptr_array_set_size (batch, 0);
+        }
+      errno = 0;
+    }
+  if (stat_error == nullptr && errno != 0)
+    err = errno;                         /* readdir failed */
+  closedir (d);
+  /* The laptop drops what it has: a listing is whole or nothing. */
+  if (stat_error != nullptr)
+    {
+      fail_error (t, stat_error);
+      return;
+    }
+  if (err != 0)
+    {
+      fail_errno (t, err);
+      return;
+    }
+  GByteArray *b = g_byte_array_new ();
+  gbk_proto_put_listing (b, t->channel, batch, true);
+  hand_over (t, b, true);
+}
+
+static void
+run_lstat (Task *t)
+{
+  g_autoptr (GError) error = nullptr;
+  g_autoptr (GbkStatEntry) e = gbk_stat_entry_at (AT_FDCWD, t->path, nullptr, &error);
+  if (e == nullptr)
+    {
+      fail_error (t, error);
+      return;
+    }
+  GByteArray *b = g_byte_array_new ();
+  gbk_proto_put_stated (b, t->channel, e);
+  hand_over (t, b, true);
+}
+
+static bool
+same_file_state (const struct stat *a, const struct stat *b)
+{
+  return a->st_ino == b->st_ino && a->st_size == b->st_size
+         && a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec
+         && a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+}
+
+/* A regular file's bytes, no faster than the laptop's credit allows; at the end, whether it
+ * changed while being read (then the copy is useless, and the laptop says so). */
+static void
+run_read (Task *t)
+{
+  /* O_NONBLOCK: a FIFO in its place mustn't hang the open; a regular file ignores it. */
+  int fd = open (t->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  struct stat before;
+  if (fd < 0 || fstat (fd, &before) != 0)
+    {
+      int err = errno;
+      if (fd >= 0)
+        close (fd);
+      fail_errno (t, err);
+      return;
+    }
+  if (!S_ISREG (before.st_mode))
+    {
+      close (fd);
+      fail_errno (t, EINVAL);
+      return;
+    }
+  g_autofree uint8_t *buf = g_malloc (GBK_PROTO_DATA_MAX);
+  for (;;)
+    {
+      g_mutex_lock (&t->lock);
+      while (t->credit == 0 && !t->cancelled)
+        g_cond_wait (&t->cond, &t->lock);
+      bool stop = t->cancelled;
+      size_t take = (size_t) MIN (t->credit, (uint64_t) GBK_PROTO_DATA_MAX);
+      g_mutex_unlock (&t->lock);
+      if (stop)
+        {
+          close (fd);
+          hand_over (t, g_byte_array_new (), true);   /* nothing more to say */
+          return;
+        }
+      ssize_t n = read (fd, buf, take);
+      if (n < 0 && errno == EINTR)
+        continue;
+      if (n < 0)
+        {
+          int err = errno;
+          close (fd);
+          fail_errno (t, err);
+          return;
+        }
+      if (n == 0)
+        break;
+      GByteArray *b = g_byte_array_new ();
+      gbk_proto_put_data (b, t->channel, buf, (size_t) n);
+      g_mutex_lock (&t->lock);
+      t->credit -= (uint64_t) n;
+      g_mutex_unlock (&t->lock);
+      hand_over (t, b, false);
+    }
+  struct stat after;
+  bool changed = fstat (fd, &after) != 0 || !same_file_state (&before, &after);
+  close (fd);
+  GByteArray *b = g_byte_array_new ();
+  gbk_proto_put_end (b, t->channel, changed);
+  hand_over (t, b, true);
+}
 
 static void *
-info_worker (void *data)
+task_worker (void *data)
 {
-  InfoReq *req = data;
-  req->info = gbk_ops_info (req->path, &req->error);
-  /* Hand the request over and drop our reference: a request waiting in the queue must not
-   * hold the queue alive (it would never be freed). */
-  GAsyncQueue *done = g_steal_pointer (&req->done);
-  int fd = req->done_fd;
-  g_async_queue_push (done, req);
-  uint64_t one = 1;
-  while (write (fd, &one, sizeof one) < 0 && errno == EINTR)
-    ;
-  g_async_queue_unref (done);
+  Task *t = data;
+  switch (t->kind)
+    {
+    case TASK_INFO: run_info (t); break;
+    case TASK_LIST: run_list (t); break;
+    case TASK_LSTAT: run_lstat (t); break;
+    case TASK_READ: run_read (t); break;
+    default: gbk_fatal ("bad task %d", (int) t->kind);
+    }
+  task_unref (t);
   return nullptr;
 }
 
 static void
-start_info (Server *sv, uint64_t channel, char *path)
+start_task (Server *sv, TaskKind kind, uint64_t channel, char *path, uint32_t credit)
 {
-  InfoReq *req = g_new0 (InfoReq, 1);
-  req->channel = channel;
-  req->path = path;
-  if (sv->infos >= INFO_MAX)
+  if (sv->tasks >= INFO_MAX)
     {
+      g_free (path);
       g_autoptr (GError) busy
           = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_BUSY, "Too many requests at once");
       gbk_proto_put_failed (sv->out, channel, busy);
-      info_req_free (req);
       return;
     }
-  req->done = g_async_queue_ref (sv->done);
-  req->done_fd = sv->done_fd;
+  Task *t = g_new0 (Task, 1);
+  g_atomic_ref_count_init (&t->rc);
+  t->kind = kind;
+  t->channel = channel;
+  t->path = path;
+  t->done = g_async_queue_ref (sv->done);
+  t->done_fd = sv->done_fd;
+  g_mutex_init (&t->lock);
+  g_cond_init (&t->cond);
+  t->credit = credit;
+  if (kind == TASK_READ)
+    {
+      if (g_hash_table_contains (sv->reads, &t->channel))
+        protocol_error ("channel already in use");
+      g_atomic_ref_count_inc (&t->rc);
+      g_hash_table_insert (sv->reads, &t->channel, t);
+    }
   g_autoptr (GError) error = nullptr;
-  GThread *t = g_thread_try_new ("serve-info", info_worker, req, &error);
-  if (t == nullptr)
+  GThread *thread = g_thread_try_new ("serve-task", task_worker, t, &error);
+  if (thread == nullptr)
     {
       gbk_proto_put_failed (sv->out, channel, error);
-      info_req_free (req);
+      g_hash_table_remove (sv->reads, &channel);
+      task_unref (t);
       return;
     }
-  g_thread_unref (t);
-  sv->infos++;
+  g_thread_unref (thread);
+  sv->tasks++;
 }
 
 static void
-drain_infos (Server *sv)
+drain_tasks (Server *sv)
 {
   uint64_t v;
   while (read (sv->done_fd, &v, sizeof v) < 0 && errno == EINTR)
     ;
-  InfoReq *req;
-  while ((req = g_async_queue_try_pop (sv->done)) != nullptr)
+  Out *o;
+  while ((o = g_async_queue_try_pop (sv->done)) != nullptr)
     {
-      sv->infos--;
-      if (req->info != nullptr)
-        gbk_proto_put_info (sv->out, req->channel, req->info);
-      else
-        gbk_proto_put_failed (sv->out, req->channel, req->error);
-      info_req_free (req);
+      g_byte_array_append (sv->out, o->bytes->data, o->bytes->len);
+      if (o->finished)
+        {
+          sv->tasks--;
+          g_hash_table_remove (sv->reads, &o->channel);
+        }
+      out_free (o);
     }
+}
+
+/* CREDIT and CANCEL for a READ (one already finished: nothing to do). */
+static void
+steer_read (Server *sv, uint64_t channel, uint32_t credit, bool cancel)
+{
+  Task *t = g_hash_table_lookup (sv->reads, &channel);
+  if (t == nullptr)
+    return;
+  g_mutex_lock (&t->lock);
+  if (cancel)
+    t->cancelled = true;
+  else
+    t->credit = MIN (t->credit + credit, (uint64_t) UINT32_MAX * 4);
+  g_cond_signal (&t->cond);
+  g_mutex_unlock (&t->lock);
+}
+
+static void
+cancel_read (void *key G_GNUC_UNUSED, void *value, void *data G_GNUC_UNUSED)
+{
+  Task *t = value;
+  g_mutex_lock (&t->lock);
+  t->cancelled = true;
+  g_cond_signal (&t->cond);
+  g_mutex_unlock (&t->lock);
 }
 
 /* ---- requests ---- */
@@ -171,13 +446,40 @@ handle (Server *sv, const GbkFrame *f)
       g_hash_table_remove (sv->watches, &f->channel);     /* already finished: nothing */
       break;
     case GBK_MSG_GET_INFO:
+    case GBK_MSG_LIST:
+    case GBK_MSG_LSTAT:
       {
         char *path = gbk_proto_get_path (f);
         if (path == nullptr)
-          protocol_error ("bad info request");
-        start_info (sv, f->channel, path);
+          protocol_error ("bad request");
+        TaskKind kind = f->type == GBK_MSG_GET_INFO ? TASK_INFO
+                        : f->type == GBK_MSG_LIST   ? TASK_LIST
+                                                    : TASK_LSTAT;
+        start_task (sv, kind, f->channel, path, 0);
         break;
       }
+    case GBK_MSG_READ:
+      {
+        char *path;
+        uint32_t credit;
+        if (!gbk_proto_get_read (f, &path, &credit) || f->channel == 0)
+          protocol_error ("bad read request");
+        start_task (sv, TASK_READ, f->channel, path, credit);
+        break;
+      }
+    case GBK_MSG_CREDIT:
+      {
+        uint32_t bytes;
+        if (!gbk_proto_get_credit (f, &bytes))
+          protocol_error ("bad credit");
+        steer_read (sv, f->channel, bytes, false);
+        break;
+      }
+    case GBK_MSG_CANCEL:
+      if (!gbk_proto_get_empty (f))
+        protocol_error ("bad cancel");
+      steer_read (sv, f->channel, 0, true);
+      break;
     case GBK_MSG_PING:
       if (!gbk_proto_get_empty (f))
         protocol_error ("bad ping");
@@ -188,6 +490,10 @@ handle (Server *sv, const GbkFrame *f)
     case GBK_MSG_INFO:
     case GBK_MSG_FAILED:
     case GBK_MSG_PONG:
+    case GBK_MSG_LISTING:
+    case GBK_MSG_STATED:
+    case GBK_MSG_DATA:
+    case GBK_MSG_END:
     default: protocol_error ("a message only the server sends");
     }
 }
@@ -304,7 +610,9 @@ serve (void)
     .watches
     = g_hash_table_new_full (g_int64_hash, g_int64_equal, nullptr, (GDestroyNotify) watch_free),
     .types = gbk_type_builder_finish (gbk_type_builder_new ()),
-    .done = g_async_queue_new_full ((GDestroyNotify) info_req_free),
+    .reads
+    = g_hash_table_new_full (g_int64_hash, g_int64_equal, nullptr, (GDestroyNotify) task_unref),
+    .done = g_async_queue_new_full ((GDestroyNotify) out_free),
     .done_fd = eventfd (0, EFD_CLOEXEC | EFD_NONBLOCK),
   };
   if (sv.done_fd < 0)
@@ -369,7 +677,7 @@ serve (void)
       if (p[1].revents & (POLLERR | POLLHUP))
         break;
       if (p[2].revents & POLLIN)
-        drain_infos (&sv);
+        drain_tasks (&sv);
       /* Draining can end a watch (or the laptop's UNWATCH, read above, already did): look
        * each one up by channel, never through a pointer taken before. */
       for (guint i = 0; i < polled->len; i++)
@@ -387,6 +695,8 @@ serve (void)
   /* Scanners and detail reads still running finish on their own threads; nothing waits.
    * (Readers in flight hold their own reference to `done`, and still write to done_fd,
    * which therefore stays open until the process ends.) */
+  g_hash_table_foreach (sv.reads, cancel_read, nullptr);   /* their workers end now */
+  g_hash_table_unref (sv.reads);
   g_async_queue_unref (sv.done);
   g_hash_table_unref (sv.watches);
   gbk_type_table_unref (sv.types);

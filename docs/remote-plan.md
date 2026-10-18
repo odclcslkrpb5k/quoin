@@ -196,6 +196,21 @@ Phase 6 adds editing:
   taken when reading began (otherwise: a conflict, not a deletion of the newer version).
 - Remote A to remote B: later.
 
+As built in phase 5 (2026-10-18), where it differs from the above:
+- LIST returns every entry's details in one round trip per folder; READ streams a file in
+  64 KiB frames paced by credit the laptop grants (1 MiB ahead), and its end says whether
+  the file changed while it was read (then that item fails: a copy of a moving target is
+  worthless). Reads aren't pipelined across files yet: many small files over a slow link
+  are slow. Progress lists the tree once to measure it, then again to copy.
+- openat2 isn't needed for this direction: names from the other machine are validated as
+  single filenames (and each listed once), and every destination entry is created with
+  O_EXCL, RENAME_NOREPLACE or mkdir under folders this copy made or lstat found to be real
+  folders, so a listed name can't lead outside the destination.
+- Setuid, setgid and sticky bits don't travel either.
+- Opened copies live in ~/.cache/quoin/remote/<random>/ (0700), read-only; folders there
+  older than 7 days are removed at startup (no manifest yet: nothing is ever edited there
+  before phase 6).
+
 ## 9. Testing
 
 - `QUOIN_SSH` replaces the ssh command; tests point it at a script running quoin-serve

@@ -58,10 +58,10 @@ typedef enum
 } GbkMenuTarget;
 
 /* Returns GbkMenuEntry elements; never starts/ends with or doubles a separator. */
-/* Does `kind` work on another machine yet (docs/remote-plan.md: browsing first, nothing
- * that changes or runs anything)? `on_file`: the target includes a file, not only folders.
- * The menu and the window's shortcuts both ask this. */
-bool gbk_menu_works_remote (GbkMenuKind kind, bool on_file);
+/* Does `kind` work on another machine yet (docs/remote-plan.md: browsing, opening read-only
+ * copies and copying to this machine; nothing that changes or runs anything there)? The
+ * menu and the window's shortcuts both ask this. */
+bool gbk_menu_works_remote (GbkMenuKind kind);
 
 /* For items on another machine (any of them), only what gbk_menu_works_remote allows. */
 [[nodiscard]] GArray *gbk_menu_entries (const GbkConfig *config, GPtrArray *items,

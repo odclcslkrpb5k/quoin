@@ -1,7 +1,7 @@
 #include "remote.h"
 #include "lifetime.h"
 
-#define IDLE_CHECK_MS (60 * 1000)
+#define IDLE_CHECK_MS ((int) 60 * 1000)
 #define NM_STATE_CONNECTED_GLOBAL 70u
 
 static bool test_session_bus;

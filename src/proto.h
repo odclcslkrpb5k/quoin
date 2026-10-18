@@ -32,12 +32,24 @@ typedef enum : uint8_t
   GBK_MSG_INFO = 3,       /* answer to GET_INFO: a GbkFileInfo */
   GBK_MSG_FAILED = 4,     /* a request failed: a G_IO_ERROR code and its message */
   GBK_MSG_PONG = 5,
+  GBK_MSG_LISTING = 6,    /* answer to LIST: GbkStatEntry list, `last` on the final frame */
+  GBK_MSG_STATED = 7,     /* answer to LSTAT: one GbkStatEntry (no name) */
+  GBK_MSG_DATA = 8,       /* a READ's next bytes (at most GBK_PROTO_DATA_MAX) */
+  GBK_MSG_END = 9,        /* a READ's end: whether the file changed while it was read */
   /* client -> server */
   GBK_MSG_WATCH = 64,     /* start watching a folder (path) on this channel */
   GBK_MSG_UNWATCH = 65,   /* stop it */
   GBK_MSG_GET_INFO = 66,  /* a file's details (path) */
   GBK_MSG_PING = 67,
+  GBK_MSG_LIST = 68,      /* a folder's entries with full details (path) */
+  GBK_MSG_LSTAT = 69,     /* one file's details, a link not followed (path) */
+  GBK_MSG_READ = 70,      /* a regular file's bytes (path, the bytes it may send at first) */
+  GBK_MSG_CREDIT = 71,    /* a READ may send this many more bytes */
+  GBK_MSG_CANCEL = 72,    /* stop a READ */
 } GbkMsgType;
+
+/* Bytes in one DATA frame. */
+#define GBK_PROTO_DATA_MAX ((size_t) 64 * 1024)
 
 typedef struct
 {
@@ -76,7 +88,7 @@ int gbk_proto_next_frame (const uint8_t *data, size_t len, GbkFrame *frame, size
 void gbk_proto_put_hello (GByteArray *out, const GbkHello *h);
 /* WATCH, GET_INFO: a path. */
 void gbk_proto_put_path (GByteArray *out, GbkMsgType type, uint64_t channel, const char *path);
-/* UNWATCH, PING, PONG. */
+/* UNWATCH, PING, PONG, CANCEL. */
 void gbk_proto_put_empty (GByteArray *out, GbkMsgType type, uint64_t channel);
 void gbk_proto_put_failed (GByteArray *out, uint64_t channel, const GError *error);
 void gbk_proto_put_info (GByteArray *out, uint64_t channel, const GbkFileInfo *info);
@@ -85,9 +97,26 @@ void gbk_proto_put_info (GByteArray *out, uint64_t channel, const GbkFileInfo *i
  * its removals before its additions, as the model applies them. */
 void gbk_proto_put_scan (GByteArray *out, uint64_t channel, const GbkScanMsg *m);
 
+/* LISTING: as many frames as needed; `last` (when given) on the final one only. */
+void gbk_proto_put_listing (GByteArray *out, uint64_t channel, const GPtrArray *entries, bool last);
+void gbk_proto_put_stated (GByteArray *out, uint64_t channel, const GbkStatEntry *e);
+void gbk_proto_put_data (GByteArray *out, uint64_t channel, const void *data, size_t len);
+void gbk_proto_put_end (GByteArray *out, uint64_t channel, bool changed);
+void gbk_proto_put_read (GByteArray *out, uint64_t channel, const char *path, uint32_t credit);
+void gbk_proto_put_credit (GByteArray *out, uint64_t channel, uint32_t bytes);
+
 /* ---- readers ---- */
 
 [[nodiscard]] bool gbk_proto_get_hello (const GbkFrame *f, GbkHello *h);
+/* LISTING: the entries (GbkStatEntry*, owned; names valid, no two alike in one frame). */
+[[nodiscard]] bool gbk_proto_get_listing (const GbkFrame *f, GPtrArray **entries, bool *last);
+[[nodiscard]] GbkStatEntry *gbk_proto_get_stated (const GbkFrame *f);
+/* DATA: the bytes, borrowed from the frame. */
+[[nodiscard]] bool gbk_proto_get_data (const GbkFrame *f, const uint8_t **data, size_t *len);
+[[nodiscard]] bool gbk_proto_get_end (const GbkFrame *f, bool *changed);
+/* READ: its path (g_free) and starting credit. */
+[[nodiscard]] bool gbk_proto_get_read (const GbkFrame *f, char **path, uint32_t *credit);
+[[nodiscard]] bool gbk_proto_get_credit (const GbkFrame *f, uint32_t *bytes);
 /* An absolute path without NUL bytes, or nullptr. g_free. */
 [[nodiscard]] char *gbk_proto_get_path (const GbkFrame *f);
 [[nodiscard]] bool gbk_proto_get_empty (const GbkFrame *f);

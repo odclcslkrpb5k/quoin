@@ -290,6 +290,167 @@ test_info_and_ping (void)
   server_free (s);
 }
 
+static void
+send_frame (const Server *s, void (*encode) (GByteArray *, const void *), const void *arg)
+{
+  g_autoptr (GByteArray) b = g_byte_array_new ();
+  encode (b, arg);
+  send_bytes (s, b);
+}
+
+typedef struct
+{
+  uint64_t channel;
+  const char *path;
+  uint32_t n;
+} Req;
+
+static void
+put_read (GByteArray *b, const void *arg)
+{
+  const Req *r = arg;
+  gbk_proto_put_read (b, r->channel, r->path, r->n);
+}
+
+static void
+put_credit (GByteArray *b, const void *arg)
+{
+  const Req *r = arg;
+  gbk_proto_put_credit (b, r->channel, r->n);
+}
+
+static void
+put_cancel (GByteArray *b, const void *arg)
+{
+  gbk_proto_put_empty (b, GBK_MSG_CANCEL, ((const Req *) arg)->channel);
+}
+
+/* LIST: every entry with its details, links with their targets; LSTAT doesn't follow. */
+static void
+test_list_and_lstat (void)
+{
+  put ("l/file", "12345");
+  put ("l/sub/x", "");
+  g_autofree char *link = in_root ("l/link");
+  g_assert_cmpint (symlink ("file", link), ==, 0);
+  Server *s = server_start ();
+  expect_hello (s);
+  g_autofree char *dir = in_root ("l");
+  send_path (s, GBK_MSG_LIST, 9, dir);
+  g_autoptr (GByteArray) keep = nullptr;
+  GbkFrame f = next (s, &keep);
+  GPtrArray *entries;
+  bool last;
+  g_assert_true (gbk_proto_get_listing (&f, &entries, &last));
+  g_assert_true (last);
+  g_assert_cmpuint (entries->len, ==, 3);
+  for (guint i = 0; i < entries->len; i++)
+    {
+      const GbkStatEntry *e = g_ptr_array_index (entries, i);
+      if (g_str_equal (e->name, "file"))
+        g_assert_cmpuint (e->size, ==, 5);
+      else if (g_str_equal (e->name, "link"))
+        {
+          g_assert_true (S_ISLNK (e->mode));
+          g_assert_cmpstr (e->target, ==, "file");
+        }
+      else
+        g_assert_true (S_ISDIR (e->mode) && g_str_equal (e->name, "sub"));
+    }
+  g_ptr_array_unref (entries);
+
+  send_path (s, GBK_MSG_LSTAT, 10, link);
+  g_autoptr (GByteArray) keep2 = nullptr;
+  GbkFrame f2 = next (s, &keep2);
+  g_autoptr (GbkStatEntry) e = gbk_proto_get_stated (&f2);
+  g_assert_nonnull (e);
+  g_assert_true (S_ISLNK (e->mode));
+
+  send_path (s, GBK_MSG_LIST, 11, "/nonexistent/quoin/dir");
+  g_autoptr (GByteArray) keep3 = nullptr;
+  GbkFrame f3 = next (s, &keep3);
+  g_autoptr (GError) err = nullptr;
+  g_assert_true (gbk_proto_get_failed (&f3, &err));
+  g_assert_error (err, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  close (s->in);
+  s->in = -1;
+  g_assert_cmpint (server_wait (s), ==, 0);
+  server_free (s);
+}
+
+/* READ sends no more than the credit allows; more credit, more data; at the end, whether the
+ * file changed meanwhile (here it did: it grew while waiting for credit). */
+static void
+test_read_credit_and_change (void)
+{
+  put ("r/data", "0123456789");
+  g_autofree char *path = in_root ("r/data");
+  Server *s = server_start ();
+  expect_hello (s);
+  Req r = { 20, path, 4 };
+  send_frame (s, put_read, &r);
+  g_autoptr (GByteArray) k1 = nullptr;
+  GbkFrame f1 = next (s, &k1);
+  const uint8_t *d;
+  size_t n;
+  g_assert_true (gbk_proto_get_data (&f1, &d, &n));
+  g_assert_cmpuint (n, ==, 4);
+  g_assert_cmpmem (d, n, "0123", 4);
+  /* Nothing more comes without credit. */
+  struct pollfd p = { s->out, POLLIN, 0 };
+  g_assert_cmpint (poll (&p, 1, 300), ==, 0);
+  /* It changes now; the rest is read with more credit, and the end says so. */
+  g_autofree char *grown = g_strdup ("0123456789abc");
+  g_assert_true (g_file_set_contents (path, grown, -1, nullptr));
+  Req more = { 20, path, 1000 };
+  send_frame (s, put_credit, &more);
+  bool changed = false, ended = false;
+  while (!ended)
+    {
+      g_autoptr (GByteArray) k = nullptr;
+      GbkFrame f = next (s, &k);
+      if (!gbk_proto_get_data (&f, &d, &n))
+        {
+          g_assert_true (gbk_proto_get_end (&f, &changed));
+          ended = true;
+        }
+    }
+  g_assert_true (changed);
+
+  /* An unchanged file ends unchanged; CANCEL stops one waiting for credit. */
+  Req again = { 21, path, 1000 };
+  send_frame (s, put_read, &again);
+  for (bool done = false; !done;)
+    {
+      g_autoptr (GByteArray) k = nullptr;
+      GbkFrame f = next (s, &k);
+      done = gbk_proto_get_end (&f, &changed);
+    }
+  g_assert_false (changed);
+  Req stalled = { 22, path, 0 };
+  send_frame (s, put_read, &stalled);
+  send_frame (s, put_cancel, &stalled);
+  g_autoptr (GByteArray) b = g_byte_array_new ();
+  gbk_proto_put_empty (b, GBK_MSG_PING, 23);
+  send_bytes (s, b);
+  g_autoptr (GByteArray) k3 = nullptr;
+  GbkFrame pong = next (s, &k3);
+  g_assert_cmpint (pong.type, ==, GBK_MSG_PONG);  /* still serving; the read said nothing */
+
+  /* Not a regular file: refused. */
+  g_autofree char *dir = in_root ("r");
+  Req bad = { 24, dir, 1000 };
+  send_frame (s, put_read, &bad);
+  g_autoptr (GByteArray) k4 = nullptr;
+  GbkFrame f4 = next (s, &k4);
+  g_autoptr (GError) err = nullptr;
+  g_assert_true (gbk_proto_get_failed (&f4, &err));
+  close (s->in);
+  s->in = -1;
+  g_assert_cmpint (server_wait (s), ==, 0);
+  server_free (s);
+}
+
 /* Anything it doesn't understand ends it (exit status 3): it never guesses. */
 static void
 test_protocol_errors (void)
@@ -428,6 +589,8 @@ main (int argc, char **argv)
   g_test_add_func ("/serve/protocol-errors", test_protocol_errors);
   g_test_add_func ("/serve/shell-at", test_shell_at);
   g_test_add_func ("/serve/idle", test_idle);
+  g_test_add_func ("/serve/list-and-lstat", test_list_and_lstat);
+  g_test_add_func ("/serve/read-credit-and-change", test_read_credit_and_change);
   int status = g_test_run ();
   gbk_type_table_unref (types);
   g_free (root);

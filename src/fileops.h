@@ -21,6 +21,71 @@
 
 #define GBK_OPS_MAX_DEPTH 512
 
+/* One file's details as a copy needs them (lstat: a link isn't followed). */
+typedef struct
+{
+  char *name;             /* LISTING: a valid filename; STATED: nullptr */
+  uint32_t mode;          /* type and permission bits */
+  uint32_t uid, gid;
+  uint64_t nlink, size, dev, ino, rdev;
+  int64_t atime_ns, mtime_ns, ctime_ns;
+  char *target;           /* links: what the link says (bytes); otherwise nullptr */
+} GbkStatEntry;
+
+void gbk_stat_entry_free (GbkStatEntry *e);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (GbkStatEntry, gbk_stat_entry_free)
+/* From a struct stat (and the link's target, for a link). Owned copies. */
+[[nodiscard]] GbkStatEntry *gbk_stat_entry_new (const char *name, const struct stat *st,
+                                                const char *target);
+
+/* Where a copy reads from: this machine (gbk_source_local) or another one (conn.h). Paths
+ * are that machine's. Every call runs on the job's worker thread and may block; a remote
+ * source checks `cancelled` while it waits. */
+typedef struct GbkSource GbkSource;
+
+/* An open source file. Each source's own file type starts with this. */
+typedef struct
+{
+  GbkSource *source;
+} GbkSourceFile;
+
+typedef struct
+{
+  /* A file's details, a link not followed. */
+  GbkStatEntry *(*lstat) (GbkSource *s, const char *path, GError **error);
+  /* A folder's entries with their details (GbkStatEntry*, names valid, each once). */
+  GPtrArray *(*list) (GbkSource *s, const char *path, GError **error);
+  /* A regular file, to read from the start. */
+  GbkSourceFile *(*open) (GbkSource *s, const char *path, GError **error);
+  /* Up to `len` bytes: 0 at the end, -1 with *error (a remote file that changed while it
+   * was read fails here, at the end). */
+  ssize_t (*read) (GbkSourceFile *f, void *buf, size_t len, GError **error);
+  /* This machine's file descriptor (for copy_file_range and attributes), or -1. */
+  int (*fd) (const GbkSourceFile *f);
+  void (*close) (GbkSourceFile *f);
+  void (*free) (GbkSource *s);
+} GbkSourceOps;
+
+struct GbkSource
+{
+  const GbkSourceOps *ops;
+  /* This machine: owner, group, ACLs and other attributes are kept (cp -a), and "the same
+   * file" checks apply. From another machine none of that travels: numeric owners and
+   * ACL entries mean other people there; setuid, setgid and sticky bits are dropped too. */
+  bool local;
+  bool (*cancelled) (void *data);    /* set by gbk_ops_run_from */
+  void *cancel_data;
+};
+
+/* `name` relative to `dirfd` (AT_FDCWD: a path), by lstat, with the link's target for a
+ * link; named `entry_name` (nullptr: unnamed). nullptr with *error. */
+[[nodiscard]] GbkStatEntry *gbk_stat_entry_at (int dirfd, const char *name, const char *entry_name,
+                                               GError **error);
+
+[[nodiscard]] GbkSource *gbk_source_local (void);
+void gbk_source_free (GbkSource *s);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (GbkSource, gbk_source_free)
+
 typedef enum
 {
   GBK_OP_COPY,
@@ -57,6 +122,11 @@ typedef struct
  * dest_dir (char*, owned) so the caller can select them. */
 [[nodiscard]] bool gbk_ops_run (GbkOpKind kind, GPtrArray *sources, const char *dest_dir,
                                 const GbkOpsHooks *hooks, GPtrArray *created, GError **error);
+/* The same, reading the sources from `src` (another machine's paths). Only COPY reads from
+ * another machine so far; any other kind there fails with G_IO_ERROR_NOT_SUPPORTED. */
+[[nodiscard]] bool gbk_ops_run_from (GbkSource *src, GbkOpKind kind, GPtrArray *sources,
+                                     const char *dest_dir, const GbkOpsHooks *hooks,
+                                     GPtrArray *created, GError **error);
 
 /* Rename `path` to `new_name` in the same directory. Fails (G_IO_ERROR_EXISTS) rather than
  * replace an existing file. */

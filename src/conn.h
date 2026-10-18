@@ -77,6 +77,11 @@ void gbk_conn_info (GbkConn *c, const char *path, GObject *owner, GbkConnInfoFn 
  * added to the agent) or accept a host key. nullptr for an invalid host. g_strfreev. */
 [[nodiscard]] char **gbk_conn_login_argv (const char *host);
 
+/* A source for copies (fileops.h) reading from this machine through the connection, for
+ * a job's worker thread: it blocks there, never here. Free it on any thread. A connection
+ * that dies fails every read in progress at once. */
+[[nodiscard]] GbkSource *gbk_conn_source (GbkConn *c);
+
 /* This machine's /etc/machine-id (hex), or "" without one. g_free. */
 [[nodiscard]] char *gbk_conn_local_machine_id (void);
 

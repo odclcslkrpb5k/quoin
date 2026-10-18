@@ -80,3 +80,56 @@ gbk_clip_parse (const char *data, size_t len, bool gnome, bool *cut)
     }
   return out;
 }
+
+/* ---- locations, between Quoin windows ---- */
+
+static char *
+escape (const char *s)
+{
+  return g_uri_escape_string (s, "/", false);
+}
+
+char *
+gbk_clip_format_locs (const GPtrArray *locs, bool cut)
+{
+  GString *s = g_string_new (cut ? "cut" : "copy");
+  for (guint i = 0; i < locs->len; i++)
+    {
+      const GbkLoc *loc = g_ptr_array_index (locs, i);
+      const char *host = gbk_loc_host (loc);
+      g_autofree char *h = escape (host != nullptr ? host : "");
+      g_autofree char *p = escape (gbk_loc_path (loc));
+      g_string_append_printf (s, "\n%s\t%s", h, p);
+    }
+  return g_string_free (s, false);
+}
+
+GPtrArray *
+gbk_clip_parse_locs (const char *data, size_t len, bool *cut)
+{
+  GPtrArray *out = gbk_loc_array_new ();
+  *cut = false;
+  if (data == nullptr || len > MAX_CLIP_BYTES)
+    return out;
+  g_autofree char *text = g_strndup (data, len);   /* stops at an embedded NUL */
+  g_auto (GStrv) lines = g_strsplit (text, "\n", -1);
+  if (lines[0] == nullptr || (!g_str_equal (lines[0], "copy") && !g_str_equal (lines[0], "cut")))
+    return out;
+  *cut = g_str_equal (lines[0], "cut");
+  for (size_t i = 1; lines[i] != nullptr; i++)
+    {
+      const char *tab = strchr (lines[i], '\t');
+      if (tab == nullptr)
+        continue;
+      g_autofree char *h_esc = g_strndup (lines[i], (size_t) (tab - lines[i]));
+      /* Unescaping refuses %00: no NUL can hide in a host or a path. */
+      g_autofree char *host = g_uri_unescape_string (h_esc, nullptr);
+      g_autofree char *path = g_uri_unescape_string (tab + 1, nullptr);
+      if (host == nullptr || path == nullptr || path[0] != '/')
+        continue;
+      GbkLoc *loc = host[0] == '\0' ? gbk_loc_new_local (path) : gbk_loc_new_remote (host, path);
+      if (loc != nullptr)
+        g_ptr_array_add (out, loc);
+    }
+  return out;
+}

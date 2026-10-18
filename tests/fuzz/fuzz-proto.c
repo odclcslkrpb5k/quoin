@@ -67,8 +67,60 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
               g_assert (e != nullptr && g_utf8_validate (e->message, -1, nullptr));
             break;
           }
+        case GBK_MSG_LISTING:
+          {
+            GPtrArray *entries;
+            bool last;
+            if (gbk_proto_get_listing (&f, &entries, &last))
+              {
+                for (guint i = 0; i < entries->len; i++)
+                  {
+                    const GbkStatEntry *e = g_ptr_array_index (entries, i);
+                    g_assert (gbk_entry_name_valid (e->name, strlen (e->name)));
+                    g_assert (S_ISLNK (e->mode) == (e->target != nullptr));
+                  }
+                g_ptr_array_unref (entries);
+              }
+            break;
+          }
+        case GBK_MSG_STATED:
+          {
+            g_autoptr (GbkStatEntry) e = gbk_proto_get_stated (&f);
+            g_assert (e == nullptr || e->name == nullptr);
+            break;
+          }
+        case GBK_MSG_DATA:
+          {
+            const uint8_t *d;
+            size_t n;
+            if (gbk_proto_get_data (&f, &d, &n))
+              g_assert (n <= GBK_PROTO_DATA_MAX);
+            break;
+          }
+        case GBK_MSG_END:
+          {
+            bool changed;
+            g_assert (!gbk_proto_get_end (&f, &changed) || f.len == 1);
+            break;
+          }
+        case GBK_MSG_READ:
+          {
+            g_autofree char *path = nullptr;
+            uint32_t credit;
+            if (gbk_proto_get_read (&f, &path, &credit))
+              g_assert (path[0] == '/');
+            break;
+          }
+        case GBK_MSG_CREDIT:
+          {
+            uint32_t bytes;
+            g_assert (!gbk_proto_get_credit (&f, &bytes) || f.len == 4);
+            break;
+          }
         case GBK_MSG_WATCH:
         case GBK_MSG_GET_INFO:
+        case GBK_MSG_LIST:
+        case GBK_MSG_LSTAT:
           {
             g_autofree char *path = gbk_proto_get_path (&f);
             g_assert (path == nullptr || path[0] == '/');
@@ -77,6 +129,7 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
         case GBK_MSG_UNWATCH:
         case GBK_MSG_PING:
         case GBK_MSG_PONG:
+        case GBK_MSG_CANCEL:
         default:
           {
             bool empty = gbk_proto_get_empty (&f);

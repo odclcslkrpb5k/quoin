@@ -285,6 +285,110 @@ gbk_proto_put_scan (GByteArray *out, uint64_t channel, const GbkScanMsg *m)
   while (r < m->removes->len || u < m->upserts->len);
 }
 
+/* ---- copies: details, listings, contents ---- */
+
+/* Fixed part of an entry: mode, uid, gid, nlink, size, dev, ino, rdev, three times. */
+#define ENTRY_FIXED (4u + 4u + 4u + 8u + 8u + 8u + 8u + 8u + 8u + 8u + 8u)
+
+static size_t
+stat_entry_size (const GbkStatEntry *e)
+{
+  return 2u + (e->name != nullptr ? strlen (e->name) : 0) + ENTRY_FIXED + 2u
+         + (e->target != nullptr ? strlen (e->target) : 0);
+}
+
+static void
+put_stat_entry (GByteArray *out, const GbkStatEntry *e)
+{
+  put_str16 (out, e->name != nullptr ? e->name : "", NAME_MAX_BYTES);
+  put_u32 (out, e->mode);
+  put_u32 (out, e->uid);
+  put_u32 (out, e->gid);
+  put_u64 (out, e->nlink);
+  put_u64 (out, e->size);
+  put_u64 (out, e->dev);
+  put_u64 (out, e->ino);
+  put_u64 (out, e->rdev);
+  put_i64 (out, e->atime_ns);
+  put_i64 (out, e->mtime_ns);
+  put_i64 (out, e->ctime_ns);
+  put_str16 (out, e->target != nullptr ? e->target : "", PATH_MAX_BYTES);
+}
+
+void
+gbk_proto_put_listing (GByteArray *out, uint64_t channel, const GPtrArray *entries, bool last)
+{
+  const size_t budget = GBK_PROTO_FRAME_MAX - HEADER_BODY - 1u - 4u;
+  guint i = 0;
+  do
+    {
+      guint first = i;
+      size_t used = 0;
+      while (i < entries->len)
+        {
+          size_t need = stat_entry_size (g_ptr_array_index (entries, i));
+          if (used + need > budget)
+            break;
+          used += need;
+          i++;
+        }
+      if (i == first && i < entries->len)
+        gbk_fatal ("protocol: a listing entry larger than a frame");
+      size_t f = begin_frame (out, GBK_MSG_LISTING, channel);
+      put_u8 (out, last && i == entries->len ? 1 : 0);
+      put_u32 (out, i - first);
+      for (guint k = first; k < i; k++)
+        put_stat_entry (out, g_ptr_array_index (entries, k));
+      end_frame (out, f);
+    }
+  while (i < entries->len);
+}
+
+void
+gbk_proto_put_stated (GByteArray *out, uint64_t channel, const GbkStatEntry *e)
+{
+  GbkStatEntry nameless = *e;
+  nameless.name = nullptr;
+  size_t f = begin_frame (out, GBK_MSG_STATED, channel);
+  put_stat_entry (out, &nameless);
+  end_frame (out, f);
+}
+
+void
+gbk_proto_put_data (GByteArray *out, uint64_t channel, const void *data, size_t len)
+{
+  if (len > GBK_PROTO_DATA_MAX)
+    gbk_fatal ("protocol: %zu bytes of data in one frame", len);
+  size_t f = begin_frame (out, GBK_MSG_DATA, channel);
+  g_byte_array_append (out, data, (guint) len);
+  end_frame (out, f);
+}
+
+void
+gbk_proto_put_end (GByteArray *out, uint64_t channel, bool changed)
+{
+  size_t f = begin_frame (out, GBK_MSG_END, channel);
+  put_u8 (out, changed ? 1 : 0);
+  end_frame (out, f);
+}
+
+void
+gbk_proto_put_read (GByteArray *out, uint64_t channel, const char *path, uint32_t credit)
+{
+  size_t f = begin_frame (out, GBK_MSG_READ, channel);
+  put_str16 (out, path, PATH_MAX_BYTES);
+  put_u32 (out, credit);
+  end_frame (out, f);
+}
+
+void
+gbk_proto_put_credit (GByteArray *out, uint64_t channel, uint32_t bytes)
+{
+  size_t f = begin_frame (out, GBK_MSG_CREDIT, channel);
+  put_u32 (out, bytes);
+  end_frame (out, f);
+}
+
 /* ---- framing ---- */
 
 static uint64_t
@@ -309,7 +413,16 @@ known_type (uint8_t t)
     case GBK_MSG_WATCH:
     case GBK_MSG_UNWATCH:
     case GBK_MSG_GET_INFO:
-    case GBK_MSG_PING: return true;
+    case GBK_MSG_PING:
+    case GBK_MSG_LISTING:
+    case GBK_MSG_STATED:
+    case GBK_MSG_DATA:
+    case GBK_MSG_END:
+    case GBK_MSG_LIST:
+    case GBK_MSG_LSTAT:
+    case GBK_MSG_READ:
+    case GBK_MSG_CREDIT:
+    case GBK_MSG_CANCEL: return true;
     default: return false;
     }
 }
@@ -507,7 +620,8 @@ gbk_proto_get_hello (const GbkFrame *f, GbkHello *h)
 char *
 gbk_proto_get_path (const GbkFrame *f)
 {
-  if (f->type != GBK_MSG_WATCH && f->type != GBK_MSG_GET_INFO)
+  if (f->type != GBK_MSG_WATCH && f->type != GBK_MSG_GET_INFO && f->type != GBK_MSG_LIST
+      && f->type != GBK_MSG_LSTAT)
     return nullptr;
   Reader r = reader (f);
   g_autofree char *path = get_str (&r, PATH_MAX_BYTES);
@@ -517,7 +631,8 @@ gbk_proto_get_path (const GbkFrame *f)
 bool
 gbk_proto_get_empty (const GbkFrame *f)
 {
-  return (f->type == GBK_MSG_UNWATCH || f->type == GBK_MSG_PING || f->type == GBK_MSG_PONG)
+  return (f->type == GBK_MSG_UNWATCH || f->type == GBK_MSG_PING || f->type == GBK_MSG_PONG
+          || f->type == GBK_MSG_CANCEL)
          && f->len == 0;
 }
 
@@ -651,4 +766,160 @@ gbk_proto_get_scan (const GbkFrame *f, const GbkTypeTable *types)
       || ((type == GBK_SCAN_ERROR || type == GBK_SCAN_GONE) && n_upserts > 0))
     return nullptr;
   return g_steal_pointer (&m);
+}
+
+static bool
+valid_file_type (uint32_t mode)
+{
+  switch (mode & S_IFMT)
+    {
+    case S_IFREG:
+    case S_IFDIR:
+    case S_IFLNK:
+    case S_IFCHR:
+    case S_IFBLK:
+    case S_IFIFO:
+    case S_IFSOCK: return true;
+    default: return false;
+    }
+}
+
+/* One entry; `named`: a LISTING entry (a valid filename) rather than STATED (none). */
+static GbkStatEntry *
+get_stat_entry (Reader *r, bool named)
+{
+  g_autoptr (GbkStatEntry) e = g_new0 (GbkStatEntry, 1);
+  size_t name_len;
+  const char *name = get_bytes (r, NAME_MAX_BYTES, &name_len);
+  uint32_t mode = get_u32 (r);
+  uint32_t uid = get_u32 (r);
+  uint32_t gid = get_u32 (r);
+  uint64_t nlink = get_u64 (r);
+  uint64_t size = get_u64 (r);
+  uint64_t dev = get_u64 (r);
+  uint64_t ino = get_u64 (r);
+  uint64_t rdev = get_u64 (r);
+  int64_t atime_ns = get_i64 (r);
+  int64_t mtime_ns = get_i64 (r);
+  int64_t ctime_ns = get_i64 (r);
+  size_t target_len;
+  const char *target = get_bytes (r, PATH_MAX_BYTES, &target_len);
+  if (!r->ok || !valid_file_type (mode) || size > INT64_MAX)
+    {
+      r->ok = false;
+      return nullptr;
+    }
+  /* A name exactly when named; a target exactly for a link, without NUL bytes. */
+  bool link = (mode & S_IFMT) == S_IFLNK;
+  if ((named ? !gbk_entry_name_valid (name, name_len) : name_len != 0)
+      || (link ? target_len == 0 || memchr (target, '\0', target_len) != nullptr : target_len != 0))
+    {
+      r->ok = false;
+      return nullptr;
+    }
+  e->name = named ? g_strndup (name, name_len) : nullptr;
+  e->mode = mode;
+  e->uid = uid;
+  e->gid = gid;
+  e->nlink = nlink;
+  e->size = size;
+  e->dev = dev;
+  e->ino = ino;
+  e->rdev = rdev;
+  e->atime_ns = atime_ns;
+  e->mtime_ns = mtime_ns;
+  e->ctime_ns = ctime_ns;
+  e->target = link ? g_strndup (target, target_len) : nullptr;
+  return g_steal_pointer (&e);
+}
+
+bool
+gbk_proto_get_listing (const GbkFrame *f, GPtrArray **entries, bool *last)
+{
+  *entries = nullptr;
+  if (f->type != GBK_MSG_LISTING)
+    return false;
+  Reader r = reader (f);
+  uint8_t flag = get_u8 (&r);
+  uint32_t n = get_u32 (&r);
+  if (!r.ok || flag > 1)
+    return false;
+  g_autoptr (GPtrArray) out = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_stat_entry_free);
+  g_autoptr (GHashTable) seen = g_hash_table_new (g_str_hash, g_str_equal);
+  for (uint32_t i = 0; i < n; i++)
+    {
+      GbkStatEntry *e = get_stat_entry (&r, true);
+      if (e == nullptr)
+        return false;
+      g_ptr_array_add (out, e);
+      if (!g_hash_table_add (seen, e->name))
+        return false;                    /* the same name twice */
+    }
+  if (!done (&r))
+    return false;
+  *entries = g_steal_pointer (&out);
+  *last = flag == 1;
+  return true;
+}
+
+GbkStatEntry *
+gbk_proto_get_stated (const GbkFrame *f)
+{
+  if (f->type != GBK_MSG_STATED)
+    return nullptr;
+  Reader r = reader (f);
+  g_autoptr (GbkStatEntry) e = get_stat_entry (&r, false);
+  return e != nullptr && done (&r) ? g_steal_pointer (&e) : nullptr;
+}
+
+bool
+gbk_proto_get_data (const GbkFrame *f, const uint8_t **data, size_t *len)
+{
+  if (f->type != GBK_MSG_DATA || f->len > GBK_PROTO_DATA_MAX)
+    return false;
+  *data = f->payload;
+  *len = f->len;
+  return true;
+}
+
+bool
+gbk_proto_get_end (const GbkFrame *f, bool *changed)
+{
+  if (f->type != GBK_MSG_END)
+    return false;
+  Reader r = reader (f);
+  uint8_t c = get_u8 (&r);
+  if (!done (&r) || c > 1)
+    return false;
+  *changed = c == 1;
+  return true;
+}
+
+bool
+gbk_proto_get_read (const GbkFrame *f, char **path, uint32_t *credit)
+{
+  *path = nullptr;
+  if (f->type != GBK_MSG_READ)
+    return false;
+  Reader r = reader (f);
+  g_autofree char *p = get_str (&r, PATH_MAX_BYTES);
+  uint32_t c = get_u32 (&r);
+  if (!done (&r) || !absolute (p))
+    return false;
+  *path = g_steal_pointer (&p);
+  *credit = c;
+  return true;
+}
+
+bool
+gbk_proto_get_credit (const GbkFrame *f, uint32_t *bytes)
+{
+  if (f->type != GBK_MSG_CREDIT)
+    return false;
+  Reader r = reader (f);
+  uint32_t b = get_u32 (&r);
+  if (!done (&r))
+    return false;
+  *bytes = b;
+  return true;
 }

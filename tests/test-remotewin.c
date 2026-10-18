@@ -2,6 +2,7 @@
  * machine" is this one, under a private home). Phase 4 of docs/remote-plan.md: look, never
  * change; survive the connection dying. */
 #include "browser.h"
+#include "fetch.h"
 #include "conn.h"
 #include "job.h"
 #include "lifetime.h"
@@ -140,7 +141,7 @@ test_browse (void)
   gtk_widget_destroy (GTK_WIDGET (w));
 }
 
-/* Nothing that changes, runs or copies: each says so, starts no job, changes nothing. */
+/* Nothing that changes anything there: each says so, starts no job, changes nothing. */
 static void
 test_refusals (void)
 {
@@ -148,7 +149,7 @@ test_refusals (void)
   GbkWindow *w = window_on_remote_data ();
   GbkDirModel *m = model_of (w);
   gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (m, "a.txt"));
-  const char *actions[] = { "copy", "cut", "paste", "trash", "delete", "rename" };
+  const char *actions[] = { "cut", "paste", "trash", "delete", "rename" };
   for (size_t i = 0; i < G_N_ELEMENTS (actions); i++)
     {
       g_action_group_activate_action (G_ACTION_GROUP (w), actions[i], nullptr);
@@ -160,6 +161,125 @@ test_refusals (void)
     }
   g_assert_true (exists ("data/a.txt"));
   gtk_widget_destroy (GTK_WIDGET (w));
+}
+
+static bool
+file_there (void *path)
+{
+  return g_file_test (path, G_FILE_TEST_EXISTS);
+}
+
+static bool
+no_jobs (void *data G_GNUC_UNUSED)
+{
+  return gbk_job_live () == 0;
+}
+
+/* Copy there, paste here: the file arrives. A cut from there is refused (moving comes later). */
+static void
+test_copy_paste_here (void)
+{
+  put ("data/a.txt", "aaa");
+  put ("here/keep", "");
+  GbkWindow *w = window_on_remote_data ();
+  GbkDirModel *m = model_of (w);
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (m, "a.txt"));
+  g_action_group_activate_action (G_ACTION_GROUP (w), "copy", nullptr);
+  while (gtk_events_pending ())
+    gtk_main_iteration ();
+  g_assert_cmpstr (gbk_window_status (w), ==, "1 item copied");
+
+  g_autofree char *here = g_build_filename (home, "here", nullptr);
+  g_autoptr (GbkLoc) here_loc = gbk_loc_new_local (here);
+  gbk_window_new_tab (w, here_loc);
+  g_action_group_activate_action (G_ACTION_GROUP (w), "paste", nullptr);
+  g_autofree char *arrived = g_build_filename (here, "a.txt", nullptr);
+  g_assert_true (wait_until (file_there, arrived));
+  g_assert_true (wait_until (no_jobs, nullptr));
+  g_autofree char *content = nullptr;
+  g_assert_true (g_file_get_contents (arrived, &content, nullptr, nullptr));
+  g_assert_cmpstr (content, ==, "aaa");
+
+  /* Cut there, paste here: refused, nothing moves. */
+  gbk_window_tab_loc (w, 0);
+  gtk_notebook_set_current_page (
+      GTK_NOTEBOOK (gtk_widget_get_ancestor (GTK_WIDGET (gbk_window_view (w)), GTK_TYPE_NOTEBOOK)),
+      0);
+  while (gtk_events_pending ())
+    gtk_main_iteration ();
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "a.txt"));
+  g_action_group_activate_action (G_ACTION_GROUP (w), "cut", nullptr);
+  while (gtk_events_pending ())
+    gtk_main_iteration ();
+  g_assert_cmpstr (gbk_window_status (w), ==, "Not possible on another machine yet");
+  g_assert_true (exists ("data/a.txt"));
+  gtk_widget_destroy (GTK_WIDGET (w));
+}
+
+/* Opening a file there opens a read-only copy here, in the cache. */
+static void
+test_open_copy (void)
+{
+  put ("data/notes.txt", "notes");
+  GbkWindow *w = window_on_remote_data ();
+  GbkDirModel *m = model_of (w);
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (m, "notes.txt"));
+  g_signal_emit_by_name (gbk_window_view (w), "activate");
+  /* The stand-in default application leaves "<file>.opened" beside what it opened. */
+  g_autofree char *cache = g_build_filename (home, ".cache", "quoin", "remote", nullptr);
+  g_autofree char *opened = nullptr;
+  int64_t deadline = g_get_monotonic_time () + INT64_C (20) * G_USEC_PER_SEC;
+  while (opened == nullptr && g_get_monotonic_time () < deadline)
+    {
+      while (gtk_events_pending ())
+        gtk_main_iteration ();
+      g_autoptr (GDir) d = g_dir_open (cache, 0, nullptr);
+      const char *name;
+      while (d != nullptr && (name = g_dir_read_name (d)) != nullptr)
+        {
+          g_autofree char *marker = g_build_filename (cache, name, "notes.txt.opened", nullptr);
+          if (g_file_test (marker, G_FILE_TEST_EXISTS))
+            opened = g_build_filename (cache, name, "notes.txt", nullptr);
+        }
+      g_usleep (5000);
+    }
+  g_assert_nonnull (opened);
+  g_autofree char *content = nullptr;
+  g_assert_true (g_file_get_contents (opened, &content, nullptr, nullptr));
+  g_assert_cmpstr (content, ==, "notes");
+  struct stat st;
+  g_assert_cmpint (stat (opened, &st), ==, 0);
+  g_assert_cmpint (st.st_mode & 0222, ==, 0);      /* read-only: saves can't go anywhere yet */
+  g_autofree char *dir = g_path_get_dirname (opened);
+  g_assert_cmpint (stat (dir, &st), ==, 0);
+  g_assert_cmpint (st.st_mode & 0777, ==, 0700);   /* private */
+  gtk_widget_destroy (GTK_WIDGET (w));
+}
+
+static bool
+gone (void *path)
+{
+  return !g_file_test (path, G_FILE_TEST_EXISTS);
+}
+
+/* Cache folders older than the limit go (read-only files in them too); newer ones stay. */
+static void
+test_cache_cleanup (void)
+{
+  g_autofree char *cache = gbk_fetch_cache_dir ();
+  g_autofree char *old = g_build_filename (cache, "oldone", nullptr);
+  g_autofree char *young = g_build_filename (cache, "young", nullptr);
+  g_autofree char *old_file = g_build_filename (old, "f.txt", nullptr);
+  g_mkdir_with_parents (old, 0700);
+  g_mkdir_with_parents (young, 0700);
+  g_assert_true (g_file_set_contents (old_file, "x", -1, nullptr));
+  g_assert_cmpint (chmod (old_file, 0444), ==, 0);
+  const time_t then = time (nullptr) - (time_t) 10 * 24 * 3600;
+  const struct timespec ten_days_ago[2] = { { then, 0 }, { then, 0 } };
+  g_assert_cmpint (utimensat (AT_FDCWD, old, ten_days_ago, 0), ==, 0);
+  gbk_fetch_cleanup_start (GBK_FETCH_KEEP_DAYS);
+  g_assert_true (wait_until (gone, old));
+  g_assert_true (g_file_test (young, G_FILE_TEST_IS_DIR));
 }
 
 static bool
@@ -256,6 +376,24 @@ main (int argc, char **argv)
   g_setenv ("HOME", home, true);
   g_autofree char *data_home = g_build_filename (home, "xdg-data", nullptr);
   g_setenv ("XDG_DATA_HOME", data_home, true);
+  /* A stand-in default application for text/plain: it marks what it was asked to open. */
+  g_autofree char *config_home = g_build_filename (home, "xdg-config", nullptr);
+  g_autofree char *apps = g_build_filename (data_home, "applications", nullptr);
+  g_mkdir_with_parents (apps, 0755);
+  g_mkdir_with_parents (config_home, 0755);
+  g_autofree char *opener = g_build_filename (home, "opener", nullptr);
+  g_assert_true (g_file_set_contents (opener, "#!/bin/sh\nfor f; do touch \"$f.opened\"; done\n",
+                                      -1, nullptr));
+  g_assert_cmpint (chmod (opener, 0755), ==, 0);
+  g_autofree char *desktop = g_strdup_printf (
+      "[Desktop Entry]\nType=Application\nName=Opener\nExec=%s %%F\nMimeType=text/plain;\n",
+      opener);
+  g_autofree char *desktop_path = g_build_filename (apps, "gbk-opener.desktop", nullptr);
+  g_assert_true (g_file_set_contents (desktop_path, desktop, -1, nullptr));
+  g_autofree char *mimeapps = g_build_filename (config_home, "mimeapps.list", nullptr);
+  g_assert_true (g_file_set_contents (
+      mimeapps, "[Default Applications]\ntext/plain=gbk-opener.desktop\n", -1, nullptr));
+  g_setenv ("XDG_CONFIG_HOME", config_home, true);
   pid_path = g_build_filename (home, "ssh.pid", nullptr);
   g_setenv ("FAKE_SSH_PIDFILE", pid_path, true);
   g_autofree char *fake
@@ -273,6 +411,9 @@ main (int argc, char **argv)
   g_test_add_func ("/remotewin/properties", test_properties);
   g_test_add_func ("/remotewin/disconnect-and-back", test_disconnect_and_back);
   g_test_add_func ("/remotewin/network-action", test_network_action);
+  g_test_add_func ("/remotewin/copy-paste-here", test_copy_paste_here);
+  g_test_add_func ("/remotewin/open-copy", test_open_copy);
+  g_test_add_func ("/remotewin/cache-cleanup", test_cache_cleanup);
   int status = g_test_run ();
 
   while (gtk_events_pending ())

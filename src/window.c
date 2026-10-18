@@ -1,6 +1,7 @@
 #include "window.h"
 #include "clipboard.h"
 #include "devices.h"
+#include "fetch.h"
 #include "cliptext.h"
 #include "jobui.h"
 #include "lifetime.h"
@@ -116,18 +117,27 @@ update_tab_label (GbkBrowser *b)
   gtk_widget_set_tooltip_text (GTK_WIDGET (label), full);
 }
 
+/* Whether `b` is the tab on show. False while the window is being torn down (no tab is
+ * current then, and a tab being disposed may still report a change). */
+static bool
+is_current (GbkWindow *w, const GbkBrowser *b)
+{
+  int i = gtk_notebook_get_current_page (w->tabs);
+  return i >= 0 && (const void *) gtk_notebook_get_nth_page (w->tabs, i) == (const void *) b;
+}
+
 static void
 on_browser_path (GbkBrowser *b, GbkWindow *w)
 {
   update_tab_label (b);
-  if (b == active (w))
+  if (is_current (w, b))
     update_chrome (w);
 }
 
 static void
 on_browser_status (GbkBrowser *b, GbkWindow *w)
 {
-  if (b == active (w))
+  if (is_current (w, b))
     update_status (w);
 }
 
@@ -269,9 +279,9 @@ on_sort_button_clicked (GtkButton *button G_GNUC_UNUSED, GbkWindow *w)
 /* Shortcuts ask what the menu asks (gbk_menu_works_remote): on another machine, browsing
  * only for now. True, with a message, if `kind` isn't possible in tab `b`. */
 static bool
-refused_remote (GbkBrowser *b, GbkMenuKind kind, bool on_file)
+refused_remote (GbkBrowser *b, GbkMenuKind kind)
 {
-  if (gbk_loc_is_local (gbk_browser_loc (b)) || gbk_menu_works_remote (kind, on_file))
+  if (gbk_loc_is_local (gbk_browser_loc (b)) || gbk_menu_works_remote (kind))
     return false;
   gbk_browser_set_message (b, "Not possible on another machine yet");
   return true;
@@ -325,11 +335,18 @@ open_items (GbkWindow *w, GbkBrowser *b, GPtrArray *items)
       gbk_browser_open (b, ((GbkItem *) g_ptr_array_index (items, 0))->loc);
       return;
     }
+  /* Files on another machine open as read-only copies (fetch.h): never run from there. */
+  g_autoptr (GPtrArray) fetch = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_item_free);
   for (guint i = 0; i < items->len; i++)
     {
       const GbkItem *it = g_ptr_array_index (items, i);
-      if (!it->is_dir && refused_remote (b, GBK_MENU_OPEN, true))
-        return;
+      if (!it->is_dir && !gbk_loc_is_local (it->loc))
+        g_ptr_array_add (fetch, gbk_item_copy (it));
+    }
+  if (fetch->len > 0)
+    {
+      gbk_fetch_open (GTK_WINDOW (w), fetch, nullptr);
+      return;
     }
   g_autoptr (GPtrArray) by_default = g_ptr_array_new ();
   for (guint i = 0; i < items->len; i++)
@@ -431,6 +448,13 @@ on_paste_files (GPtrArray *locs, bool cut, void *data)
       gbk_browser_set_message (active (w), "Nothing to paste");
       return;
     }
+  for (guint i = 0; cut && i < locs->len; i++)
+    if (!gbk_loc_is_local (g_ptr_array_index (locs, i)))
+      {
+        gbk_browser_set_message (active (w), "Moving files from another machine comes later; "
+                                             "copy them instead");
+        return;
+      }
   g_autoptr (GbkJob) job = gbk_job_new (cut ? GBK_OP_MOVE : GBK_OP_COPY, locs, dest);
   if (cut)
     g_object_set_data (G_OBJECT (job), "gbk-from-cut", GINT_TO_POINTER (1));
@@ -707,6 +731,15 @@ on_menu_item (GtkMenuItem *mi, GbkWindow *w)
     case GBK_MENU_OPEN_WITH:
       {
         GAppInfo *app = g_object_get_data (G_OBJECT (mi), KEY_APP);
+        if (!gbk_loc_is_local (first->loc))
+          {
+            g_autoptr (GPtrArray) copies
+                = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_item_free);
+            for (guint i = 0; i < items->len; i++)
+              g_ptr_array_add (copies, gbk_item_copy (g_ptr_array_index (items, i)));
+            gbk_fetch_open (GTK_WINDOW (w), copies, app);
+            break;
+          }
         g_autoptr (GAppLaunchContext) lc = launch_context (w);
         ok = gbk_open_with (app, items, lc, &error);
         break;
@@ -958,7 +991,7 @@ ask_drop (GbkWindow *w, GbkBrowser *b, GPtrArray *locs, GbkLoc *dest, GtkWidget 
       gbk_browser_set_message (b, "Already in this folder");
       return;
     }
-  if (refused_remote (b, GBK_MENU_PASTE, true))
+  if (refused_remote (b, GBK_MENU_PASTE))
     return;
   GtkWidget *menu = gtk_menu_new ();
   g_object_set_data_full (G_OBJECT (menu), KEY_DROP_LOCS, g_ptr_array_ref (locs),
@@ -1153,7 +1186,7 @@ ACTION (action_terminal)
 
 ACTION (action_copy)
 {
-  if (refused_remote (active (data), GBK_MENU_COPY, true))
+  if (refused_remote (active (data), GBK_MENU_COPY))
     return;
   g_autoptr (GPtrArray) items = snapshot_selection (data, active (data));
   copy_items (data, active (data), items, false);
@@ -1161,7 +1194,7 @@ ACTION (action_copy)
 
 ACTION (action_cut)
 {
-  if (refused_remote (active (data), GBK_MENU_CUT, true))
+  if (refused_remote (active (data), GBK_MENU_CUT))
     return;
   g_autoptr (GPtrArray) items = snapshot_selection (data, active (data));
   copy_items (data, active (data), items, true);
@@ -1169,14 +1202,14 @@ ACTION (action_cut)
 
 ACTION (action_paste)
 {
-  if (refused_remote (active (data), GBK_MENU_PASTE, true))
+  if (refused_remote (active (data), GBK_MENU_PASTE))
     return;
   paste_into (data, gbk_browser_loc (active (data)));
 }
 
 ACTION (action_trash)
 {
-  if (refused_remote (active (data), GBK_MENU_TRASH, true))
+  if (refused_remote (active (data), GBK_MENU_TRASH))
     return;
   g_autoptr (GPtrArray) items = snapshot_selection (data, active (data));
   trash_items (data, items);
@@ -1184,7 +1217,7 @@ ACTION (action_trash)
 
 ACTION (action_delete)
 {
-  if (refused_remote (active (data), GBK_MENU_DELETE, true))
+  if (refused_remote (active (data), GBK_MENU_DELETE))
     return;
   g_autoptr (GPtrArray) items = snapshot_selection (data, active (data));
   delete_items (data, items);
@@ -1192,7 +1225,7 @@ ACTION (action_delete)
 
 ACTION (action_rename)
 {
-  if (refused_remote (active (data), GBK_MENU_RENAME, true))
+  if (refused_remote (active (data), GBK_MENU_RENAME))
     return;
   g_autoptr (GPtrArray) items = snapshot_selection (data, active (data));
   if (items->len == 1)

@@ -436,6 +436,14 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   gbk_conn_info; F4 remote = TerminalRun ssh -t ... --shell-at HEX; Network ☰ submenu
   (~/.ssh/config Host names + used hosts). GtkMountOperation parent-ref leak worked around
   in window.c device_action (found because the registry made the leaked context visible).
+  Phase 5: protocol LIST/LSTAT/READ(+CREDIT/CANCEL)/LISTING/STATED/DATA/END; serve.c
+  general worker Tasks (credit cond var for READ); fileops GbkSource (local: fds +
+  copy_file_range; remote in conn.c via worker-thread Calls routed by channel in the I/O
+  thread, dead connection fails every Call); gbk_ops_run_from; GbkStatEntry lives in
+  fileops.h; jobs COPY remote->local; clipboard x-special/quoin-locations (cliptext,
+  fuzzed); fetch.c = Open/Open With remote files (cache, read-only, 7-day cleanup).
+  Found: window teardown crash (two tabs, selection, first tab current) - fixed, tested.
+  check-source `widening` rule after the 6th implicit-widening finding.
 - CHAIN with && : a check run after a failing edit script tests unchanged code (did it
   2026-10-17). Edits then `./build format && ./build check`.
 - FORMAT before CHECK: `./build format` rewrites C with clang-format; run it before every

@@ -29,6 +29,16 @@ gbk_item_new (const GbkConfig *config, const GbkTypeTable *types, const GbkLoc *
 }
 
 GbkItem *
+gbk_item_copy (const GbkItem *it)
+{
+  GbkItem *c = g_memdup2 (it, sizeof *it);
+  c->loc = gbk_loc_ref (it->loc);
+  c->display = g_strdup (it->display);
+  c->mime = g_strdup (it->mime);
+  return c;
+}
+
+GbkItem *
 gbk_item_new_dir (GbkLoc *dir)
 {
   GbkItem *it = g_new0 (GbkItem, 1);

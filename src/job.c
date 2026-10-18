@@ -1,5 +1,6 @@
 #include "job.h"
 #include "lifetime.h"
+#include "remote.h"
 
 #define PROGRESS_INTERVAL_US (INT64_C (50) * 1000)
 
@@ -36,7 +37,8 @@ typedef struct
   bool answer_all;
 
   GbkJobKind kind;
-  bool remote;             /* a location isn't on this machine: the job fails at start */
+  GError *refused;         /* can't run at all (another machine, beyond what works there) */
+  GbkSource *source;       /* a copy from another machine: read through it (else here) */
   GPtrArray *sources;      /* local paths */
   char *dest;
   char *name;              /* rename: the new name; create: the name to create */
@@ -99,6 +101,8 @@ shared_unref (Shared *s)
   g_cond_clear (&s->cond);
   g_ptr_array_unref (s->sources);
   g_free (s->dest);
+  g_clear_error (&s->refused);
+  gbk_source_free (s->source);
   g_free (s->name);
   g_free (s);
 }
@@ -233,7 +237,10 @@ worker (void *data)
   switch (s->kind)
     {
     case GBK_JOB_COPY:
-      ok = gbk_ops_run (GBK_OP_COPY, s->sources, s->dest, &hooks, done->created, &done->error);
+      ok = s->source != nullptr ? gbk_ops_run_from (s->source, GBK_OP_COPY, s->sources, s->dest,
+                                                    &hooks, done->created, &done->error)
+                                : gbk_ops_run (GBK_OP_COPY, s->sources, s->dest, &hooks,
+                                               done->created, &done->error);
       agree (ok, done->error);
       break;
     case GBK_JOB_MOVE:
@@ -360,12 +367,10 @@ gbk_job_start (GbkJob *job)
   job->watch = gbk_fd_watch (G_OBJECT (job), job->s->wake_fd, G_IO_IN, on_wake, job);
   g_atomic_ref_count_inc (&job->s->rc);
   g_autoptr (GError) error = nullptr;
-  GThread *t = nullptr;
-  if (job->s->remote)
-    g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                         "Not possible for files on another machine yet");
-  else
-    t = g_thread_try_new ("gbk-job", worker, job->s, &error);
+  GThread *t
+      = job->s->refused == nullptr ? g_thread_try_new ("gbk-job", worker, job->s, &error) : nullptr;
+  if (job->s->refused != nullptr)
+    error = g_error_copy (job->s->refused);
   if (t == nullptr)
     {
       shared_unref (job->s);
@@ -412,6 +417,35 @@ gbk_job_init (GbkJob *job G_GNUC_UNUSED)
 }
 
 /* `sources` are GbkLoc*; `dest` may be nullptr. */
+/* Copying from another machine (all of `locs` on one, the destination here): their paths
+ * there, read through that machine's connection. nullptr with s->refused otherwise. */
+static GPtrArray *
+remote_sources (Shared *s, const GPtrArray *locs)
+{
+  const char *host = locs->len > 0 ? gbk_loc_host (g_ptr_array_index (locs, 0)) : nullptr;
+  for (guint i = 0; i < locs->len; i++)
+    if (g_strcmp0 (gbk_loc_host (g_ptr_array_index (locs, i)), host) != 0 || host == nullptr)
+      {
+        s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                          "Copy from one machine at a time");
+        return nullptr;
+      }
+  GbkRemote *r = gbk_remote_default ();
+  g_autoptr (GbkConn) c = r != nullptr ? gbk_remote_conn (r, host, &s->refused) : nullptr;
+  if (c == nullptr)
+    {
+      if (s->refused == nullptr)
+        s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                          "Other machines can't be reached from here");
+      return nullptr;
+    }
+  s->source = gbk_conn_source (c);
+  GPtrArray *paths = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; i < locs->len; i++)
+    g_ptr_array_add (paths, g_strdup (gbk_loc_path (g_ptr_array_index (locs, i))));
+  return paths;
+}
+
 static GbkJob *
 job_new (GbkJobKind kind, const GPtrArray *sources, GbkLoc *dest)
 {
@@ -425,9 +459,14 @@ job_new (GbkJobKind kind, const GPtrArray *sources, GbkLoc *dest)
   g_mutex_init (&s->lock);
   g_cond_init (&s->cond);
   s->kind = kind;
-  s->sources = gbk_loc_array_as_local (sources);
   const char *dest_path = nullptr;
-  s->remote = s->sources == nullptr || (dest != nullptr && !gbk_loc_as_local (dest, &dest_path));
+  bool dest_here = dest == nullptr || gbk_loc_as_local (dest, &dest_path);
+  s->sources = gbk_loc_array_as_local (sources);
+  if (s->sources == nullptr && kind == GBK_JOB_COPY && dest_here)
+    s->sources = remote_sources (s, sources); /* sets s->source, or s->refused */
+  else if (s->sources == nullptr || !dest_here)
+    s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                      "Not possible for files on another machine yet");
   if (s->sources == nullptr)
     s->sources = g_ptr_array_new_with_free_func (g_free);
   s->dest = g_strdup (dest_path);

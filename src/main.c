@@ -1,3 +1,4 @@
+#include "fetch.h"
 #include "lifetime.h"
 #include "window.h"
 
@@ -16,6 +17,7 @@ on_activate (GtkApplication *gtk_app, App *app)
 {
   gtk_window_set_default_icon_name (APP_ID);
   gbk_window_install_accels (gtk_app);
+  gbk_fetch_cleanup_start (GBK_FETCH_KEEP_DAYS);   /* old copies of other machines' files */
 
   GbkWindow *w = gbk_window_new (gtk_app, app->ctx, app->start);
   gtk_widget_show_all (GTK_WIDGET (w));

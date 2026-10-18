@@ -1611,6 +1611,34 @@ no_workers (void *data G_GNUC_UNUSED)
   return gbk_scanner_live_workers () == 0;
 }
 
+/* Closing a window with several tabs, each with a selection: tearing a tab down clears its
+ * selection, and nothing may then ask the half-gone window for its current tab (it used to
+ * abort: "window without tabs"). */
+static void
+test_close_with_selections (void)
+{
+  g_autofree char *root = g_dir_make_tmp ("gbk-win-XXXXXX", nullptr);
+  mkdirs (root, (const char *const[]) { "a.txt", "sub/", "sub/b.txt", nullptr });
+  GbkWindow *w = window_at (app, ctx, root);
+  gtk_widget_show_all (GTK_WIDGET (w));
+  wait_at (w, root);
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "a.txt"));
+  g_autofree char *sub = g_build_filename (root, "sub", nullptr);
+  new_tab_at (w, sub);
+  wait_at (w, sub);
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "b.txt"));
+  /* Back on the first tab: tearing down then takes the current tab away first. */
+  GtkNotebook *tabs = GTK_NOTEBOOK (
+      gtk_widget_get_ancestor (GTK_WIDGET (gbk_window_view (w)), GTK_TYPE_NOTEBOOK));
+  gtk_notebook_set_current_page (tabs, 0);
+  while (gtk_events_pending ())
+    gtk_main_iteration ();
+  gtk_widget_destroy (GTK_WIDGET (w));
+  while (gtk_events_pending ())
+    gtk_main_iteration ();
+  rm_rf (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1643,6 +1671,7 @@ main (int argc, char **argv)
   g_test_add_func ("/window/pathbar", test_pathbar);
   g_test_add_func ("/window/keys-go-to-focused-entry", test_keys_go_to_focused_entry);
   g_test_add_func ("/window/tabs", test_tabs);
+  g_test_add_func ("/window/close-with-selections", test_close_with_selections);
   int status = g_test_run ();
 
   while (gtk_events_pending ())

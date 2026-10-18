@@ -14,6 +14,7 @@ struct _GbkBrowser
   GtkBox *toolbar;
   GbkPathbar *pathbar;
   GbkView *view;
+  bool disposing;
   GtkInfoBar *bar;            /* a folder on another machine that can't be reached */
   GtkLabel *bar_label;
   GtkWidget *login_button;
@@ -52,7 +53,8 @@ static guint signals[N_SIGNALS];
 static void
 status_changed (GbkBrowser *b)
 {
-  g_signal_emit (b, signals[SIGNAL_STATUS_CHANGED], 0);
+  if (!b->disposing)                    /* going away: nobody needs its status now */
+    g_signal_emit (b, signals[SIGNAL_STATUS_CHANGED], 0);
 }
 
 /* ---- status ---- */
@@ -563,6 +565,7 @@ static void
 gbk_browser_dispose (GObject *o)
 {
   GbkBrowser *b = GBK_BROWSER (o);
+  b->disposing = true;
   clear_pending (b);
   if (b->model != nullptr)
     set_model (b, nullptr);

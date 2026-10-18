@@ -73,9 +73,12 @@ program that won't start. On anything else, [build from source](#building).
   Quoin reconnects by itself. The first visit sends a small helper program, quoin-serve,
   to `~/.cache/quoin/serve/` on that machine; nothing needs installing there. Logins use
   your ssh keys and agent; when ssh needs a passphrase or a host key accepted, **Log in
-  in a terminal** does it once. For now you can look around, see Properties, copy a
-  path (`ws1:/srv/x`, as scp takes it) and open a terminal there (F4); opening and
-  copying files come next (see [docs/remote-plan.md](docs/remote-plan.md)).
+  in a terminal** does it once. You can look around, see Properties, open a terminal
+  there (F4), copy a path (`ws1:/srv/x`, as scp takes it), **open** files (a read-only
+  copy is fetched into `~/.cache/quoin/remote/` and opened from there), and **copy**
+  files and folders to this machine (Copy there, Paste here). Editing files in place,
+  copying the other way and changing anything there come next (see
+  [docs/remote-plan.md](docs/remote-plan.md)).
 - **Properties** (right-click menu or Alt+Enter): dates (modified, accessed, changed,
   created), size, owner, group, link target, and read / write / execute permissions you can
   change with Apply. For files, the right-click menu also has an **Executable** check

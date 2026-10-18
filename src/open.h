@@ -36,6 +36,7 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (GbkItem, gbk_item_free)
 /* Snapshot of a model entry. `dir` is the directory containing it. */
 [[nodiscard]] GbkItem *gbk_item_new (const GbkConfig *config, const GbkTypeTable *types,
                                      const GbkLoc *dir, const GbkEntry *e);
+[[nodiscard]] GbkItem *gbk_item_copy (const GbkItem *it);
 /* The directory itself as an item (right-click on empty space). */
 [[nodiscard]] GbkItem *gbk_item_new_dir (GbkLoc *dir);
 

@@ -1,0 +1,5 @@
+copy
+ws1	/srv/a%20b
+	/home/u/x
+-oX	/bad
+ws1	/no%00nul

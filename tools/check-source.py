@@ -28,6 +28,10 @@ Rules:
               controls, line and paragraph separators) in source: write them as escapes
               (CD-7). GCC rejects the bidirectional ones itself; this covers the rest, in
               every file the compiler doesn't read too (meson.build, scripts).
+  widening    a #define that multiplies integer literals says its type (a cast, or INT64_C and
+              the like): `64u * 1024u` is an unsigned int, silently widened (or overflowed)
+              wherever it meets a size or a 64-bit time. clang-tidy finds the uses one by one
+              (bugprone-implicit-widening-of-multiplication-result); this finds the cause.
   locpath     gbk_loc_path() (a location's path on its own machine, which may not be this
               one) is called only where a location's path is shown or new locations are
               built from it: LOC_PATH_FILES. Everywhere else a path for a file API comes from
@@ -210,6 +214,9 @@ VOID_CASTS = {
     "src/fileops.c": (6, "copying keeps owner, xattrs, mode and times as far as the "
                          "destination allows, as cp -a does: each failure is expected and "
                          "the copy itself has already succeeded"),
+    "src/fetch.c": (1, "making a fetched copy read-only is a courtesy: if it fails, the copy "
+                       "stays writable, and saving it still changes nothing on the other "
+                       "machine"),
     "src/window.c": (1, "a device action for an id that names no device (a stale menu or a "
                         "stray D-Bus activation) does nothing"),
 }
@@ -273,6 +280,18 @@ def message(path, text):
     return problems
 
 
+DEFINE_MUL = re.compile(r"^[ \t]*#[ \t]*define[ \t]+(\w+)[ \t]+(.*\b[0-9]+[uUlL]*[ \t]*\*[ \t]*[0-9]+.*)$",
+                        re.M)
+TYPED = re.compile(r"\(\s*(?:const\s+)?[A-Za-z_][A-Za-z_0-9]*\s*\)\s*[0-9(]|\b[A-Z0-9]+_C\s*\(")
+
+
+def widening(path, text):
+    code = COMMENT.sub(" ", text)
+    return [f"{path}:{code.count(chr(10), 0, m.start()) + 1}: #define {m.group(1)} multiplies "
+            "literals without saying the type: write ((size_t) 64 * 1024), INT64_C (...)"
+            for m in DEFINE_MUL.finditer(code) if not TYPED.search(m.group(2))]
+
+
 LOC_PATH_CALL = re.compile(r"\bgbk_loc_path\s*\(")
 LOC_PATH_FILES = {
     "src/loc.c": "defines it",
@@ -281,6 +300,9 @@ LOC_PATH_FILES = {
     "src/dirmodel.c": "asks the other machine to watch its own folder (gbk_conn_watch)",
     "src/open.c": "hands another machine's folder to ssh, hex-encoded (gbk_conn_shell_argv)",
     "src/props.c": "asks the other machine for its own file's details (gbk_conn_info)",
+    "src/job.c": "hands another machine's paths to a copy reading from there (gbk_conn_source)",
+    "src/cliptext.c": "writes locations as text for the clipboard between Quoin windows",
+    "tests/fuzz/fuzz-clip.c": "checks the clipboard round trip",
     "tests/test-loc.c": "tests it",
     "tests/test-remotewin.c": "checks which folder on the other machine a window shows",
 }
@@ -304,7 +326,8 @@ def hidden(path, text):
             for m in HIDDEN.finditer(text)]
 
 
-RULES = [nodiscard, unsequenced, discarded, suppression, logpath, message, hidden, locpath]
+RULES = [nodiscard, unsequenced, discarded, suppression, logpath, message, hidden, locpath,
+         widening]
 # Declarations of GLib's own functions, for the analyzer: not ours to mark.
 EXEMPT = {"src/analyzer-glib.h"}
 
@@ -385,6 +408,13 @@ EXAMPLES = [
     (logpath, "src/x.c", "gbk_fatal (\"bad kind %d\", (int) kind);", 0),
     (logpath, "src/x.c", "g_warning (\"no path here\");", 0),
     (logpath, "tests/x.c", "gbk_fatal (\"opendir %s\", dir);", 0),
+    (widening, "x.c", "#define CHUNK (64u * 1024u)", 1),
+    (widening, "x.c", "#define WAIT_MS (5 * 60 * 1000)   /* five minutes */", 1),
+    (widening, "x.c", "#define CHUNK ((size_t) 64 * 1024)", 0),
+    (widening, "x.c", "#define LIMIT (INT64_C (10) * 1000)", 0),
+    (widening, "x.c", "#define SHIFT (1u << 20)", 0),
+    (widening, "x.c", "#define N 64", 0),
+    (widening, "x.c", "/* #define CHUNK (64 * 1024) */", 0),
     (locpath, "src/window.c", "open (gbk_loc_path (loc), O_RDONLY);", 1),
     (locpath, "tests/x.c", "const char *p = gbk_loc_path(loc);", 1),
     (locpath, "src/pathbar.c", "const char *rest = gbk_loc_path (bar->deep);", 0),

@@ -13,7 +13,221 @@ typedef struct
   bool incomplete;        /* something inside the current top-level item was skipped */
   uint64_t done, total;
   GHashTable *links;      /* "dev:ino" -> first copy's path, for sources with nlink > 1 */
+  GbkSource *src;         /* where sources are read */
 } Ctx;
+
+void
+gbk_stat_entry_free (GbkStatEntry *e)
+{
+  if (e == nullptr)
+    return;
+  g_free (e->name);
+  g_free (e->target);
+  g_free (e);
+}
+
+GbkStatEntry *
+gbk_stat_entry_new (const char *name, const struct stat *st, const char *target)
+{
+  GbkStatEntry *e = g_new0 (GbkStatEntry, 1);
+  e->name = g_strdup (name);
+  e->mode = st->st_mode;
+  e->uid = st->st_uid;
+  e->gid = st->st_gid;
+  e->nlink = st->st_nlink;
+  e->size = (uint64_t) st->st_size;
+  e->dev = st->st_dev;
+  e->ino = st->st_ino;
+  e->rdev = st->st_rdev;
+  e->atime_ns = (int64_t) st->st_atim.tv_sec * 1000000000 + st->st_atim.tv_nsec;
+  e->mtime_ns = (int64_t) st->st_mtim.tv_sec * 1000000000 + st->st_mtim.tv_nsec;
+  e->ctime_ns = (int64_t) st->st_ctim.tv_sec * 1000000000 + st->st_ctim.tv_nsec;
+  e->target = S_ISLNK (st->st_mode) ? g_strdup (target) : nullptr;
+  return e;
+}
+
+/* The details as a struct stat: the fields a copy uses. */
+static void
+entry_stat (const GbkStatEntry *e, struct stat *st)
+{
+  *st = (struct stat) { 0 };
+  st->st_mode = e->mode;
+  st->st_uid = e->uid;
+  st->st_gid = e->gid;
+  st->st_nlink = (nlink_t) e->nlink;
+  st->st_size = (off_t) e->size;
+  st->st_dev = (dev_t) e->dev;
+  st->st_ino = (ino_t) e->ino;
+  st->st_rdev = (dev_t) e->rdev;
+  st->st_atim = (struct timespec) { e->atime_ns / 1000000000, e->atime_ns % 1000000000 };
+  st->st_mtim = (struct timespec) { e->mtime_ns / 1000000000, e->mtime_ns % 1000000000 };
+  st->st_ctim = (struct timespec) { e->ctime_ns / 1000000000, e->ctime_ns % 1000000000 };
+}
+
+static void
+set_errno_gerror (GError **error, int err)
+{
+  g_set_error_literal (error, G_IO_ERROR, (int) g_io_error_from_errno (err), g_strerror (err));
+}
+
+/* ---- this machine as a source ---- */
+
+typedef struct
+{
+  GbkSourceFile base;
+  int fd;
+} LocalFile;
+
+GbkStatEntry *
+gbk_stat_entry_at (int dirfd, const char *name, const char *entry_name, GError **error)
+{
+  struct stat st;
+  if (fstatat (dirfd, name, &st, AT_SYMLINK_NOFOLLOW) != 0)
+    {
+      set_errno_gerror (error, errno);
+      return nullptr;
+    }
+  g_autofree char *target = nullptr;
+  if (S_ISLNK (st.st_mode))
+    {
+      char buf[PATH_MAX];
+      ssize_t n = readlinkat (dirfd, name, buf, sizeof buf - 1);
+      if (n <= 0)
+        {
+          set_errno_gerror (error, n < 0 ? errno : EINVAL);
+          return nullptr;
+        }
+      target = g_strndup (buf, (size_t) n);
+    }
+  return gbk_stat_entry_new (entry_name, &st, target);
+}
+
+[[nodiscard]] static GbkStatEntry *
+local_lstat (GbkSource *s G_GNUC_UNUSED, const char *path, GError **error)
+{
+  return gbk_stat_entry_at (AT_FDCWD, path, nullptr, error);
+}
+
+/* An entry whose details can't be read is listed without them (mode 0): the copy reads
+ * them again, and reports that one item's error. */
+[[nodiscard]] static GPtrArray *
+local_list (GbkSource *s G_GNUC_UNUSED, const char *path, GError **error)
+{
+  int fd = open (path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  DIR *d = fd >= 0 ? fdopendir (fd) : nullptr;
+  if (d == nullptr)
+    {
+      int err = errno;
+      if (fd >= 0)
+        close (fd);
+      set_errno_gerror (error, err);
+      return nullptr;
+    }
+  int dfd = dirfd (d);
+  if (dfd < 0)
+    {
+      set_errno_gerror (error, errno);
+      closedir (d);
+      return nullptr;
+    }
+  GPtrArray *out = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_stat_entry_free);
+  const struct dirent *de;
+  while ((de = readdir (d)) != nullptr)
+    {
+      if (g_str_equal (de->d_name, ".") || g_str_equal (de->d_name, ".."))
+        continue;
+      g_autoptr (GError) e = nullptr;
+      GbkStatEntry *entry = gbk_stat_entry_at (dfd, de->d_name, de->d_name, &e);
+      if (entry == nullptr && g_error_matches (e, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))
+        continue;                        /* gone meanwhile */
+      if (entry == nullptr)
+        {
+          entry = g_new0 (GbkStatEntry, 1);
+          entry->name = g_strdup (de->d_name);
+        }
+      g_ptr_array_add (out, entry);
+    }
+  closedir (d);
+  return out;
+}
+
+[[nodiscard]] static GbkSourceFile *
+local_open (GbkSource *s, const char *path, GError **error)
+{
+  int fd = open (path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0)
+    {
+      set_errno_gerror (error, errno);
+      return nullptr;
+    }
+  LocalFile *f = g_new0 (LocalFile, 1);
+  f->base.source = s;
+  f->fd = fd;
+  return &f->base;
+}
+
+[[nodiscard]] static ssize_t
+local_read (GbkSourceFile *f, void *buf, size_t len, GError **error)
+{
+  const LocalFile *lf = (const LocalFile *) (const void *) f;
+  for (;;)
+    {
+      ssize_t n = read (lf->fd, buf, len);
+      if (n >= 0)
+        return n;
+      if (errno != EINTR)
+        {
+          set_errno_gerror (error, errno);
+          return -1;
+        }
+    }
+}
+
+static int
+local_fd (const GbkSourceFile *f)
+{
+  return ((const LocalFile *) (const void *) f)->fd;
+}
+
+static void
+local_close (GbkSourceFile *f)
+{
+  LocalFile *lf = (LocalFile *) (void *) f;
+  close (lf->fd);
+  g_free (lf);
+}
+
+static void
+local_free (GbkSource *s)
+{
+  g_free (s);
+}
+
+static const GbkSourceOps local_ops = {
+  .lstat = local_lstat,
+  .list = local_list,
+  .open = local_open,
+  .read = local_read,
+  .fd = local_fd,
+  .close = local_close,
+  .free = local_free,
+};
+
+GbkSource *
+gbk_source_local (void)
+{
+  GbkSource *s = g_new0 (GbkSource, 1);
+  s->ops = &local_ops;
+  s->local = true;
+  return s;
+}
+
+void
+gbk_source_free (GbkSource *s)
+{
+  if (s != nullptr)
+    s->ops->free (s);
+}
 
 /* ---- small helpers ---- */
 
@@ -40,6 +254,23 @@ fail_errno (Ctx *c, const char *path, int err, const char *what)
   g_autofree char *shown = g_filename_display_name (path);
   g_autoptr (GError) e = g_error_new (G_IO_ERROR, (int) g_io_error_from_errno (err), "%s %s: %s",
                                       what, shown, g_strerror (err));
+  GbkChoice ch = c->h->error != nullptr ? c->h->error (path, e, c->h->data) : GBK_CHOICE_CANCEL;
+  if (ch == GBK_CHOICE_CANCEL)
+    c->cancelled = true;
+  return !c->cancelled;
+}
+
+/* Report a GError for `path`, as fail_errno does an errno. */
+static bool
+fail_error (Ctx *c, const char *path, const char *what, const GError *err)
+{
+  c->incomplete = true;
+  g_autofree char *shown = g_filename_display_name (path);
+  /* A source that failed without saying why still fails, with a plain word. */
+  g_autoptr (GError) e
+      = err != nullptr
+            ? g_error_new (err->domain, err->code, "%s %s: %s", what, shown, err->message)
+            : g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED, "%s %s", what, shown);
   GbkChoice ch = c->h->error != nullptr ? c->h->error (path, e, c->h->data) : GBK_CHOICE_CANCEL;
   if (ch == GBK_CHOICE_CANCEL)
     c->cancelled = true;
@@ -126,22 +357,31 @@ gbk_ops_free_name (const char *dir, const char *name)
   return gbk_ops_numbered_name (name, (unsigned) (g_get_real_time () & 0x7fffffff));
 }
 
-/* Total work for progress: bytes of regular files (copy/move) or entries (trash/delete). */
+/* Total work for progress: bytes of regular files (copy/move) or entries (trash/delete).
+ * `known`: its details from the listing, if any. */
 static void
-measure (Ctx *c, const char *path, bool bytes, int depth)
+measure (Ctx *c, const char *path, const GbkStatEntry *known, bool bytes, int depth)
 {
-  struct stat st;
-  if (cancelled (c) || depth > GBK_OPS_MAX_DEPTH || lstat (path, &st) != 0)
+  if (cancelled (c) || depth > GBK_OPS_MAX_DEPTH)
     return;
-  c->total += bytes ? (S_ISREG (st.st_mode) ? (uint64_t) st.st_size : 0) : 1;
-  if (!S_ISDIR (st.st_mode))
-    return;
-  g_autoptr (GDir) d = g_dir_open (path, 0, nullptr);
-  const char *name;
-  while (d != nullptr && (name = g_dir_read_name (d)) != nullptr)
+  g_autoptr (GbkStatEntry) own = nullptr;
+  const GbkStatEntry *e = known;
+  if (e == nullptr || e->mode == 0)
     {
-      g_autofree char *child = g_build_filename (path, name, nullptr);
-      measure (c, child, bytes, depth + 1);
+      own = c->src->ops->lstat (c->src, path, nullptr);
+      if (own == nullptr)
+        return;
+      e = own;
+    }
+  c->total += bytes ? (S_ISREG (e->mode) ? e->size : 0) : 1;
+  if (!S_ISDIR (e->mode))
+    return;
+  g_autoptr (GPtrArray) kids = c->src->ops->list (c->src, path, nullptr);
+  for (guint i = 0; kids != nullptr && i < kids->len; i++)
+    {
+      const GbkStatEntry *k = g_ptr_array_index (kids, i);
+      g_autofree char *child = g_build_filename (path, k->name, nullptr);
+      measure (c, child, k, bytes, depth + 1);
     }
 }
 
@@ -206,15 +446,27 @@ keep_xattrs (int in, int out, const char *src, const char *dst)
     }
 }
 
-/* Owner, attributes, mode, times on a path (folders, links, special files). Order matters:
- * chown clears setuid/setgid, so the mode comes after it. Links have no mode of their own. */
-static void
-keep_metadata (const char *src, const char *dst, const struct stat *st)
+/* The permission bits a copy gets: all of them on this machine; from another, not setuid,
+ * setgid or sticky (they'd mean something else here). */
+static mode_t
+kept_mode (const Ctx *c, const struct stat *st)
 {
-  keep_owner_path (dst, st);
-  keep_xattrs (-1, -1, src, dst);
+  return st->st_mode & (c->src->local ? 07777 : 0777);
+}
+
+/* Owner, attributes, mode, times on a path (folders, links, special files). Order matters:
+ * chown clears setuid/setgid, so the mode comes after it. Links have no mode of their own.
+ * Owner and attributes only from this machine (see GbkSource). */
+static void
+keep_metadata (const Ctx *c, const char *src, const char *dst, const struct stat *st)
+{
+  if (c->src->local)
+    {
+      keep_owner_path (dst, st);
+      keep_xattrs (-1, -1, src, dst);
+    }
   if (!S_ISLNK (st->st_mode))
-    (void) !fchmodat (AT_FDCWD, dst, st->st_mode & 07777, 0);
+    (void) !fchmodat (AT_FDCWD, dst, kept_mode (c, st), 0);
   const struct timespec times[2] = { st->st_atim, st->st_mtim };
   (void) !utimensat (AT_FDCWD, dst, times, AT_SYMLINK_NOFOLLOW);
 }
@@ -280,14 +532,47 @@ copy_data (Ctx *c, int in, int out, const char *shown)
     }
 }
 
+/* Copy a source file without a descriptor of this machine (another machine's) to `out`.
+ * 0, ECANCELED, a write's errno, or -1 with *read_error. */
+[[nodiscard]] static int
+copy_stream (Ctx *c, GbkSourceFile *f, int out, const char *shown, GError **read_error)
+{
+  g_autofree char *buf = g_malloc (FALLBACK_BUF);
+  for (;;)
+    {
+      if (cancelled (c))
+        return ECANCELED;
+      ssize_t n = c->src->ops->read (f, buf, FALLBACK_BUF, read_error);
+      if (n < 0)
+        return cancelled (c) ? ECANCELED : -1;
+      if (n == 0)
+        return 0;
+      for (ssize_t off = 0; off < n;)
+        {
+          ssize_t w = write (out, buf + off, (size_t) (n - off));
+          if (w < 0)
+            {
+              if (errno == EINTR)
+                continue;
+              return errno;
+            }
+          off += w;
+        }
+      c->done += (uint64_t) n;
+      progress (c, shown);
+    }
+}
+
 /* Create `dst` as a copy of regular file `src` via a temp file in dst's directory, then an
  * atomic rename. `replace`: dst exists and the user chose to replace it. */
 static bool
 copy_file (Ctx *c, const char *src, const char *dst, const struct stat *st, bool replace)
 {
-  int in = open (src, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-  if (in < 0)
-    return fail_errno (c, src, errno, "Can't read");
+  g_autoptr (GError) open_error = nullptr;
+  GbkSourceFile *f = c->src->ops->open (c->src, src, &open_error);
+  if (f == nullptr)
+    return fail_error (c, src, "Can't read", open_error);
+  int in = c->src->ops->fd (f);
 
   g_autofree char *dir = g_path_get_dirname (dst);
   g_autofree char *tmp = g_build_filename (dir, TMP_PREFIX "XXXXXX", nullptr);
@@ -295,18 +580,19 @@ copy_file (Ctx *c, const char *src, const char *dst, const struct stat *st, bool
   if (out < 0)
     {
       int err = errno;
-      close (in);
+      c->src->ops->close (f);
       return fail_errno (c, dst, err, "Can't create");
     }
 
   g_autofree char *shown = g_filename_display_name (src);
-  int err = copy_data (c, in, out, shown);
-  if (err == 0)
+  g_autoptr (GError) read_error = nullptr;
+  int err = in >= 0 ? copy_data (c, in, out, shown) : copy_stream (c, f, out, shown, &read_error);
+  if (err == 0 && c->src->local)
     {
       keep_owner_fd (out, st);
       keep_xattrs (in, out, nullptr, nullptr);
     }
-  if (err == 0 && fchmod (out, st->st_mode & 07777) != 0)
+  if (err == 0 && fchmod (out, kept_mode (c, st)) != 0)
     err = errno;
   const struct timespec times[2] = { st->st_atim, st->st_mtim };
   if (err == 0 && futimens (out, times) != 0)
@@ -316,7 +602,7 @@ copy_file (Ctx *c, const char *src, const char *dst, const struct stat *st, bool
     err = errno;
   if (close (out) != 0 && err == 0)
     err = errno;
-  close (in);
+  c->src->ops->close (f);
 
   if (err == 0)
     {
@@ -330,23 +616,25 @@ copy_file (Ctx *c, const char *src, const char *dst, const struct stat *st, bool
       unlink (tmp);
       if (err == ECANCELED)
         return false;
+      if (err < 0)
+        return fail_error (c, src, "Can't read", read_error);
       return fail_errno (c, dst, err, "Can't write");
     }
   return true;
 }
 
+/* `target`: what the link says, from the source's details. */
 static bool
-copy_symlink (Ctx *c, const char *src, const char *dst, const struct stat *st, bool replace)
+copy_symlink (Ctx *c, const char *src, const char *dst, const struct stat *st, const char *target,
+              bool replace)
 {
-  g_autoptr (GError) e = nullptr;
-  g_autofree char *target = g_file_read_link (src, &e);
   if (target == nullptr)
     return fail_errno (c, src, EIO, "Can't read link");
   if (!replace)
     {
       if (symlink (target, dst) != 0)
         return fail_errno (c, dst, errno, "Can't create link");
-      keep_metadata (src, dst, st);
+      keep_metadata (c, src, dst, st);
       return true;
     }
   g_autofree char *dir = g_path_get_dirname (dst);
@@ -354,7 +642,7 @@ copy_symlink (Ctx *c, const char *src, const char *dst, const struct stat *st, b
   g_autofree char *tmp = g_build_filename (dir, base, nullptr);
   if (symlink (target, tmp) != 0)
     return fail_errno (c, dst, errno, "Can't create link");
-  keep_metadata (src, tmp, st);
+  keep_metadata (c, src, tmp, st);
   if (rename (tmp, dst) != 0)
     {
       int err = errno;
@@ -379,7 +667,7 @@ copy_special (Ctx *c, const char *src, const char *dst, const struct stat *st, b
   const char *make = tmp != nullptr ? tmp : dst;
   if (mknod (make, st->st_mode & (S_IFMT | 0600), st->st_rdev) != 0)
     return fail_errno (c, dst, errno, "Can't create");
-  keep_metadata (src, make, st);
+  keep_metadata (c, src, make, st);
   if (tmp != nullptr && rename (tmp, dst) != 0)
     {
       int err = errno;
@@ -390,49 +678,59 @@ copy_special (Ctx *c, const char *src, const char *dst, const struct stat *st, b
 }
 
 static bool copy_into (Ctx *c, const char *src, const char *dst_dir, const char *name, int depth,
-                       GPtrArray *created);
+                       GPtrArray *created, const GbkStatEntry *known);
 
 static bool
 copy_dir (Ctx *c, const char *src, const char *dst, const struct stat *st, bool merge, int depth)
 {
+  g_autoptr (GError) e = nullptr;
+  g_autoptr (GPtrArray) entries = c->src->ops->list (c->src, src, &e);
+  if (entries == nullptr)
+    return fail_error (c, src, "Can't read folder", e);
   if (!merge && mkdir (dst, 0700) != 0)     /* owner-only while we fill it */
     return fail_errno (c, dst, errno, "Can't create folder");
-  g_autoptr (GError) e = nullptr;
-  g_autoptr (GDir) d = g_dir_open (src, 0, &e);
-  if (d == nullptr)
-    return fail_errno (c, src, EACCES, "Can't read folder");
-  const char *name;
-  while ((name = g_dir_read_name (d)) != nullptr)
+  for (guint i = 0; i < entries->len; i++)
     {
-      g_autofree char *child = g_build_filename (src, name, nullptr);
-      if (!copy_into (c, child, dst, name, depth + 1, nullptr))
+      const GbkStatEntry *entry = g_ptr_array_index (entries, i);
+      g_autofree char *child = g_build_filename (src, entry->name, nullptr);
+      if (!copy_into (c, child, dst, entry->name, depth + 1, nullptr, entry))
         return false;
     }
   if (!merge)
-    keep_metadata (src, dst, st);       /* last: filling it changed its times */
+    keep_metadata (c, src, dst, st);    /* last: filling it changed its times */
   return true;
 }
 
-/* Copy `src` to dst_dir/name, resolving conflicts. Returns false to stop everything. */
+/* Copy `src` to dst_dir/name, resolving conflicts. Returns false to stop everything.
+ * `known`: its details from the folder's listing, if any. */
 static bool
 copy_into (Ctx *c, const char *src, const char *dst_dir, const char *name, int depth,
-           GPtrArray *created)
+           GPtrArray *created, const GbkStatEntry *known)
 {
   if (cancelled (c))
     return false;
   if (depth > GBK_OPS_MAX_DEPTH)
     return fail_msg (c, src, G_IO_ERROR_FAILED, "Folder structure is too deep");
 
+  g_autoptr (GbkStatEntry) own = nullptr;
+  const GbkStatEntry *entry = known;
+  if (entry == nullptr || entry->mode == 0)
+    {
+      g_autoptr (GError) e = nullptr;
+      own = c->src->ops->lstat (c->src, src, &e);
+      if (own == nullptr)
+        return fail_error (c, src, "Can't read", e);
+      entry = own;
+    }
   struct stat st, dst_st;
-  if (lstat (src, &st) != 0)
-    return fail_errno (c, src, errno, "Can't read");
+  entry_stat (entry, &st);
 
   g_autofree char *final_name = g_strdup (name);
   g_autofree char *dst = g_build_filename (dst_dir, name, nullptr);
   bool replace = false;
   if (lstat (dst, &dst_st) == 0)
     {
-      GbkChoice ch = same_inode (&st, &dst_st)
+      GbkChoice ch = c->src->local && same_inode (&st, &dst_st)
                          ? GBK_CHOICE_KEEP_BOTH       /* pasted where it came from: a copy */
                          : ask_conflict (c, src, dst, S_ISDIR (dst_st.st_mode));
       switch (ch)
@@ -468,7 +766,7 @@ copy_into (Ctx *c, const char *src, const char *dst_dir, const char *name, int d
   else if (S_ISDIR (st.st_mode))
     ok = copy_dir (c, src, dst, &st, replace, depth);
   else if (S_ISLNK (st.st_mode))
-    ok = copy_symlink (c, src, dst, &st, replace);
+    ok = copy_symlink (c, src, dst, &st, entry->target, replace);
   else if (S_ISREG (st.st_mode))
     ok = copy_file (c, src, dst, &st, replace);
   else
@@ -610,7 +908,7 @@ move_by_copy (Ctx *c, const char *src, const char *dst_dir, const char *name, in
 {
   bool was_incomplete = c->incomplete;
   c->incomplete = false;
-  bool ok = copy_into (c, src, dst_dir, name, depth, nullptr);
+  bool ok = copy_into (c, src, dst_dir, name, depth, nullptr, nullptr);
   bool complete = ok && !c->incomplete;
   c->incomplete = c->incomplete || was_incomplete;
   if (!complete)
@@ -749,8 +1047,24 @@ bool
 gbk_ops_run (GbkOpKind kind, GPtrArray *sources, const char *dest_dir, const GbkOpsHooks *hooks,
              GPtrArray *created, GError **error)
 {
+  g_autoptr (GbkSource) here = gbk_source_local ();
+  return gbk_ops_run_from (here, kind, sources, dest_dir, hooks, created, error);
+}
+
+bool
+gbk_ops_run_from (GbkSource *src, GbkOpKind kind, GPtrArray *sources, const char *dest_dir,
+                  const GbkOpsHooks *hooks, GPtrArray *created, GError **error)
+{
+  if (!src->local && kind != GBK_OP_COPY)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                           "Only copying from another machine is possible yet");
+      return false;
+    }
+  src->cancelled = hooks->cancelled;
+  src->cancel_data = hooks->data;
   g_autoptr (GHashTable) links = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
-  Ctx c = { .h = hooks, .links = links };
+  Ctx c = { .h = hooks, .links = links, .src = src };
   bool bytes = kind == GBK_OP_COPY || kind == GBK_OP_MOVE;
 
   if (bytes)
@@ -761,13 +1075,14 @@ gbk_ops_run (GbkOpKind kind, GPtrArray *sources, const char *dest_dir, const Gbk
           g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_DIRECTORY, "Destination is not a folder");
           return false;
         }
-      for (guint i = 0; i < sources->len; i++)
+      /* A folder into itself: only possible on one machine. */
+      for (guint i = 0; i < sources->len && src->local; i++)
         {
-          const char *src = g_ptr_array_index (sources, i);
+          const char *path = g_ptr_array_index (sources, i);
           struct stat sst;
-          if (lstat (src, &sst) == 0 && S_ISDIR (sst.st_mode) && is_within (dest_dir, src))
+          if (lstat (path, &sst) == 0 && S_ISDIR (sst.st_mode) && is_within (dest_dir, path))
             {
-              g_autofree char *shown = g_filename_display_name (src);
+              g_autofree char *shown = g_filename_display_name (path);
               g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
                            "Can't put \"%s\" inside itself", shown);
               return false;
@@ -776,20 +1091,20 @@ gbk_ops_run (GbkOpKind kind, GPtrArray *sources, const char *dest_dir, const Gbk
     }
 
   for (guint i = 0; i < sources->len; i++)
-    measure (&c, g_ptr_array_index (sources, i), bytes, 0);
+    measure (&c, g_ptr_array_index (sources, i), nullptr, bytes, 0);
   progress (&c, "");
 
   for (guint i = 0; i < sources->len && !cancelled (&c); i++)
     {
-      const char *src = g_ptr_array_index (sources, i);
-      g_autofree char *name = g_path_get_basename (src);
+      const char *path = g_ptr_array_index (sources, i);
+      g_autofree char *name = g_path_get_basename (path);
       c.incomplete = false;
       switch (kind)
         {
-        case GBK_OP_COPY: copy_into (&c, src, dest_dir, name, 0, created); break;
-        case GBK_OP_MOVE: move_into (&c, src, dest_dir, name, 0, created); break;
-        case GBK_OP_TRASH: trash_path (&c, src); break;
-        case GBK_OP_DELETE: delete_path (&c, src); break;
+        case GBK_OP_COPY: copy_into (&c, path, dest_dir, name, 0, created, nullptr); break;
+        case GBK_OP_MOVE: move_into (&c, path, dest_dir, name, 0, created); break;
+        case GBK_OP_TRASH: trash_path (&c, path); break;
+        case GBK_OP_DELETE: delete_path (&c, path); break;
         default: gbk_fatal ("bad op %d", (int) kind);
         }
     }

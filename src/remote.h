@@ -41,7 +41,7 @@ void gbk_remote_close_all (GbkRemote *r);
 void gbk_remote_set_default (GbkRemote *r);
 GbkRemote *gbk_remote_default (void);
 
-#define GBK_REMOTE_IDLE_MS (5 * 60 * 1000)
+#define GBK_REMOTE_IDLE_MS ((int) 5 * 60 * 1000)
 
 /* Tests: follow the session bus instead of the system bus (a private one with a stand-in
  * logind and NetworkManager), and check for idle connections every `ms` with this limit. */
