@@ -71,8 +71,13 @@ main (int argc, char **argv)
   gbk_address_clear (&app.remote);
 
   /* Everything has been torn down; any registration still alive is a lifetime bug.
-   * (Scanner workers are detached and may still be finishing; they hold no callbacks.) */
+   * (Scanner workers are detached and may still be finishing; they hold no callbacks.)
+   * Said, not fatal: at this point nothing can go wrong for the person any more, and a
+   * core dump on the way out reads as a crash (user, 2026-10-18). Tests check the same
+   * thing themselves, fatally; under G_DEBUG=fatal-criticals this aborts too. */
   if (gbk_lifetime_live () != 0)
-    gbk_fatal ("%d signal connection(s)/source(s) outlived their owners", gbk_lifetime_live ());
+    g_critical ("%d signal connection(s)/source(s) outlived their owners (a bug: please report "
+                "it)",
+                gbk_lifetime_live ());
   return status;
 }

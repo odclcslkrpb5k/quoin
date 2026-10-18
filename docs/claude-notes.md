@@ -475,6 +475,8 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   Test lessons: a forked child of the test process was invisible in /proc (the test process
   isn't dumpable), so tests watch with a separate python3 program; and a plain g_usleep in
   a GUI test stops Quoin's timer (surveys replace each other unread): use run_for().
+- EXIT LEAK CHECK in main.c logs (g_critical), never aborts (user, 2026-10-18); tests keep
+  their own fatal checks.
 - STRAY DIALOGS (bug, user, 2026-10-18): a parentless dialog isn't an app window, so the
   process could exit under it; the exit lifetime check then aborted (core dump). Now every
   window that can be up with no file window joins the app (gbk_jobui_keep_app: progress
