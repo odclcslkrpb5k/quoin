@@ -411,3 +411,9 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   after it, so the task's exit code is the check's.
 - Not built yet (proposed 2026-10-11): New Folder/New File, rubber-band selection, drag and
   drop (ask user if they use it), remember window size, parallel statx.
+- REMOTE BROWSING (proposed 2026-10-17, plan only, awaiting user decisions): fish:// successor.
+  Laptop runs `ssh host quoin --serve`; remote quoin runs its own scanner/fileops, protocol
+  carries GbkScanMsg-shaped snapshots/deltas + job hooks. No kernel mount (sshfs hangs on
+  sleep). Open questions put to user: serve vs SFTP, version policy, auth, opening remote
+  files in apps. Phases: location type refactor -> read-only browse+reconnect -> open ->
+  ops -> extras.
