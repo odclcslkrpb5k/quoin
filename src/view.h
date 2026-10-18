@@ -39,7 +39,7 @@ size_t gbk_view_n_selected (GbkView *v);
 GbkHandle *gbk_view_selected (GbkView *v, size_t *n);
 bool gbk_view_is_selected (GbkView *v, GbkHandle h);
 /* Names in this folder that are open for editing (from another machine, edits.h): drawn
- * with an emblem. A set of char* (referenced); nullptr: none. */
+ * with an emblem and a bold name. A set of char* (referenced); nullptr: none. */
 void gbk_view_set_marked (GbkView *v, GHashTable *names);
 bool gbk_view_is_marked (const GbkView *v, GbkHandle h);
 

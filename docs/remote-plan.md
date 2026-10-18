@@ -263,7 +263,7 @@ As built in phase 6 (2026-10-18), editing (src/edits.c, edit-store.c, fetch.c):
   the app's executable (launchers and shells don't count), after a 60 s grace; never seen
   at all: while a Quoin window is open, then 10 minutes. When the last window closes a
   fresh look decides at once: nothing in use, Quoin just ends (no notice).
-- Shown in Quoin: files being edited get an emblem on their icon in their folder there, and
+- Shown in Quoin: files being edited get an emblem on their icon and a bold name in their folder there, and
   the ☰ menu has "Files Being Edited" (each opens its folder with it selected). Each watch holds the
   GApplication; the last window closing shows the notice listing "name (App) from host".
 - At start a scan (thread) offers unsent copies (Upload / Show / Discard, locks held while

@@ -48,6 +48,7 @@ struct _GbkView
 
   /* Metrics (style_updated). */
   PangoLayout *layout;
+  PangoAttrList *bold;          /* for marked items' names */
   int ascii_adv[128];           /* Pango units; 0 for control chars */
   int text_h, row_h;
 
@@ -164,6 +165,11 @@ update_metrics (GbkView *v)
 {
   g_clear_object (&v->layout);
   v->layout = gtk_widget_create_pango_layout (GTK_WIDGET (v), nullptr);
+  if (v->bold == nullptr)
+    {
+      v->bold = pango_attr_list_new ();
+      pango_attr_list_insert (v->bold, pango_attr_weight_new (PANGO_WEIGHT_BOLD));
+    }
   /* Filenames may contain newlines: never let them break the line. */
   pango_layout_set_single_paragraph_mode (v->layout, true);
 
@@ -188,10 +194,26 @@ update_metrics (GbkView *v)
   g_array_set_size (v->widths, 0);
 }
 
+static bool
+marked (const GbkView *v, const GbkEntry *e)
+{
+  return v->marked != nullptr && g_hash_table_contains (v->marked, gbk_entry_name (e));
+}
+
 static int
 measure_text (GbkView *v, const GbkEntry *e)
 {
   const char *s = gbk_entry_display (e);
+  if (marked (v, e))
+    {
+      /* Bold (few of these): shaped for real. */
+      int w, h;
+      pango_layout_set_attributes (v->layout, v->bold);
+      pango_layout_set_text (v->layout, s, -1);
+      pango_layout_get_pixel_size (v->layout, &w, &h);
+      pango_layout_set_attributes (v->layout, nullptr);
+      return w + TEXT_SLACK;
+    }
   int64_t units = 0;
   for (const unsigned char *p = (const unsigned char *) s; *p != '\0'; p++)
     {
@@ -414,8 +436,16 @@ emblem (GbkView *v)
 void
 gbk_view_set_marked (GbkView *v, GHashTable *names)
 {
+  bool had = v->marked != nullptr;
   g_clear_pointer (&v->marked, g_hash_table_unref);
   v->marked = names != nullptr ? g_hash_table_ref (names) : nullptr;
+  /* Marked names are bold, so wider: measure again (not when there were and are none, as
+   * on most folder changes: a big folder's measuring isn't free). */
+  if (had || v->marked != nullptr)
+    {
+      g_array_set_size (v->widths, 0);
+      relayout (v);
+    }
   gtk_widget_queue_draw (GTK_WIDGET (v));
 }
 
@@ -423,8 +453,7 @@ bool
 gbk_view_is_marked (const GbkView *v, GbkHandle h)
 {
   const GbkEntry *e = v->model != nullptr ? gbk_dir_model_get (v->model, h) : nullptr;
-  return e != nullptr && v->marked != nullptr
-         && g_hash_table_contains (v->marked, gbk_entry_name (e));
+  return e != nullptr && marked (v, e);
 }
 
 static void
@@ -868,10 +897,8 @@ gbk_view_draw (GtkWidget *w, cairo_t *cr)
               cairo_set_source_surface (cr, icon, x + PAD_X, y + icon_dy);
               cairo_paint (cr);
             }
-          cairo_surface_t *mark
-              = v->marked != nullptr && g_hash_table_contains (v->marked, gbk_entry_name (e))
-                    ? emblem (v)
-                    : nullptr;
+          bool is_marked = marked (v, e);
+          cairo_surface_t *mark = is_marked ? emblem (v) : nullptr;
           if (mark != nullptr)
             {
               cairo_set_source_surface (cr, mark, x + PAD_X + ICON_SIZE - EMBLEM_SIZE + 2,
@@ -882,7 +909,9 @@ gbk_view_draw (GtkWidget *w, cairo_t *cr)
           int text_w = cw - 2 * PAD_X - ICON_SIZE - ICON_GAP;
           pango_layout_set_text (v->layout, gbk_entry_display (e), -1);
           pango_layout_set_width (v->layout, MAX (1, text_w) * PANGO_SCALE);
+          pango_layout_set_attributes (v->layout, is_marked ? v->bold : nullptr);
           gtk_render_layout (sc, cr, x + PAD_X + ICON_SIZE + ICON_GAP, y + text_dy, v->layout);
+          pango_layout_set_attributes (v->layout, nullptr);
 
           if (focused && h == v->cursor)
             gtk_render_focus (sc, cr, x, y, cw, v->row_h);
@@ -1494,6 +1523,7 @@ gbk_view_finalize (GObject *o)
   g_ptr_array_unref (v->icons);
   g_array_unref (v->icons_tried);
   g_clear_pointer (&v->marked, g_hash_table_unref);
+  g_clear_pointer (&v->bold, pango_attr_list_unref);
   g_array_unref (v->col_x);
   g_array_unref (v->widths);
   g_hash_table_unref (v->selected);

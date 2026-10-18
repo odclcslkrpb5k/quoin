@@ -128,7 +128,7 @@ is_current (GbkWindow *w, const GbkBrowser *b)
   return i >= 0 && (const void *) gtk_notebook_get_nth_page (w->tabs, i) == (const void *) b;
 }
 
-/* Files of this tab's folder being edited elsewhere get an emblem (edits.h). */
+/* Files of this tab's folder being edited elsewhere get an emblem and a bold name (edits.h). */
 static void
 mark_edits (const GbkBrowser *b)
 {
