@@ -800,6 +800,32 @@ check_item (GbkWindow *w, GtkWidget *menu, const char *label, GbkMenuKind kind, 
   return mi;
 }
 
+/* "Open With <app>" when every item opens in the same default application, so the menu
+ * says what Open will do; plain "Open" when it enters folders, runs programs, or would use
+ * several applications (or none). */
+static char *
+open_label (const GPtrArray *items)
+{
+  g_autoptr (GAppInfo) common = nullptr;
+  for (guint i = 0; i < items->len; i++)
+    {
+      const GbkItem *it = g_ptr_array_index (items, i);
+      /* Files on another machine always open in their application (never run). */
+      bool by_app
+          = !it->is_dir && (!gbk_loc_is_local (it->loc) || gbk_open_plan (it) == GBK_OPEN_DEFAULT);
+      if (!by_app)
+        return g_strdup ("Open");
+      g_autoptr (GAppInfo) app = g_app_info_get_default_for_type (it->mime, false);
+      if (app == nullptr || (common != nullptr && !g_app_info_equal (app, common)))
+        return g_strdup ("Open");
+      if (common == nullptr)
+        common = g_steal_pointer (&app);
+    }
+  if (common == nullptr)
+    return g_strdup ("Open");
+  return g_strdup_printf ("Open With %s", g_app_info_get_display_name (common));
+}
+
 static void
 add_open_with (GbkWindow *w, GtkWidget *menu, const char *mime)
 {
@@ -861,7 +887,12 @@ popup_menu (GbkWindow *w, GbkBrowser *b, GPtrArray *items, GbkMenuTarget target,
         case GBK_MENU_SEPARATOR:
           gtk_menu_shell_append (GTK_MENU_SHELL (menu), gtk_separator_menu_item_new ());
           break;
-        case GBK_MENU_OPEN: menu_item (w, menu, "Open", e->kind); break;
+        case GBK_MENU_OPEN:
+          {
+            g_autofree char *label = open_label (items);
+            menu_item (w, menu, label, e->kind);
+            break;
+          }
         case GBK_MENU_OPEN_TAB: menu_item (w, menu, "Open in New Tab", e->kind); break;
         case GBK_MENU_OPEN_WINDOW: menu_item (w, menu, "Open in New Window", e->kind); break;
         case GBK_MENU_OPEN_WITH: add_open_with (w, menu, gbk_menu_common_mime (items)); break;

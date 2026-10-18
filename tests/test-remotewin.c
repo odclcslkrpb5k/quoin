@@ -282,6 +282,82 @@ test_cache_cleanup (void)
   g_assert_true (g_file_test (young, G_FILE_TEST_IS_DIR));
 }
 
+/* The context menu for the selection, as the Menu key opens it; its first entry's label. */
+static char *
+first_menu_label (GbkWindow *w)
+{
+  GbkView *v = gbk_window_view (w);
+  gtk_widget_grab_focus (GTK_WIDGET (v));
+  GdkEvent *ev = gdk_event_new (GDK_KEY_PRESS);
+  ev->key.window = g_object_ref (gtk_widget_get_window (GTK_WIDGET (w)));
+  ev->key.keyval = GDK_KEY_Menu;
+  ev->key.time = GDK_CURRENT_TIME;
+  gdk_event_set_device (ev, gdk_seat_get_keyboard (gdk_display_get_default_seat (
+                                gtk_widget_get_display (GTK_WIDGET (w)))));
+  gtk_main_do_event (ev);
+  gdk_event_free (ev);
+  GList *menus = gtk_menu_get_for_attach_widget (GTK_WIDGET (v));
+  g_assert_cmpuint (g_list_length (menus), ==, 1);
+  GtkMenu *menu = menus->data;
+  g_autoptr (GList) items = gtk_container_get_children (GTK_CONTAINER (menu));
+  char *label = g_strdup (gtk_menu_item_get_label (GTK_MENU_ITEM (items->data)));
+  gtk_menu_shell_deactivate (GTK_MENU_SHELL (menu));
+  while (gtk_events_pending ())
+    gtk_main_iteration ();
+  return label;
+}
+
+static void
+select_names (GbkWindow *w, const char *const *names)
+{
+  GbkDirModel *m = model_of (w);
+  GbkHandle h[8] = { 0 };
+  size_t n = 0;
+  for (; n < G_N_ELEMENTS (h) && names[n] != nullptr; n++)
+    h[n] = gbk_dir_model_find (m, names[n]);
+  gbk_view_set_selection (gbk_window_view (w), h, n);
+}
+
+static bool
+local_ready (void *w)
+{
+  return gbk_loc_is_local (gbk_window_loc (w)) && ready (w);
+}
+
+/* Open names the application it will use, here and there, when there is one. */
+static void
+test_open_names_app (void)
+{
+  put ("local/notes.txt", "n");
+  put ("local/data.gbk-nothing-opens-this", "d");
+  put ("local/folder/x", "");
+  g_autofree char *local = g_build_filename (home, "local", nullptr);
+  g_autoptr (GbkLoc) loc = gbk_loc_new_local (local);
+  GbkWindow *w = gbk_window_new (app, ctx, loc);
+  gtk_widget_show_all (GTK_WIDGET (w));
+  g_assert_true (wait_until (local_ready, w));
+
+  select_names (w, (const char *const[]) { "notes.txt", nullptr });
+  g_autofree char *one = first_menu_label (w);
+  g_assert_cmpstr (one, ==, "Open With Opener");
+  /* Different applications (one has none): plain Open. */
+  select_names (w, (const char *const[]) { "notes.txt", "data.gbk-nothing-opens-this", nullptr });
+  g_autofree char *mixed = first_menu_label (w);
+  g_assert_cmpstr (mixed, ==, "Open");
+  select_names (w, (const char *const[]) { "folder", nullptr });
+  g_autofree char *folder = first_menu_label (w);
+  g_assert_cmpstr (folder, ==, "Open");
+  gtk_widget_destroy (GTK_WIDGET (w));
+
+  /* On another machine: the same, for the copy it opens. */
+  put ("data/notes.txt", "notes");
+  GbkWindow *rw = window_on_remote_data ();
+  select_names (rw, (const char *const[]) { "notes.txt", nullptr });
+  g_autofree char *remote = first_menu_label (rw);
+  g_assert_cmpstr (remote, ==, "Open With Opener");
+  gtk_widget_destroy (GTK_WIDGET (rw));
+}
+
 static bool
 props_loaded (void *p)
 {
@@ -414,6 +490,7 @@ main (int argc, char **argv)
   g_test_add_func ("/remotewin/copy-paste-here", test_copy_paste_here);
   g_test_add_func ("/remotewin/open-copy", test_open_copy);
   g_test_add_func ("/remotewin/cache-cleanup", test_cache_cleanup);
+  g_test_add_func ("/remotewin/open-names-app", test_open_names_app);
   int status = g_test_run ();
 
   while (gtk_events_pending ())
