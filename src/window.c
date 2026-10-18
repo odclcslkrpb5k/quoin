@@ -1,6 +1,7 @@
 #include "window.h"
 #include "clipboard.h"
 #include "devices.h"
+#include "edits.h"
 #include "fetch.h"
 #include "cliptext.h"
 #include "jobui.h"
@@ -16,6 +17,7 @@ struct _GbkWindow
   GbkContext *ctx;
   GtkNotebook *tabs;
   GtkLabel *status;
+  GtkLabel *activity;     /* status bar: what's happening with other machines (edits.h) */
   GtkWidget *status_bar;  /* event box: right-click gives the folder's (empty-space) menu */
   GtkButton *sort_button; /* status bar, right: shows the sort, click cycles it */
   GtkToggleButton *hidden_button;   /* status bar, right: ".*", bound to win.show-hidden */
@@ -1636,6 +1638,13 @@ gbk_window_new (const GtkApplication *app, GbkContext *ctx, GbkLoc *loc)
     }
   gbk_connect (G_OBJECT (w), w->sort_button, "clicked", G_CALLBACK (on_sort_button_clicked), w);
   gtk_box_pack_end (GTK_BOX (status_bar), modes, false, false, 0);
+  /* Beside the modes: downloads and uploads of files being edited, for every window. */
+  w->activity = GTK_LABEL (gtk_label_new (""));
+  gtk_label_set_ellipsize (w->activity, PANGO_ELLIPSIZE_MIDDLE);
+  gtk_label_set_max_width_chars (w->activity, 60);
+  gtk_widget_set_no_show_all (GTK_WIDGET (w->activity), true);
+  gtk_box_pack_end (GTK_BOX (status_bar), GTK_WIDGET (w->activity), false, false, 0);
+  gbk_window_set_activity (w, gbk_edits_activity ());
   w->status_bar = gtk_event_box_new ();
   gtk_container_add (GTK_CONTAINER (w->status_bar), status_bar);
   gbk_connect (G_OBJECT (w), w->status_bar, "button-press-event", G_CALLBACK (on_status_bar_press),
@@ -1700,6 +1709,19 @@ GbkView *
 gbk_window_view (GbkWindow *w)
 {
   return gbk_browser_view (active (w));
+}
+
+void
+gbk_window_set_activity (GbkWindow *w, const char *text)
+{
+  gtk_label_set_text (w->activity, text);
+  gtk_widget_set_visible (GTK_WIDGET (w->activity), text[0] != '\0');
+}
+
+const char *
+gbk_window_activity (const GbkWindow *w)
+{
+  return gtk_label_get_text (w->activity);
 }
 
 const char *

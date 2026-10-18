@@ -4,6 +4,7 @@
 #include "browser.h"
 #include "edits.h"
 #include "jobui.h"
+#include "notify.h"
 #include "conn.h"
 #include "job.h"
 #include "lifetime.h"
@@ -378,6 +379,25 @@ save_copy (const char *copy, const char *content)
   g_assert_true (g_file_set_contents (copy, content, -1, nullptr));
 }
 
+static GPtrArray *notices;   /* char*: "summary|kind" of desktop notifications sent */
+
+static void
+on_notify (const char *key G_GNUC_UNUSED, GbkNotifyKind kind, const char *summary,
+           const char *body G_GNUC_UNUSED)
+{
+  g_ptr_array_add (notices,
+                   g_strdup_printf ("%s|%s", summary, kind == GBK_NOTIFY_LOW ? "low" : "normal"));
+}
+
+static bool
+notified (void *want)
+{
+  for (guint i = 0; i < notices->len; i++)
+    if (g_str_has_prefix (g_ptr_array_index (notices, i), want))
+      return true;
+  return false;
+}
+
 /* Opening a file there opens a private, writable copy here; its saves go back there. A
  * change made there meanwhile is asked about (Keep Both here), and later saves go to the
  * kept copy. When the last window closes, a notice names the file and its app, and Quoin
@@ -388,6 +408,9 @@ test_edit_upload (void)
   put ("data/notes.txt", "notes");
   g_autofree char *hold = g_build_filename (home, "hold-app", nullptr);
   g_assert_true (g_file_set_contents (hold, "", -1, nullptr));   /* the app stays open */
+  notices = g_ptr_array_new_with_free_func (g_free);
+  gbk_notify_set_for_test (on_notify);
+  gbk_edits_set_in_front_for_test (0);   /* Quoin isn't the window in use: notify too */
   GbkWindow *w = window_on_remote_data ();
   gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "notes.txt"));
   g_signal_emit_by_name (gbk_window_view (w), "activate");
@@ -404,9 +427,14 @@ test_edit_upload (void)
   g_assert_cmpint (st.st_mode & 0777, ==, 0700);
   g_assert_cmpuint (gbk_edits_count (), ==, 1);
 
+  g_assert_true (g_str_has_prefix (gbk_window_activity (w), "Opened notes.txt from ws"));
   save_copy (copy, "edited");
   Content edited = { "data/notes.txt", "edited" };
   g_assert_true (wait_until (has_content, &edited));
+  /* Said in the status bar, and (Quoin not in front) on the desktop, briefly. */
+  char saved_note[] = "Saved notes.txt to ws|low";
+  g_assert_true (wait_until (notified, saved_note));
+  g_assert_true (g_str_has_prefix (gbk_window_activity (w), "Saved notes.txt to ws at "));
 
   /* Opened again: the same copy, no second download. */
   g_signal_emit_by_name (gbk_window_view (w), "activate");
@@ -420,15 +448,27 @@ test_edit_upload (void)
   save_copy (copy, "mine");
   Wanted asked = { .starts = "“notes.txt” changed on the other machine" };
   g_assert_true (wait_until (dialog_shown, &asked));
+  char asked_note[] = "Saving “notes.txt” to ws needs you|normal";
+  g_assert_true (notified (asked_note));
   gtk_dialog_response (GTK_DIALOG (asked.found), GBK_JOBUI_KEEP_BOTH);
   Content kept = { "data/notes (1).txt", "mine" };
   g_assert_true (wait_until (has_content, &kept));
   g_assert_true (wait_until (no_jobs, nullptr));
   Content theirs = { "data/notes.txt", "theirs" };
   g_assert_true (has_content (&theirs));
+  g_assert_true (
+      g_str_has_prefix (gbk_window_activity (w), "Saved notes.txt to ws as “notes (1).txt” at "));
+  /* Quoin in front: the status bar says it; nothing on the desktop. */
+  gbk_edits_set_in_front_for_test (1);
+  guint before = notices->len;
   save_copy (copy, "third");
   Content third = { "data/notes (1).txt", "third" };
   g_assert_true (wait_until (has_content, &third));
+  g_assert_true (wait_until (no_jobs, nullptr));
+  g_assert_cmpuint (notices->len, ==, before);
+  gbk_edits_set_in_front_for_test (-1);
+  gbk_notify_set_for_test (nullptr);
+  g_clear_pointer (&notices, g_ptr_array_unref);
 
   gtk_widget_destroy (GTK_WIDGET (w));
   Wanted notice = { .starts = "Quoin keeps running to upload your saves" };

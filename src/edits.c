@@ -1,5 +1,6 @@
 #include "edits.h"
 #include "jobui.h"
+#include "notify.h"
 #include "lifetime.h"
 #include "window.h"
 
@@ -61,6 +62,8 @@ static struct
   int64_t windows_gone_us; /* when the last window closed; 0 while one is open */
   uint64_t next_id;
   int poll_ms, grace_ms, after_windows_ms;
+  int in_front_test;      /* tests: 0 as it is, 1 in front, 2 not */
+  char *activity;         /* what every window's status bar says about edits */
   GbkEditsAnswer (*unsent_answer) (guint n);
   /* The startup scan runs on a thread; the timer picks up what it found. */
   GMutex scan_lock;
@@ -270,12 +273,71 @@ judge_app (Edit *e, GHashTable *names, int64_t now)
     }
 }
 
+/* ---- news ---- */
+
+void
+gbk_edits_say (const char *text)
+{
+  g_free (E.activity);
+  E.activity = g_strdup (text);
+  for (GList *l = E.app != nullptr ? gtk_application_get_windows (E.app) : nullptr; l != nullptr;
+       l = l->next)
+    if (GBK_IS_WINDOW (l->data))
+      gbk_window_set_activity (l->data, text);
+}
+
+const char *
+gbk_edits_activity (void)
+{
+  return E.activity != nullptr ? E.activity : "";
+}
+
+void
+gbk_edits_set_in_front_for_test (int in_front)
+{
+  E.in_front_test = in_front < 0 ? 0 : in_front > 0 ? 1 : 2;
+}
+
+/* Is a Quoin window the one in use? Then the status bar is enough. */
+static bool
+in_front (void)
+{
+  if (E.in_front_test != 0)
+    return E.in_front_test == 1;
+  for (GList *l = E.app != nullptr ? gtk_application_get_windows (E.app) : nullptr; l != nullptr;
+       l = l->next)
+    if (gtk_window_is_active (l->data) && gtk_widget_get_visible (l->data))
+      return true;
+  return false;
+}
+
+/* A desktop notification about `e`, unless Quoin is in front (it shows in the status bar). */
+static void
+tell (const Edit *e, GbkNotifyKind kind, const char *summary, const char *body)
+{
+  if (in_front ())
+    return;
+  g_autofree char *key = g_strdup_printf ("edit-%" G_GUINT64_FORMAT, e->id);
+  gbk_notify (key, kind, summary, body);
+}
+
 /* ---- uploading ---- */
+
+static void
+on_upload_question (GbkJob *job G_GNUC_UNUSED, GbkQuestion *q G_GNUC_UNUSED, Edit *e)
+{
+  g_autofree char *name = g_filename_display_name (e->rec->name);
+  g_autofree char *summary = g_strdup_printf ("Saving “%s” to %s needs you", name, e->rec->host);
+  gbk_edits_say (summary);
+  tell (e, GBK_NOTIFY_NORMAL, summary,
+        "It changed there since you opened it. Quoin asks what to do.");
+}
 
 static void
 on_uploaded (GbkJob *job, GError *error, Edit *e)
 {
   GbkFileToken t;
+  g_autofree char *name = g_filename_display_name (e->rec->name);
   if (error == nullptr || g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
     {
       /* Uploaded, or declined ("Don't Upload", or the question closed): this version is
@@ -284,14 +346,30 @@ on_uploaded (GbkJob *job, GError *error, Edit *e)
         {
           const GPtrArray *made = gbk_job_created (job);
           g_autofree char *was = g_path_get_basename (e->rec->remote);
+          g_autofree char *as = nullptr;
           if (made != nullptr && made->len == 1 && !g_str_equal (made->pdata[0], was))
             {
               /* Kept beside theirs: later saves go to ours. */
               g_autofree char *dir = g_path_get_dirname (e->rec->remote);
               g_free (e->rec->remote);
               e->rec->remote = g_build_filename (dir, made->pdata[0], nullptr);
+              g_autofree char *shown = g_filename_display_name (made->pdata[0]);
+              as = g_strdup_printf (" as “%s”", shown);
             }
           e->rec->base = t;
+          g_autoptr (GDateTime) now = g_date_time_new_now_local ();
+          g_autofree char *at = g_date_time_format (now, "%H:%M");
+          g_autofree char *said = g_strdup_printf ("Saved %s to %s%s at %s", name, e->rec->host,
+                                                   as != nullptr ? as : "", at);
+          gbk_edits_say (said);
+          g_autofree char *summary
+              = g_strdup_printf ("Saved %s to %s%s", name, e->rec->host, as != nullptr ? as : "");
+          tell (e, GBK_NOTIFY_LOW, summary, "");
+        }
+      else
+        {
+          g_autofree char *said = g_strdup_printf ("Not uploaded: %s (your copy stays here)", name);
+          gbk_edits_say (said);
         }
       e->rec->synced = e->sending;
       e->has_failed = false;
@@ -299,9 +377,13 @@ on_uploaded (GbkJob *job, GError *error, Edit *e)
     }
   else
     {
-      /* It said why (jobui); this version isn't tried again, the next save is. */
+      /* This version isn't tried again; the next save is. */
       e->failed = e->sending;
       e->has_failed = true;
+      g_autofree char *summary = g_strdup_printf ("Couldn't save %s to %s", name, e->rec->host);
+      g_autofree char *said = g_strdup_printf ("%s: %s", summary, error->message);
+      gbk_edits_say (said);
+      tell (e, GBK_NOTIFY_NORMAL, summary, error->message);
     }
   g_clear_object (&e->job);
 }
@@ -315,19 +397,28 @@ refuse (Edit *e, const GbkHello *h)
       "“%s” came from %s, but %s now answers as a different machine or user (%s, uid %u; it "
       "was %s, uid %u). Your copy stays here, and Quoin offers it again when it next starts.",
       name, e->rec->host, e->rec->host, h->machine_id, h->uid, e->rec->machine_id, e->rec->uid);
+  g_autofree char *said
+      = g_strdup_printf ("Not uploaded: %s (%s is a different machine now)", name, e->rec->host);
+  gbk_edits_say (said);
+  g_autofree char *summary = g_strdup_printf ("Not uploading %s", name);
+  tell (e, GBK_NOTIFY_NORMAL, summary, message);
   gbk_jobui_error (some_window (), "Not uploaded", message);
 }
 
 static void
 upload (Edit *e, const GbkFileToken *cur, int64_t now)
 {
+  g_autofree char *name = g_filename_display_name (e->rec->name);
   g_autoptr (GError) error = nullptr;
   g_autoptr (GbkConn) c = gbk_remote_conn (E.ctx->remote, e->rec->host, &error);
   if (c == nullptr || gbk_conn_state (c) != GBK_CONN_READY)
     {
-      /* Not connected (yet): it connects meanwhile; no errors to show for that. */
+      /* Not connected (yet): it connects meanwhile; no dialogs for that. */
       e->retry_ms = CLAMP (e->retry_ms * 2, RETRY_MIN_MS, RETRY_MAX_MS);
       e->retry_at_us = now + (int64_t) e->retry_ms * 1000;
+      g_autofree char *said
+          = g_strdup_printf ("Waiting for %s to save %s there", e->rec->host, name);
+      gbk_edits_say (said);
       return;
     }
   e->retry_ms = 0;
@@ -341,7 +432,10 @@ upload (Edit *e, const GbkFileToken *cur, int64_t now)
   g_autofree char *copy = gbk_edit_record_copy (E.cache, e->rec);
   e->sending = *cur;
   e->job = gbk_job_new_upload (copy, target, &e->rec->base);
+  gbk_connect (E.owner, e->job, "question", G_CALLBACK (on_upload_question), e);
   gbk_connect (E.owner, e->job, "finished", G_CALLBACK (on_uploaded), e);
+  g_autofree char *said = g_strdup_printf ("Saving %s to %s…", name, e->rec->host);
+  gbk_edits_say (said);
   gbk_jobui_start (e->job, some_window ());
 }
 
@@ -786,5 +880,6 @@ gbk_edits_shutdown (void)
   g_clear_pointer (&E.edits, g_ptr_array_unref);
   g_clear_pointer (&E.ctx, gbk_context_unref);
   g_clear_pointer (&E.cache, g_free);
+  g_clear_pointer (&E.activity, g_free);
   E.app = nullptr;
 }

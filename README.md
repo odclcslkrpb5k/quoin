@@ -80,8 +80,11 @@ program that won't start. On anything else, [build from source](#building).
   **Open** a file there and it is fetched into `~/.cache/quoin/remote/` and opened from
   there; each save is uploaded back, but only over the file as it was when you opened it
   (if someone changed it meanwhile, you choose: Replace, Keep Both, or Don't Upload).
-  Quoin keeps running after its last window closes until that app has closed, and says
-  so; a save it couldn't upload is offered the next time Quoin starts. Renaming, deleting
+  The status bar says what is happening ("Saving notes.txt to ws1…", "Saved notes.txt to
+  ws1 at 14:02"); while Quoin isn't the window in use, a desktop notification says it too
+  (briefly for a save, until dismissed for a failure or a question). Quoin keeps running
+  after its last window closes until that app has closed, and says so; a save it couldn't
+  upload is offered the next time Quoin starts. Renaming, deleting
   and the like there, and drag and drop with other machines, come next (see
   [docs/remote-plan.md](docs/remote-plan.md)).
 - **Properties** (right-click menu or Alt+Enter): dates (modified, accessed, changed,

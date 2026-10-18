@@ -1,4 +1,5 @@
 #include "edits.h"
+#include "notify.h"
 #include "lifetime.h"
 #include "window.h"
 
@@ -63,6 +64,7 @@ main (int argc, char **argv)
   char *no_args[] = { argv[0], nullptr };
   int status = g_application_run (G_APPLICATION (gtk_app), 1, no_args);
   gbk_edits_shutdown ();
+  gbk_notify_shutdown ();
   g_object_unref (gtk_app);
   gbk_context_unref (app.ctx);
   gbk_loc_unref (app.start);

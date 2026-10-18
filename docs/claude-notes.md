@@ -463,6 +463,13 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   GtkApplication may outlive the watcher in tests). Tests: test-fileops /upload, test-conn
   /edit-round-trip, test-remotewin /edit-upload /unsent-offered /cache-cleanup (stand-in app
   stays open while ~/hold-app exists; GBK_JOBUI_* answers are public for tests).
+- STATUS FOR NETWORK WORK (user, 2026-10-18): the status bar is the place ("what is it
+  doing"); NOT the path bar (it says "where am I"), NO tray icon. Desktop notifications
+  (notify.c, org.freedesktop.Notifications, async, per-key replace) only while no Quoin
+  window is active: saves low urgency 5 s, failures/questions stay. Status bar right side:
+  w->activity label, same text in every window (gbk_edits_say). The X11 busy cursor the
+  user saw while saving is not set by Quoin (no cursor code); suspected startup
+  notification from launching the app (pending until the app reports ready, ~30 s).
 - ANALYZER + REFCOUNTS: -fanalyzer can't follow refcounts: a task/job referenced by a
   table AND its worker gets "use after free" on error paths. Give such things ONE owner
   (the worker) and let tables borrow them under a lock (peer.c tasks and jobs).

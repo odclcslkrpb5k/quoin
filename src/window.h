@@ -21,6 +21,10 @@ void gbk_window_open_address (GbkWindow *w, const GbkAddress *a);
 GbkLoc *gbk_window_loc (GbkWindow *w);
 GbkView *gbk_window_view (GbkWindow *w);
 const char *gbk_window_status (GbkWindow *w);
+/* The status bar's other line: news about files being edited on other machines ("Saved
+ * notes.txt to ws1 at 14:02"); "" hides it. edits.c keeps every window's the same. */
+void gbk_window_set_activity (GbkWindow *w, const char *text);
+const char *gbk_window_activity (const GbkWindow *w);
 /* Right side of the status bar: the sort button (label "↑Name" etc.; click cycles name ->
  * modified -> size) and the ".*" hidden-files toggle. */
 GtkButton *gbk_window_sort_button (const GbkWindow *w);

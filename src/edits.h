@@ -43,6 +43,11 @@ void gbk_edits_launched (uint64_t id, GPid pid);
 /* How many copies are watched. */
 guint gbk_edits_count (void);
 
+/* News about files being edited, for every window's status bar (gbk_window_set_activity);
+ * the latest stays until there is newer. "" when there is none. */
+void gbk_edits_say (const char *text);
+const char *gbk_edits_activity (void);
+
 /* The cache folder for copies (created if needed). g_free. */
 [[nodiscard]] char *gbk_edits_cache (void);
 
@@ -62,6 +67,9 @@ typedef enum
   GBK_EDITS_UPLOAD,
 } GbkEditsAnswer;
 void gbk_edits_set_unsent_answer_for_test (GbkEditsAnswer (*answer) (guint n));
+/* Tests: whether a Quoin window counts as the one in use (1), not (0), or as it really is
+ * (-1, the default): notifications go out only when it isn't. */
+void gbk_edits_set_in_front_for_test (int in_front);
 
 #define GBK_EDITS_POLL_MS 1000
 #define GBK_EDITS_APP_CHECK_MS 5000

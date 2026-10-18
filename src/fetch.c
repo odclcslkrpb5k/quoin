@@ -146,6 +146,16 @@ watch (const Fetch *f, const GbkFetched *got, const GbkHello *hello, const char 
   return true;
 }
 
+/* "notes.txt from ws1", or "3 files from ws1". */
+static char *
+describe (const GPtrArray *items)
+{
+  const GbkItem *first = g_ptr_array_index (items, 0);
+  if (items->len == 1)
+    return g_strdup_printf ("%s from %s", first->display, gbk_loc_host (first->loc));
+  return g_strdup_printf ("%u files from %s", items->len, gbk_loc_host (first->loc));
+}
+
 static void
 on_fetched (GbkJob *job, GError *error G_GNUC_UNUSED, GtkWindow *parent)
 {
@@ -161,7 +171,12 @@ on_fetched (GbkJob *job, GError *error G_GNUC_UNUSED, GtkWindow *parent)
     if (!got_one[i])
       remove_empty (g_ptr_array_index (f->dirs, i));
   if (fetched == nullptr || fetched->len == 0)
-    return;
+    {
+      g_autofree char *what = describe (f->items);
+      g_autofree char *said = g_strdup_printf ("Couldn't open %s", what);
+      gbk_edits_say (said);
+      return;
+    }
 
   const char *host = gbk_loc_host (((const GbkItem *) g_ptr_array_index (f->items, 0))->loc);
   GbkRemote *r = gbk_remote_default ();
@@ -189,6 +204,9 @@ on_fetched (GbkJob *job, GError *error G_GNUC_UNUSED, GtkWindow *parent)
     }
   launch (parent, local, f->app, launches);
   g_ptr_array_unref (launches);
+  g_autofree char *what = describe (f->items);
+  g_autofree char *said = g_strdup_printf ("Opened %s", what);
+  gbk_edits_say (said);
 }
 
 void
@@ -237,5 +255,8 @@ gbk_fetch_open (GtkWindow *parent, GPtrArray *items, GAppInfo *app)
   g_autoptr (GbkJob) job = gbk_job_new_fetch (locs, f->dirs);
   g_object_set_data_full (G_OBJECT (job), KEY_FETCH, f, (GDestroyNotify) fetch_free);
   gbk_connect (G_OBJECT (parent), job, "finished", G_CALLBACK (on_fetched), parent);
+  g_autofree char *what = describe (wanted);
+  g_autofree char *said = g_strdup_printf ("Downloading %s…", what);
+  gbk_edits_say (said);
   gbk_jobui_start (job, parent);
 }
