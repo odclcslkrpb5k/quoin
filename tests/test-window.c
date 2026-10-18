@@ -7,6 +7,44 @@
 #include "props.h"
 #include "window.h"
 
+/* Windows and tabs on local folders, by path. */
+static const char *
+wpath (GbkWindow *w)
+{
+  const char *p;
+  g_assert_true (gbk_loc_as_local (gbk_window_loc (w), &p));
+  return p;
+}
+
+[[maybe_unused]] static const char *
+tab_path (GbkWindow *w, int i)
+{
+  const char *p;
+  g_assert_true (gbk_loc_as_local (gbk_window_tab_loc (w, i), &p));
+  return p;
+}
+
+static GbkWindow *
+window_at (const GtkApplication *app, GbkContext *ctx, const char *path)
+{
+  g_autoptr (GbkLoc) loc = gbk_loc_new_local (path);
+  return gbk_window_new (app, ctx, loc);
+}
+
+static void
+open_at (GbkWindow *w, const char *path)
+{
+  g_autoptr (GbkLoc) loc = gbk_loc_new_local (path);
+  gbk_window_open (w, loc);
+}
+
+[[maybe_unused]] static void
+new_tab_at (GbkWindow *w, const char *path)
+{
+  g_autoptr (GbkLoc) loc = gbk_loc_new_local (path);
+  gbk_window_new_tab (w, loc);
+}
+
 static GtkApplication *app;
 static GbkContext *ctx;
 
@@ -50,7 +88,7 @@ static bool
 at_path_and_ready (void *data)
 {
   PathCtx *c = data;
-  return g_str_equal (gbk_window_path (c->w), c->path) && ready (c->w);
+  return g_str_equal (wpath (c->w), c->path) && ready (c->w);
 }
 
 static void
@@ -58,8 +96,8 @@ wait_at (GbkWindow *w, const char *path)
 {
   PathCtx c = { w, path };
   if (!wait_until (at_path_and_ready, &c))
-    gbk_fatal ("expected to reach %s, at %s (state %d, error %d, live %d)", path,
-               gbk_window_path (w), model_of (w) ? (int) gbk_dir_model_state (model_of (w)) : -1,
+    gbk_fatal ("expected to reach %s, at %s (state %d, error %d, live %d)", path, wpath (w),
+               model_of (w) ? (int) gbk_dir_model_state (model_of (w)) : -1,
                model_of (w) ? gbk_dir_model_error (model_of (w)) : -1,
                model_of (w) ? (int) gbk_dir_model_live (model_of (w)) : -1);
 }
@@ -133,7 +171,7 @@ test_navigation (void)
           (const char *const[]) { "a/", "b/", "sub/", "sub/x", "sub/y", ".hid", "f.txt", nullptr });
   g_autofree char *sub = g_build_filename (root, "sub", nullptr);
 
-  GbkWindow *w = gbk_window_new (app, ctx, root);
+  GbkWindow *w = window_at (app, ctx, root);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, root);
   g_assert_nonnull (strstr (gbk_window_status (w), "3 folders · 1 file   "));
@@ -235,7 +273,7 @@ test_vanishing_directory (void)
   g_autofree char *deeper = g_build_filename (root, "doomed", "deeper", nullptr);
   g_autofree char *doomed = g_build_filename (root, "doomed", nullptr);
 
-  GbkWindow *w = gbk_window_new (app, ctx, deeper);
+  GbkWindow *w = window_at (app, ctx, deeper);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, deeper);
 
@@ -246,7 +284,7 @@ test_vanishing_directory (void)
 
   /* Opening something that doesn't exist also lands on the nearest ancestor. */
   g_autofree char *nowhere = g_build_filename (root, "no", "such", "dir", nullptr);
-  gbk_window_open (w, nowhere);
+  open_at (w, nowhere);
   wait_at (w, root);
 
   gtk_widget_destroy (GTK_WIDGET (w));
@@ -258,7 +296,7 @@ test_terminal_missing (void)
 {
   /* The default terminal isn't installed in the test image: F4 must report, not crash. */
   g_autofree char *root = g_dir_make_tmp ("gbk-win-XXXXXX", nullptr);
-  GbkWindow *w = gbk_window_new (app, ctx, root);
+  GbkWindow *w = window_at (app, ctx, root);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, root);
   activate (w, "terminal");
@@ -408,7 +446,7 @@ test_context_menu (void)
   struct timespec ts[2] = { { .tv_sec = 1000 }, { .tv_sec = 1000 } };
   utimensat (AT_FDCWD, old, ts, 0);
 
-  GbkWindow *w = gbk_window_new (app, ctx, root);
+  GbkWindow *w = window_at (app, ctx, root);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, root);
   GbkDirModel *m = model_of (w);
@@ -484,7 +522,7 @@ test_open_folder_elsewhere (void)
   mkdirs (root, (const char *const[]) { "x/", "y/", "f.txt", nullptr });
   g_autofree char *x = g_build_filename (root, "x", nullptr);
   g_autofree char *y = g_build_filename (root, "y", nullptr);
-  GbkWindow *w = gbk_window_new (app, ctx, root);
+  GbkWindow *w = window_at (app, ctx, root);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, root);
   GbkDirModel *m = model_of (w);
@@ -558,7 +596,7 @@ test_scroll_extent (void)
     }
   g_rand_free (r);
 
-  GbkWindow *w = gbk_window_new (app, ctx, root);
+  GbkWindow *w = window_at (app, ctx, root);
   gtk_window_resize (GTK_WINDOW (w), 640, 300);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, root);
@@ -628,7 +666,7 @@ test_status_bar_menu (void)
   g_autofree char *root = g_dir_make_tmp ("gbk-win-XXXXXX", nullptr);
   mkdirs (root, (const char *const[]) { "sub/", "f.txt", nullptr });
   g_autofree char *sub = g_build_filename (root, "sub", nullptr);
-  GbkWindow *w = gbk_window_new (app, ctx, root);
+  GbkWindow *w = window_at (app, ctx, root);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, root);
 
@@ -646,7 +684,7 @@ test_status_bar_menu (void)
   g_assert_true (wait_until (bar_menus_gone, bar));
 
   /* In a second tab, it's that tab's folder. */
-  gbk_window_new_tab (w, sub);
+  new_tab_at (w, sub);
   wait_at (w, sub);
   choose (right_click_status_bar (w), "Copy Full Path");
   g_autofree char *copied = clipboard_text (w);
@@ -747,7 +785,7 @@ test_create_executable_properties (void)
   g_autofree char *root = g_dir_make_tmp ("gbk-win-XXXXXX", nullptr);
   mkdirs (root, (const char *const[]) { "New Folder/", nullptr });
   g_autofree char *notes = g_build_filename (root, "notes.txt", nullptr);
-  GbkWindow *w = gbk_window_new (app, ctx, root);
+  GbkWindow *w = window_at (app, ctx, root);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, root);
 
@@ -966,7 +1004,7 @@ test_drag_and_drop (void)
   const char *const ab[] = { "a.txt", "b.txt", nullptr };
   g_autofree char *uris = uris_of (src, ab);
 
-  GbkWindow *w = gbk_window_new (app, ctx, dest);
+  GbkWindow *w = window_at (app, ctx, dest);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, dest);
   GbkView *v = gbk_window_view (w);
@@ -1097,7 +1135,7 @@ test_real_drag_and_drop (void)
   g_assert_true (wait_until (no_popups_mapped, nullptr));
   g_autofree char *root = g_dir_make_tmp ("gbk-win-XXXXXX", nullptr);
   mkdirs (root, (const char *const[]) { "sub/", "a.txt", "b.txt", nullptr });
-  GbkWindow *w = gbk_window_new (app, ctx, root);
+  GbkWindow *w = window_at (app, ctx, root);
   gtk_window_move (GTK_WINDOW (w), 0, 0);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, root);
@@ -1212,14 +1250,14 @@ test_file_operations (void)
           (const char *const[]) { "src/", "dst/", "src/a.txt", "src/b.txt", "dst/b.txt", nullptr });
   g_autofree char *src = g_build_filename (root, "src", nullptr);
   g_autofree char *dst = g_build_filename (root, "dst", nullptr);
-  GbkWindow *w = gbk_window_new (app, ctx, src);
+  GbkWindow *w = window_at (app, ctx, src);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, src);
 
   /* Copy a.txt, go to dst, paste: it's copied and selected there. */
   select_name (w, "a.txt");
   activate (w, "copy");
-  gbk_window_open (w, dst);
+  open_at (w, dst);
   wait_at (w, dst);
   activate (w, "paste");
   g_autofree char *dst_a = g_build_filename (dst, "a.txt", nullptr);
@@ -1233,7 +1271,7 @@ test_file_operations (void)
   wait_at (w, src);
   select_name (w, "b.txt");
   activate (w, "cut");
-  gbk_window_open (w, dst);
+  open_at (w, dst);
   wait_at (w, dst);
   activate (w, "paste");
   GtkDialog *conflict = find_dialog ();
@@ -1284,7 +1322,7 @@ test_job_outlives_window (void)
    * its own UI, and cancelling it there cleans up. Nothing may call into the dead window. */
   g_autofree char *root = g_dir_make_tmp ("gbk-win-XXXXXX", nullptr);
   mkdirs (root, (const char *const[]) { "f.txt", nullptr });
-  GbkWindow *w = gbk_window_new (app, ctx, root);
+  GbkWindow *w = window_at (app, ctx, root);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, root);
   select_name (w, "f.txt");
@@ -1293,7 +1331,7 @@ test_job_outlives_window (void)
    * create the conflict explicitly by pasting into a folder holding f.txt. */
   mkdirs (root, (const char *const[]) { "sub/", "sub/f.txt", nullptr });
   g_autofree char *sub = g_build_filename (root, "sub", nullptr);
-  gbk_window_open (w, sub);
+  open_at (w, sub);
   wait_at (w, sub);
   activate (w, "paste");
   GtkDialog *conflict = find_dialog ();
@@ -1359,7 +1397,7 @@ test_pathbar (void)
   g_autofree char *a = g_build_filename (home, "a", nullptr);
   g_mkdir_with_parents (b, 0755);
 
-  GbkWindow *w = gbk_window_new (app, ctx, b);
+  GbkWindow *w = window_at (app, ctx, b);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, b);
   g_autofree char *e1 = g_strdup_printf ("%s|a|[b]", home_label);
@@ -1400,7 +1438,7 @@ test_pathbar (void)
   wait_at (w, b);
 
   /* Outside home: from the filesystem root. */
-  gbk_window_open (w, "/usr");
+  open_at (w, "/usr");
   wait_at (w, "/usr");
   assert_bar (w, "File System|[usr]");
 
@@ -1418,7 +1456,7 @@ test_pathbar (void)
   g_assert_true (gbk_pathbar_editing (bar));
   send_key_to_window (w, GDK_KEY_Escape, 0);
   g_assert_false (gbk_pathbar_editing (bar));
-  g_assert_cmpstr (gbk_window_path (w), ==, a);
+  g_assert_cmpstr (wpath (w), ==, a);
 
   gtk_widget_destroy (GTK_WIDGET (w));
   rm_rf (a);
@@ -1432,7 +1470,7 @@ test_keys_go_to_focused_entry (void)
   g_autofree char *root = g_dir_make_tmp ("gbk-win-XXXXXX", nullptr);
   mkdirs (root, (const char *const[]) { "precious.txt", nullptr });
   g_autofree char *precious = g_build_filename (root, "precious.txt", nullptr);
-  GbkWindow *w = gbk_window_new (app, ctx, root);
+  GbkWindow *w = window_at (app, ctx, root);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, root);
   select_name (w, "precious.txt");
@@ -1480,7 +1518,7 @@ test_tabs (void)
   mkdirs (root, (const char *const[]) { "one/", "two/", "three/", ".hidden", nullptr });
   g_autofree char *one = g_build_filename (root, "one", nullptr);
   g_autofree char *two = g_build_filename (root, "two", nullptr);
-  GbkWindow *w = gbk_window_new (app, ctx, root);
+  GbkWindow *w = window_at (app, ctx, root);
   gtk_widget_show_all (GTK_WIDGET (w));
   wait_at (w, root);
   g_assert_cmpint (gbk_window_n_tabs (w), ==, 1);
@@ -1489,7 +1527,7 @@ test_tabs (void)
   send_key_to_window (w, GDK_KEY_t, GDK_CONTROL_MASK);
   g_assert_cmpint (gbk_window_n_tabs (w), ==, 2);
   wait_at (w, root);
-  gbk_window_open (w, one);
+  open_at (w, one);
   wait_at (w, one);
   send_key_to_window (w, GDK_KEY_Page_Up, GDK_CONTROL_MASK);
   wait_at (w, root);                          /* first tab, untouched */

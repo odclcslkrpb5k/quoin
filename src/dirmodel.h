@@ -7,6 +7,7 @@
 #pragma once
 
 #include "entry.h"
+#include "loc.h"
 #include "scanner.h"
 
 typedef uint64_t GbkHandle;
@@ -33,9 +34,9 @@ G_DECLARE_FINAL_TYPE (GbkDirModel, gbk_dir_model, GBK, DIR_MODEL, GObject)
 /* Signals:
  *   "changed"        the visible list or some entry changed
  *   "state-changed"  gbk_dir_model_state() changed */
-[[nodiscard]] GbkDirModel *gbk_dir_model_new (const char *path, GbkTypeTable *types);
+[[nodiscard]] GbkDirModel *gbk_dir_model_new (GbkLoc *loc, GbkTypeTable *types);
 
-const char *gbk_dir_model_path (const GbkDirModel *m);
+const GbkLoc *gbk_dir_model_loc (const GbkDirModel *m); /* nullptr when detached */
 GbkDirState gbk_dir_model_state (const GbkDirModel *m);
 int gbk_dir_model_error (const GbkDirModel *m);          /* errno value in GBK_DIR_ERROR */
 bool gbk_dir_model_live (const GbkDirModel *m);          /* live updates active */

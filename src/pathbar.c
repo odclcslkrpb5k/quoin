@@ -3,7 +3,7 @@
 #include "dnd.h"
 #include "lifetime.h"
 
-#define KEY_PATH "gbk-path"
+#define KEY_LOC "gbk-loc"
 
 struct _GbkPathbar
 {
@@ -13,8 +13,8 @@ struct _GbkPathbar
   GtkScrolledWindow *scroller;
   GtkEntry *entry;
   GtkToggleButton *edit;
-  char *path;          /* current */
-  char *deep;          /* deepest path whose buttons are shown */
+  GbkLoc *loc;         /* current */
+  GbkLoc *deep;        /* deepest location whose buttons are shown */
   bool updating;       /* programmatic toggles: ignore their "clicked" */
 };
 
@@ -29,26 +29,18 @@ enum
 };
 static guint signals[N_SIGNALS];
 
-static bool
-is_prefix_dir (const char *prefix, const char *path)
-{
-  size_t n = strlen (prefix);
-  return strncmp (prefix, path, n) == 0
-         && (path[n] == '\0' || path[n] == '/' || g_str_equal (prefix, "/"));
-}
-
 static void
 on_button_clicked (GtkToggleButton *button, GbkPathbar *bar)
 {
   if (bar->updating)
     return;
-  const char *target = g_object_get_data (G_OBJECT (button), KEY_PATH);
+  /* Our own reference: the button may go while handlers run. */
+  g_autoptr (GbkLoc) target = gbk_loc_ref (g_object_get_data (G_OBJECT (button), KEY_LOC));
   /* Keep the pressed state honest until the window confirms the navigation. */
   bar->updating = true;
-  gtk_toggle_button_set_active (button, g_str_equal (target, bar->path));
+  gtk_toggle_button_set_active (button, gbk_loc_equal (target, bar->loc));
   bar->updating = false;
-  g_autofree char *copy = g_strdup (target);
-  g_signal_emit (bar, signals[SIGNAL_NAVIGATE], 0, copy);
+  g_signal_emit (bar, signals[SIGNAL_NAVIGATE], 0, target);
 }
 
 static gboolean
@@ -56,8 +48,8 @@ on_button_press (GtkWidget *button, GdkEventButton *ev, GbkPathbar *bar)
 {
   if (!gdk_event_triggers_context_menu ((GdkEvent *) ev))
     return false;
-  g_autofree char *copy = g_strdup (g_object_get_data (G_OBJECT (button), KEY_PATH));
-  g_signal_emit (bar, signals[SIGNAL_CONTEXT_MENU], 0, copy, (GdkEvent *) ev);
+  g_autoptr (GbkLoc) target = gbk_loc_ref (g_object_get_data (G_OBJECT (button), KEY_LOC));
+  g_signal_emit (bar, signals[SIGNAL_CONTEXT_MENU], 0, target, (GdkEvent *) ev);
   return true;          /* no press/toggle for a right-click */
 }
 
@@ -95,12 +87,12 @@ on_drag_drop (GtkWidget *button, GdkDragContext *ctx, int x G_GNUC_UNUSED, int y
 }
 
 static void
-deliver_drop (GbkPathbar *bar, const char *path, GPtrArray *paths, GdkEvent *trigger)
+deliver_drop (GbkPathbar *bar, GbkLoc *dest, GPtrArray *locs, GdkEvent *trigger)
 {
-  if (paths->len == 0)
+  if (locs->len == 0)
     return;
-  g_autofree char *copy = g_strdup (path);    /* the button may go while handlers run */
-  g_signal_emit (bar, signals[SIGNAL_DROP], 0, copy, paths, trigger);
+  g_autoptr (GbkLoc) keep = gbk_loc_ref (dest);   /* the button may go while handlers run */
+  g_signal_emit (bar, signals[SIGNAL_DROP], 0, keep, locs, trigger);
 }
 
 static void
@@ -109,14 +101,14 @@ on_drag_data_received (GtkWidget *button, GdkDragContext *ctx, int x G_GNUC_UNUS
                        guint time, GbkPathbar *bar)
 {
   gtk_drag_unhighlight (button);
-  g_autoptr (GPtrArray) paths = gbk_dnd_paths (sd);
-  gtk_drag_finish (ctx, paths->len > 0, false, time);   /* never "delete the source" */
+  g_autoptr (GPtrArray) locs = gbk_dnd_locs (sd);
+  gtk_drag_finish (ctx, locs->len > 0, false, time);   /* never "delete the source" */
   g_autoptr (GdkEvent) trigger = gtk_get_current_event ();
-  deliver_drop (bar, g_object_get_data (G_OBJECT (button), KEY_PATH), paths, trigger);
+  deliver_drop (bar, g_object_get_data (G_OBJECT (button), KEY_LOC), locs, trigger);
 }
 
 static GtkWidget *
-make_button (GbkPathbar *bar, const char *path, const char *label, const char *icon)
+make_button (GbkPathbar *bar, GbkLoc *loc, const char *label, const char *icon)
 {
   GtkWidget *button = gtk_toggle_button_new ();
   GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
@@ -127,7 +119,8 @@ make_button (GbkPathbar *bar, const char *path, const char *label, const char *i
   gtk_box_pack_start (GTK_BOX (box), l, false, false, 0);
   gtk_container_add (GTK_CONTAINER (button), box);
   gtk_widget_set_focus_on_click (button, false);
-  g_object_set_data_full (G_OBJECT (button), KEY_PATH, g_strdup (path), g_free);
+  g_object_set_data_full (G_OBJECT (button), KEY_LOC, gbk_loc_ref (loc),
+                          (GDestroyNotify) gbk_loc_unref);
   g_object_set_data_full (G_OBJECT (button), "gbk-label", g_strdup (label), g_free);
   gbk_connect (G_OBJECT (bar), button, "clicked", G_CALLBACK (on_button_clicked), bar);
   gbk_connect (G_OBJECT (bar), button, "button-press-event", G_CALLBACK (on_button_press), bar);
@@ -149,25 +142,27 @@ rebuild (GbkPathbar *bar)
   for (GList *l = old; l != nullptr; l = l->next)
     gtk_widget_destroy (l->data);
 
-  const char *home = g_get_home_dir ();
-  bool in_home = home != nullptr && !g_str_equal (home, "/") && is_prefix_dir (home, bar->deep);
-  const char *start = in_home ? home : "/";
-  g_autofree char *start_label
-      = in_home ? g_filename_display_basename (home) : g_strdup ("File System");
+  /* Home is this machine's: a location elsewhere starts at its root. */
+  g_autoptr (GbkLoc) home = gbk_loc_is_local (bar->deep) && g_get_home_dir () != nullptr
+                                ? gbk_loc_new_like (bar->deep, g_get_home_dir ())
+                                : nullptr;
+  bool in_home = home != nullptr && !gbk_loc_is_root (home) && gbk_loc_is_under (bar->deep, home);
+  g_autoptr (GbkLoc) start = in_home ? gbk_loc_ref (home) : gbk_loc_new_like (bar->deep, "/");
+  g_autofree char *start_label = in_home ? gbk_loc_display_name (home) : g_strdup ("File System");
   gtk_box_pack_start (
       bar->buttons, make_button (bar, start, start_label, in_home ? "user-home" : "drive-harddisk"),
       false, false, 0);
 
   /* One button per component below the start. */
-  const char *rest = bar->deep + strlen (start);
+  const char *rest = gbk_loc_path (bar->deep) + (in_home ? strlen (gbk_loc_path (start)) : 0);
   g_auto (GStrv) parts = g_strsplit (rest, "/", -1);
-  g_autofree char *acc = g_strdup (g_str_equal (start, "/") ? "" : start);
+  g_autoptr (GbkLoc) acc = gbk_loc_ref (start);
   for (size_t i = 0; parts[i] != nullptr; i++)
     {
       if (parts[i][0] == '\0')
         continue;
-      char *next = g_strconcat (acc, "/", parts[i], nullptr);
-      g_free (acc);
+      GbkLoc *next = gbk_loc_child (acc, parts[i]);
+      gbk_loc_unref (acc);
       acc = next;
       g_autofree char *label = g_filename_display_name (parts[i]);
       gtk_box_pack_start (bar->buttons, make_button (bar, acc, label, nullptr), false, false, 0);
@@ -193,21 +188,21 @@ scroll_to_current (void *data)
 }
 
 void
-gbk_pathbar_set_path (GbkPathbar *bar, const char *path)
+gbk_pathbar_set_loc (GbkPathbar *bar, GbkLoc *loc)
 {
-  g_free (bar->path);
-  bar->path = g_strdup (path);
-  if (bar->deep == nullptr || !is_prefix_dir (path, bar->deep))
+  g_clear_pointer (&bar->loc, gbk_loc_unref);
+  bar->loc = gbk_loc_ref (loc);
+  if (bar->deep == nullptr || !gbk_loc_is_under (bar->deep, loc))
     {
-      g_free (bar->deep);
-      bar->deep = g_strdup (path);
+      g_clear_pointer (&bar->deep, gbk_loc_unref);
+      bar->deep = gbk_loc_ref (loc);
       rebuild (bar);
     }
   bar->updating = true;
   g_autoptr (GList) kids = gtk_container_get_children (GTK_CONTAINER (bar->buttons));
   for (GList *l = kids; l != nullptr; l = l->next)
     gtk_toggle_button_set_active (l->data,
-                                  g_str_equal (g_object_get_data (l->data, KEY_PATH), path));
+                                  gbk_loc_equal (g_object_get_data (l->data, KEY_LOC), loc));
   bar->updating = false;
   /* After layout: bring the pressed button into view (long paths scroll). */
   gbk_idle_add (G_OBJECT (bar), scroll_to_current, bar);
@@ -227,7 +222,7 @@ show_buttons (GbkPathbar *bar)
 void
 gbk_pathbar_edit (GbkPathbar *bar)
 {
-  g_autofree char *shown = g_filename_display_name (bar->path != nullptr ? bar->path : "/");
+  g_autofree char *shown = bar->loc != nullptr ? gbk_loc_display (bar->loc) : g_strdup ("/");
   gtk_entry_set_text (bar->entry, shown);
   gtk_stack_set_visible_child_name (bar->stack, "entry");
   bar->updating = true;
@@ -256,9 +251,11 @@ on_entry_activate (GtkEntry *entry, GbkPathbar *bar)
   show_buttons (bar);
   if (fs == nullptr || fs[0] == '\0')
     return;
+  if (bar->loc == nullptr)
+    return;
   /* Relative input is relative to the current folder. */
-  g_autofree char *abs = g_canonicalize_filename (fs, bar->path);
-  g_signal_emit (bar, signals[SIGNAL_NAVIGATE], 0, abs);
+  g_autoptr (GbkLoc) target = gbk_loc_new_like (bar->loc, fs);
+  g_signal_emit (bar, signals[SIGNAL_NAVIGATE], 0, target);
 }
 
 static gboolean
@@ -308,7 +305,7 @@ gbk_pathbar_click (GbkPathbar *bar, const char *path)
 {
   g_autoptr (GList) kids = gtk_container_get_children (GTK_CONTAINER (bar->buttons));
   for (GList *l = kids; l != nullptr; l = l->next)
-    if (g_str_equal (g_object_get_data (l->data, KEY_PATH), path))
+    if (g_str_equal (gbk_loc_path (g_object_get_data (l->data, KEY_LOC)), path))
       {
         gtk_button_clicked (GTK_BUTTON (l->data));
         return;
@@ -321,7 +318,7 @@ gbk_pathbar_button (GbkPathbar *bar, const char *path)
 {
   g_autoptr (GList) kids = gtk_container_get_children (GTK_CONTAINER (bar->buttons));
   for (GList *l = kids; l != nullptr; l = l->next)
-    if (g_str_equal (g_object_get_data (l->data, KEY_PATH), path))
+    if (g_str_equal (gbk_loc_path (g_object_get_data (l->data, KEY_LOC)), path))
       return l->data;
   gbk_fatal ("no path bar button for that folder");
 }
@@ -338,7 +335,9 @@ gbk_pathbar_drop_for_test (GbkPathbar *bar, const char *path, const char *uri_li
 {
   bool cut;
   g_autoptr (GPtrArray) paths = gbk_clip_parse (uri_list, strlen (uri_list), false, &cut);
-  deliver_drop (bar, path, paths, trigger);
+  g_autoptr (GPtrArray) locs = gbk_loc_array_from_local (paths);
+  g_autoptr (GbkLoc) dest = gbk_loc_new_like (bar->loc, path);
+  deliver_drop (bar, dest, locs, trigger);
 }
 
 /* ---- GObject ---- */
@@ -346,9 +345,9 @@ gbk_pathbar_drop_for_test (GbkPathbar *bar, const char *path, const char *uri_li
 static void
 gbk_pathbar_finalize (GObject *o)
 {
-  GbkPathbar *bar = GBK_PATHBAR (o);
-  g_free (bar->path);
-  g_free (bar->deep);
+  const GbkPathbar *bar = GBK_PATHBAR (o);
+  gbk_loc_unref (bar->loc);
+  gbk_loc_unref (bar->deep);
   G_OBJECT_CLASS (gbk_pathbar_parent_class)->finalize (o);
 }
 
@@ -358,13 +357,13 @@ gbk_pathbar_class_init (GbkPathbarClass *klass)
   G_OBJECT_CLASS (klass)->finalize = gbk_pathbar_finalize;
   signals[SIGNAL_NAVIGATE]
       = g_signal_new ("navigate", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, nullptr, nullptr,
-                      nullptr, G_TYPE_NONE, 1, G_TYPE_STRING);
+                      nullptr, G_TYPE_NONE, 1, G_TYPE_POINTER);
   /* GDK_TYPE_EVENT | G_SIGNAL_TYPE_STATIC_SCOPE: the event is passed through, not copied. */
   signals[SIGNAL_CONTEXT_MENU] = g_signal_new (
       "context-menu", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, nullptr, nullptr, nullptr,
-      G_TYPE_NONE, 2, G_TYPE_STRING, GDK_TYPE_EVENT | G_SIGNAL_TYPE_STATIC_SCOPE);
+      G_TYPE_NONE, 2, G_TYPE_POINTER, GDK_TYPE_EVENT | G_SIGNAL_TYPE_STATIC_SCOPE);
   signals[SIGNAL_DROP] = g_signal_new ("drop", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0,
-                                       nullptr, nullptr, nullptr, G_TYPE_NONE, 3, G_TYPE_STRING,
+                                       nullptr, nullptr, nullptr, G_TYPE_NONE, 3, G_TYPE_POINTER,
                                        G_TYPE_POINTER, GDK_TYPE_EVENT | G_SIGNAL_TYPE_STATIC_SCOPE);
 }
 

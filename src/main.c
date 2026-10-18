@@ -4,7 +4,7 @@
 typedef struct
 {
   GbkContext *ctx;
-  char *start_path;
+  GbkLoc *start;
 } App;
 
 /* Also the icon's name (data/icons), as Galley's is. */
@@ -16,7 +16,7 @@ on_activate (GtkApplication *gtk_app, App *app)
   gtk_window_set_default_icon_name (APP_ID);
   gbk_window_install_accels (gtk_app);
 
-  GbkWindow *w = gbk_window_new (gtk_app, app->ctx, app->start_path);
+  GbkWindow *w = gbk_window_new (gtk_app, app->ctx, app->start);
   gtk_widget_show_all (GTK_WIDGET (w));
 
   for (guint i = 0; i < app->ctx->config_errors->len; i++)
@@ -41,7 +41,8 @@ main (int argc, char **argv)
   App app = { .ctx = gbk_context_new (nullptr) };
   /* Relative paths resolve against where we were started; default: the current dir. */
   g_autofree char *cwd = g_get_current_dir ();
-  app.start_path = g_canonicalize_filename (argc == 2 ? argv[1] : cwd, cwd);
+  g_autofree char *start = g_canonicalize_filename (argc == 2 ? argv[1] : cwd, cwd);
+  app.start = gbk_loc_new_local (start);
 
   /* NON_UNIQUE: each invocation is its own process, so a crash can't take other windows
    * with it. We parse argv ourselves; GApplication gets none of it. */
@@ -51,7 +52,7 @@ main (int argc, char **argv)
   int status = g_application_run (G_APPLICATION (gtk_app), 1, no_args);
   g_object_unref (gtk_app);
   gbk_context_unref (app.ctx);
-  g_free (app.start_path);
+  gbk_loc_unref (app.start);
 
   /* Everything has been torn down; any registration still alive is a lifetime bug.
    * (Scanner workers are detached and may still be finishing; they hold no callbacks.) */

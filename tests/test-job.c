@@ -4,6 +4,14 @@
 
 static char *root;
 
+/* The local location `rel` under the test folder. */
+static GbkLoc *
+L (const char *rel)
+{
+  g_autofree char *p = g_build_filename (root, rel, nullptr);
+  return gbk_loc_new_local (p);
+}
+
 typedef struct
 {
   bool finished;
@@ -57,10 +65,9 @@ wait_finished (Watch *w)
 static GbkJob *
 start (GbkOpKind kind, const char *src_rel, const char *dest_rel, Watch *w, GObject *owner)
 {
-  g_autoptr (GPtrArray) src = g_ptr_array_new_with_free_func (g_free);
-  g_ptr_array_add (src, g_build_filename (root, src_rel, nullptr));
-  g_autofree char *dest
-      = dest_rel != nullptr ? g_build_filename (root, dest_rel, nullptr) : nullptr;
+  g_autoptr (GPtrArray) src = gbk_loc_array_new ();
+  g_ptr_array_add (src, L (src_rel));
+  g_autoptr (GbkLoc) dest = dest_rel != nullptr ? L (dest_rel) : nullptr;
   GbkJob *job = gbk_job_new (kind, src, dest);
   w->job = job;
   gbk_connect (owner, job, "question", G_CALLBACK (on_question), w);
@@ -151,9 +158,9 @@ test_outlives_creator (void)
   /* Start, drop every reference we have: the job finishes anyway. */
   put ("h/f.txt", "x");
   put ("i/keep", "");
-  g_autoptr (GPtrArray) src = g_ptr_array_new_with_free_func (g_free);
-  g_ptr_array_add (src, g_build_filename (root, "h/f.txt", nullptr));
-  g_autofree char *dest = g_build_filename (root, "i", nullptr);
+  g_autoptr (GPtrArray) src = gbk_loc_array_new ();
+  g_ptr_array_add (src, L ("h/f.txt"));
+  g_autoptr (GbkLoc) dest = L ("i");
   GbkJob *job = gbk_job_new (GBK_OP_MOVE, src, dest);
   gbk_job_start (job);
   g_object_unref (job);
@@ -168,7 +175,7 @@ test_rename_error (void)
   put ("j/a", "");
   put ("j/b", "");
   g_autoptr (GObject) owner = g_object_new (G_TYPE_OBJECT, nullptr);
-  g_autofree char *a = g_build_filename (root, "j/a", nullptr);
+  g_autoptr (GbkLoc) a = L ("j/a");
   Watch w = { 0 };
   g_autoptr (GbkJob) job = gbk_job_new_rename (a, "b");
   gbk_connect (owner, job, "finished", G_CALLBACK (on_finished), &w);
@@ -193,8 +200,9 @@ static void
 test_create_info_executable (void)
 {
   g_autoptr (GObject) owner = g_object_new (G_TYPE_OBJECT, nullptr);
-  g_autofree char *dir = g_build_filename (root, "k", nullptr);
-  g_mkdir_with_parents (dir, 0755);
+  g_autofree char *dir_path = g_build_filename (root, "k", nullptr);
+  g_mkdir_with_parents (dir_path, 0755);
+  g_autoptr (GbkLoc) dir = L ("k");
 
   /* Create: reports the name it created, in its destination. */
   Watch w1 = { 0 };
@@ -202,7 +210,7 @@ test_create_info_executable (void)
   g_assert_cmpint (gbk_job_kind (create), ==, GBK_JOB_CREATE_FOLDER);
   run_job (create, &w1, owner);
   g_assert_no_error (w1.error);
-  g_assert_cmpstr (gbk_job_dest (create), ==, dir);
+  g_assert_true (gbk_loc_equal (gbk_job_dest (create), dir));
   g_assert_cmpuint (gbk_job_created (create)->len, ==, 1);
   g_assert_cmpstr (g_ptr_array_index (gbk_job_created (create), 0), ==, "New Folder");
   g_assert_true (exists ("k/New Folder"));
@@ -220,8 +228,9 @@ test_create_info_executable (void)
   g_autoptr (GPtrArray) paths = g_ptr_array_new_with_free_func (g_free);
   g_ptr_array_add (paths, g_build_filename (root, "k/New Folder", nullptr));
   g_ptr_array_add (paths, g_build_filename (root, "k/a.sh", nullptr));
+  g_autoptr (GPtrArray) locs = gbk_loc_array_from_local (paths);
   Watch w3 = { .answer = GBK_CHOICE_SKIP };
-  g_autoptr (GbkJob) exec = gbk_job_new_executable (paths, true);
+  g_autoptr (GbkJob) exec = gbk_job_new_executable (locs, true);
   run_job (exec, &w3, owner);
   g_assert_no_error (w3.error);
   g_assert_cmpint (w3.questions, ==, 1);
@@ -230,7 +239,7 @@ test_create_info_executable (void)
 
   /* Info: the result is there once it's finished. */
   Watch w4 = { 0 };
-  g_autoptr (GbkJob) info = gbk_job_new_info (g_ptr_array_index (paths, 1));
+  g_autoptr (GbkJob) info = gbk_job_new_info (g_ptr_array_index (locs, 1));
   g_assert_null (gbk_job_info (info));
   run_job (info, &w4, owner);
   g_assert_no_error (w4.error);
@@ -240,10 +249,52 @@ test_create_info_executable (void)
 
   /* Permissions. */
   Watch w5 = { 0 };
-  g_autoptr (GbkJob) perm = gbk_job_new_permissions (g_ptr_array_index (paths, 1), 0600);
+  g_autoptr (GbkJob) perm = gbk_job_new_permissions (g_ptr_array_index (locs, 1), 0600);
   run_job (perm, &w5, owner);
   g_assert_no_error (w5.error);
   g_assert_false (g_file_test (g_ptr_array_index (paths, 1), G_FILE_TEST_IS_EXECUTABLE));
+}
+
+/* A job on another machine's files fails at once, and never touches this machine's file
+ * with the same path (both machines have the same layout: that's the danger). */
+static void
+test_remote_refused (void)
+{
+  put ("r/f.txt", "keep");
+  put ("r/d/x", "");
+  g_autoptr (GObject) owner = g_object_new (G_TYPE_OBJECT, nullptr);
+  g_autofree char *local = g_build_filename (root, "r/f.txt", nullptr);
+  g_autofree char *local_dir = g_build_filename (root, "r/d", nullptr);
+  g_autoptr (GPtrArray) src = gbk_loc_array_new ();
+  g_ptr_array_add (src, gbk_loc_new_remote_for_test ("ws", local));
+  g_autoptr (GbkLoc) remote_dir = gbk_loc_new_remote_for_test ("ws", local_dir);
+  g_autoptr (GPtrArray) here = gbk_loc_array_new ();
+  g_ptr_array_add (here, L ("r/f.txt"));
+
+  GbkJob *jobs[] = {
+    gbk_job_new (GBK_OP_DELETE, src, nullptr),
+    gbk_job_new (GBK_OP_TRASH, src, nullptr),
+    gbk_job_new (GBK_OP_MOVE, here, remote_dir),     /* local source, remote destination */
+    gbk_job_new_rename (g_ptr_array_index (src, 0), "renamed"),
+    gbk_job_new_create (remote_dir, "new", false),
+    gbk_job_new_permissions (g_ptr_array_index (src, 0), 0),
+  };
+  for (size_t i = 0; i < G_N_ELEMENTS (jobs); i++)
+    {
+      Watch w = { 0 };
+      run_job (jobs[i], &w, owner);
+      g_assert_error (w.error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+      g_assert_cmpint (w.questions, ==, 0);
+      g_clear_error (&w.error);
+      g_object_unref (jobs[i]);
+    }
+  g_autofree char *content = nullptr;
+  g_assert_true (g_file_get_contents (local, &content, nullptr, nullptr));
+  g_assert_cmpstr (content, ==, "keep");
+  g_assert_true (exists ("r/d"));
+  g_assert_false (exists ("r/renamed"));
+  g_assert_false (exists ("r/d/new"));
+  g_assert_false (exists ("r/d/f.txt"));
 }
 
 int
@@ -257,6 +308,7 @@ main (int argc, char **argv)
   g_test_add_func ("/job/outlives-creator", test_outlives_creator);
   g_test_add_func ("/job/rename-error", test_rename_error);
   g_test_add_func ("/job/create-info-executable", test_create_info_executable);
+  g_test_add_func ("/job/remote-refused", test_remote_refused);
   int status = g_test_run ();
   if (!no_jobs () || gbk_lifetime_live () != 0)
     gbk_fatal ("jobs or registrations leaked");

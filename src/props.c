@@ -6,7 +6,7 @@
 struct _GbkProps
 {
   GtkWindow parent_instance;
-  char *path;
+  GbkLoc *loc;
   char *mime;
 
   GtkBox *body;
@@ -102,9 +102,9 @@ show_details (GbkProps *p, const GbkFileInfo *info)
   gtk_box_reorder_child (p->body, p->details, 0);
 
   int row = 0;
-  g_autofree char *name = g_filename_display_basename (p->path);
-  g_autofree char *dir = g_path_get_dirname (p->path);
-  g_autofree char *location = g_filename_display_name (dir);
+  g_autofree char *name = gbk_loc_display_name (p->loc);
+  g_autoptr (GbkLoc) dir = gbk_loc_parent (p->loc);
+  g_autofree char *location = gbk_loc_display (dir);
   add_field (p, row++, "Name", name);
   add_field (p, row++, "Location", location);
   bool is_dir = S_ISDIR (info->mode) && !info->dangling;
@@ -183,7 +183,7 @@ read_info (GbkProps *p)
 {
   p->loaded = false;
   gtk_widget_set_sensitive (p->apply, false);
-  g_autoptr (GbkJob) job = gbk_job_new_info (p->path);
+  g_autoptr (GbkJob) job = gbk_job_new_info (p->loc);
   gbk_connect (G_OBJECT (p), job, "finished", G_CALLBACK (on_info_finished), p);
   gbk_job_start (job);         /* a running job keeps itself alive */
 }
@@ -202,7 +202,7 @@ on_apply (GtkButton *b G_GNUC_UNUSED, GbkProps *p)
 {
   if (!p->loaded)
     return;
-  g_autoptr (GbkJob) job = gbk_job_new_permissions (p->path, checked_rwx (p));
+  g_autoptr (GbkJob) job = gbk_job_new_permissions (p->loc, checked_rwx (p));
   gbk_connect (G_OBJECT (p), job, "finished", G_CALLBACK (on_permissions_finished), p);
   gtk_widget_set_sensitive (p->apply, false);
   gbk_jobui_start (job, GTK_WINDOW (p));
@@ -231,7 +231,7 @@ static void
 gbk_props_finalize (GObject *o)
 {
   GbkProps *p = GBK_PROPS (o);
-  g_free (p->path);
+  g_clear_pointer (&p->loc, gbk_loc_unref);
   g_free (p->mime);
   g_hash_table_unref (p->values);
   G_OBJECT_CLASS (gbk_props_parent_class)->finalize (o);
@@ -261,12 +261,12 @@ heading (const char *text)
 }
 
 GbkProps *
-gbk_props_new (GtkWindow *parent, const char *path, const char *mime)
+gbk_props_new (GtkWindow *parent, GbkLoc *loc, const char *mime)
 {
   GbkProps *p = g_object_new (GBK_TYPE_PROPS, "type", GTK_WINDOW_TOPLEVEL, nullptr);
-  p->path = g_strdup (path);
+  p->loc = gbk_loc_ref (loc);
   p->mime = g_strdup (mime);
-  g_autofree char *name = g_filename_display_basename (path);
+  g_autofree char *name = gbk_loc_display_name (loc);
   g_autofree char *title = g_strdup_printf ("%s Properties", name);
   gtk_window_set_title (GTK_WINDOW (p), title);
   gtk_window_set_transient_for (GTK_WINDOW (p), parent);

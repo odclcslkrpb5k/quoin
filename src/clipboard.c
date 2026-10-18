@@ -53,9 +53,12 @@ payload_clear (GtkClipboard *cb G_GNUC_UNUSED, void *data)
   g_free (p);
 }
 
-void
-gbk_clipboard_set_files (GtkWidget *widget, GPtrArray *paths, bool cut)
+bool
+gbk_clipboard_set_files (GtkWidget *widget, const GPtrArray *locs, bool cut)
 {
+  g_autoptr (GPtrArray) paths = gbk_loc_array_as_local (locs);
+  if (paths == nullptr)
+    return false;
   /* GtkTargetEntry wants mutable strings. */
   static char t_gnome[] = GNOME_TARGET, t_uris[] = URI_TARGET, t_utf8[] = "UTF8_STRING",
               t_plain_utf8[] = "text/plain;charset=utf-8", t_plain[] = "text/plain";
@@ -73,6 +76,7 @@ gbk_clipboard_set_files (GtkWidget *widget, GPtrArray *paths, bool cut)
     owned = p;
   else
     payload_clear (cb, p);
+  return true;
 }
 
 void
@@ -105,7 +109,8 @@ got_uris (GtkSelectionData *sd, void *p)
   bool cut = false;
   g_autoptr (GPtrArray) paths = gbk_clip_parse ((const char *) gtk_selection_data_get_data (sd),
                                                 len > 0 ? (size_t) len : 0, false, &cut);
-  g->fn (paths, false, g->data);
+  g_autoptr (GPtrArray) locs = gbk_loc_array_from_local (paths);
+  g->fn (locs, false, g->data);
 }
 
 static void
@@ -118,7 +123,8 @@ got_gnome (GtkSelectionData *sd, void *p)
       bool cut = false;
       g_autoptr (GPtrArray) paths = gbk_clip_parse ((const char *) gtk_selection_data_get_data (sd),
                                                     (size_t) len, true, &cut);
-      g->fn (paths, cut, g->data);
+      g_autoptr (GPtrArray) locs = gbk_loc_array_from_local (paths);
+      g->fn (locs, cut, g->data);
       return;
     }
   /* Not from a file manager: try a plain URI list (always a copy). Owner is alive here

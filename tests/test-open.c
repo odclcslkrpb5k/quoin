@@ -2,6 +2,7 @@
 #include "open.h"
 
 static char *tmp;
+static GbkLoc *tmp_loc;
 static GbkConfig *config;
 
 static char *
@@ -34,7 +35,8 @@ static GbkItem *
 item (const char *name, const char *mime, bool exec, bool script)
 {
   GbkItem *it = g_new0 (GbkItem, 1);
-  it->path = path_in (name);
+  g_autofree char *path = path_in (name);
+  it->loc = gbk_loc_new_local (path);
   it->display = g_strdup (name);
   it->mime = g_strdup (mime);
   it->executable = exec;
@@ -45,7 +47,8 @@ item (const char *name, const char *mime, bool exec, bool script)
 static void
 test_plan (void)
 {
-  g_autoptr (GbkItem) dir = gbk_item_new_dir ("/x");
+  g_autoptr (GbkLoc) x = gbk_loc_new_local ("/x");
+  g_autoptr (GbkItem) dir = gbk_item_new_dir (x);
   g_autoptr (GbkItem) script = item ("s.sh", "application/x-shellscript", true, true);
   g_autoptr (GbkItem) cold = item ("s.sh", "application/x-shellscript", false, true);
   g_autoptr (GbkItem) bin = item ("prog", "application/x-executable", true, false);
@@ -60,7 +63,9 @@ test_plan (void)
   g_assert_cmpuint (g_strv_length (a1), ==, 1);
   g_auto (GStrv) a2 = gbk_open_exec_argv (config, cold);
   g_assert_cmpstr (a2[0], ==, "sh");
-  g_assert_cmpstr (a2[1], ==, script->path);
+  const char *script_path;
+  g_assert_true (gbk_loc_as_local (script->loc, &script_path));
+  g_assert_cmpstr (a2[1], ==, script_path);
   g_assert_null (gbk_open_exec_argv (config, txt));
   g_assert_null (gbk_open_exec_argv (config, dir));
 }
@@ -82,9 +87,9 @@ test_execute (void)
   g_autoptr (GbkItem) term = item ("term.sh", "application/x-shellscript", true, true);
   g_autoptr (GbkItem) cold = item ("cold.sh", "application/x-shellscript", false, true);
   g_autoptr (GError) error = nullptr;
-  g_assert_true (gbk_open_execute (config, direct, false, tmp, &error));
-  g_assert_true (gbk_open_execute (config, term, true, tmp, &error));
-  g_assert_true (gbk_open_execute (config, cold, false, tmp, &error));
+  g_assert_true (gbk_open_execute (config, direct, false, tmp_loc, &error));
+  g_assert_true (gbk_open_execute (config, term, true, tmp_loc, &error));
+  g_assert_true (gbk_open_execute (config, cold, false, tmp_loc, &error));
   g_assert_no_error (error);
   g_assert_true (wait_for (m1));
   g_assert_true (wait_for (m2));
@@ -123,7 +128,7 @@ test_action_and_missing_program (void)
   g_ptr_array_add (items, item ("act1", "text/plain", false, false));
   g_ptr_array_add (items, item ("act2", "text/plain", false, false));
   g_autoptr (GError) error = nullptr;
-  g_assert_true (gbk_open_action (a, items, tmp, &error));
+  g_assert_true (gbk_open_action (a, items, tmp_loc, &error));
   g_autofree char *t1 = path_in ("act1");
   g_autofree char *t2 = path_in ("act2");
   g_assert_true (wait_for (t1));
@@ -132,14 +137,60 @@ test_action_and_missing_program (void)
   /* The configured terminal doesn't exist here: an error, not a crash. */
   g_autoptr (GbkConfig) bad = gbk_config_new_default ();
   g_autoptr (GError) error2 = nullptr;
-  g_assert_false (gbk_open_terminal (bad, tmp, &error2));
+  g_assert_false (gbk_open_terminal (bad, tmp_loc, &error2));
   g_assert_nonnull (error2);
+}
+
+/* Items on another machine are never run, opened or acted on here, even though a file with
+ * the same path exists on this one. */
+static void
+test_remote_refused (void)
+{
+  g_autofree char *marker = path_in ("ran-remote");
+  g_autofree char *body = g_strdup_printf ("#!/bin/sh\ntouch '%s'\n", marker);
+  write_file ("remote.sh", body, 0755);
+  write_file ("remote.txt", "", 0644);
+  g_autofree char *script_path = path_in ("remote.sh");
+  g_autofree char *text_path = path_in ("remote.txt");
+  g_autoptr (GbkItem) script = item ("remote.sh", "application/x-shellscript", true, true);
+  g_autoptr (GbkItem) text = item ("remote.txt", "text/plain", false, false);
+  g_clear_pointer (&script->loc, gbk_loc_unref);
+  g_clear_pointer (&text->loc, gbk_loc_unref);
+  script->loc = gbk_loc_new_remote_for_test ("ws", script_path);
+  text->loc = gbk_loc_new_remote_for_test ("ws", text_path);
+  g_autoptr (GbkLoc) remote_dir = gbk_loc_new_remote_for_test ("ws", tmp);
+
+  g_assert_null (gbk_open_exec_argv (config, script));
+  g_autoptr (GError) e1 = nullptr;
+  g_assert_false (gbk_open_execute (config, script, false, tmp_loc, &e1));
+  g_assert_error (e1, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+  g_autoptr (GError) e2 = nullptr;
+  g_assert_false (gbk_open_execute (config, script, true, remote_dir, &e2));
+  g_assert_error (e2, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+
+  g_autoptr (GPtrArray) items = g_ptr_array_new ();
+  g_ptr_array_add (items, text);
+  g_autoptr (GError) e3 = nullptr;
+  g_assert_false (gbk_open_default (items, nullptr, &e3));
+  g_assert_error (e3, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+  g_autoptr (GError) e4 = nullptr;
+  g_assert_false (gbk_open_action (g_ptr_array_index (config->actions, 0), items, tmp_loc, &e4));
+  g_assert_error (e4, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+  g_autoptr (GError) e5 = nullptr;
+  g_assert_false (gbk_open_terminal (config, remote_dir, &e5));
+  g_assert_error (e5, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+
+  g_usleep (G_USEC_PER_SEC / 5);   /* anything launched by mistake has had time to run */
+  g_assert_false (g_file_test (marker, G_FILE_TEST_EXISTS));
+  g_autofree char *opened = path_in ("remote.txt.opened");
+  g_assert_false (g_file_test (opened, G_FILE_TEST_EXISTS));
 }
 
 int
 main (int argc, char **argv)
 {
   tmp = g_dir_make_tmp ("gbk-open-XXXXXX", nullptr);
+  tmp_loc = gbk_loc_new_local (tmp);
 
   /* A private XDG environment with a fake default app for text/plain. Must be set before
    * GIO first reads the application database. */
@@ -176,6 +227,7 @@ main (int argc, char **argv)
   g_test_add_func ("/open/execute", test_execute);
   g_test_add_func ("/open/default-app", test_default_app);
   g_test_add_func ("/open/action-and-missing-program", test_action_and_missing_program);
+  g_test_add_func ("/open/remote-refused", test_remote_refused);
   int status = g_test_run ();
 
   gbk_config_free (config);
@@ -189,6 +241,7 @@ main (int argc, char **argv)
                      &rm_status, &error)
       || !g_spawn_check_wait_status (rm_status, &error))
     gbk_fatal ("removing the test folder: %s", error->message);
+  gbk_loc_unref (tmp_loc);
   g_free (tmp);
   return status;
 }

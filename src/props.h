@@ -5,12 +5,13 @@
  * Details are read on a worker (an info job), so a hung network mount can't freeze it.
  * Not modal; closes with its parent window, Escape or Close. */
 #pragma once
+#include "loc.h"
 
 #define GBK_TYPE_PROPS (gbk_props_get_type ())
 G_DECLARE_FINAL_TYPE (GbkProps, gbk_props, GBK, PROPS, GtkWindow)
 
 /* `mime` is the type from the extension table (shown for files). */
-GbkProps *gbk_props_new (GtkWindow *parent, const char *path, const char *mime);
+GbkProps *gbk_props_new (GtkWindow *parent, GbkLoc *loc, const char *mime);
 
 /* For tests. */
 bool gbk_props_loaded (const GbkProps *p);                          /* details are on screen */

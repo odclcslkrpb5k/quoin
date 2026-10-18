@@ -9,14 +9,14 @@
 #define GBK_TYPE_WINDOW (gbk_window_get_type ())
 G_DECLARE_FINAL_TYPE (GbkWindow, gbk_window, GBK, WINDOW, GtkApplicationWindow)
 
-GbkWindow *gbk_window_new (const GtkApplication *app, GbkContext *ctx, const char *path);
+GbkWindow *gbk_window_new (const GtkApplication *app, GbkContext *ctx, GbkLoc *loc);
 /* Keyboard shortcuts for every window of `app`. Call once. */
 void gbk_window_install_accels (GtkApplication *app);
 
-/* Navigate the active tab to `path` (absolute), recording history. */
-void gbk_window_open (GbkWindow *w, const char *path);
-void gbk_window_new_tab (GbkWindow *w, const char *path);
-const char *gbk_window_path (GbkWindow *w);
+/* Navigate the active tab to `loc`, recording history. */
+void gbk_window_open (GbkWindow *w, GbkLoc *loc);
+void gbk_window_new_tab (GbkWindow *w, GbkLoc *loc);
+GbkLoc *gbk_window_loc (GbkWindow *w);
 GbkView *gbk_window_view (GbkWindow *w);
 const char *gbk_window_status (GbkWindow *w);
 /* Right side of the status bar: the sort button (label "↑Name" etc.; click cycles name ->
@@ -26,7 +26,7 @@ GtkButton *gbk_window_sort_button (const GbkWindow *w);
 GtkWidget *gbk_window_status_bar (const GbkWindow *w);
 GtkToggleButton *gbk_window_hidden_button (const GbkWindow *w);
 int gbk_window_n_tabs (GbkWindow *w);
-const char *gbk_window_tab_path (GbkWindow *w, int i); /* tab `i`'s folder */
+GbkLoc *gbk_window_tab_loc (GbkWindow *w, int i); /* tab `i`'s folder */
 GbkPathbar *gbk_window_pathbar (GbkWindow *w);
 /* The ☰ menu's Devices list. It starts following the system this long after the window
  * opens (the first folder comes first). */

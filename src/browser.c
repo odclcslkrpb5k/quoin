@@ -13,12 +13,12 @@ struct _GbkBrowser
   GbkPathbar *pathbar;
   GbkView *view;
 
-  char *path;
+  GbkLoc *loc;
   GbkDirModel *model;
   gulong model_state_id;
   gulong model_changed_id;
 
-  GPtrArray *back;            /* char* paths, most recent last */
+  GPtrArray *back;            /* GbkLoc*, most recent last */
   GPtrArray *forward;
 
   bool show_hidden;
@@ -178,7 +178,7 @@ gbk_browser_select_names (GbkBrowser *b, GPtrArray *names)
 
 /* ---- model & navigation ---- */
 
-static void open_path (GbkBrowser *b, const char *path, const char *focus_name);
+static void open_loc (GbkBrowser *b, GbkLoc *loc, const char *focus_name);
 
 static void
 on_model_changed (GbkDirModel *m, GbkBrowser *b)
@@ -212,11 +212,11 @@ on_model_state (GbkDirModel *m, GbkBrowser *b)
   bool missing = state == GBK_DIR_GONE
                  || (state == GBK_DIR_ERROR
                      && (gbk_dir_model_error (m) == ENOENT || gbk_dir_model_error (m) == ENOTDIR));
-  if (missing && !g_str_equal (b->path, "/"))
+  if (missing && !gbk_loc_is_root (b->loc))
     {
-      g_autofree char *parent = g_path_get_dirname (b->path);
-      g_autofree char *child = g_path_get_basename (b->path);
-      open_path (b, parent, child);
+      g_autoptr (GbkLoc) parent = gbk_loc_parent (b->loc);
+      g_autofree char *child = gbk_loc_name (b->loc);
+      open_loc (b, parent, child);
       return;
     }
   status_changed (b);
@@ -246,40 +246,40 @@ set_model (GbkBrowser *b, GbkDirModel *m)
 
 /* Replace the current directory without touching history. */
 static void
-open_path (GbkBrowser *b, const char *path, const char *focus_name)
+open_loc (GbkBrowser *b, GbkLoc *loc, const char *focus_name)
 {
-  g_free (b->path);
-  b->path = g_canonicalize_filename (path, nullptr);
+  gbk_loc_ref (loc);              /* first: `loc` may be the one being replaced */
+  g_clear_pointer (&b->loc, gbk_loc_unref);
+  b->loc = loc;
   g_free (b->focus_on_load);
   b->focus_on_load = g_strdup (focus_name);
   gbk_browser_select_names (b, nullptr);
   g_clear_pointer (&b->message, g_free);
-  set_model (b, gbk_dir_model_new (b->path, b->ctx->types));
-  gbk_pathbar_set_path (b->pathbar, b->path);
+  set_model (b, gbk_dir_model_new (b->loc, b->ctx->types));
+  gbk_pathbar_set_loc (b->pathbar, b->loc);
   g_signal_emit (b, signals[SIGNAL_PATH_CHANGED], 0);
   status_changed (b);
 }
 
 static void
-push_history (GPtrArray *stack, const char *path)
+push_history (GPtrArray *stack, GbkLoc *loc)
 {
   if (stack->len >= HISTORY_MAX)
     g_ptr_array_remove_index (stack, 0);
-  g_ptr_array_add (stack, g_strdup (path));
+  g_ptr_array_add (stack, gbk_loc_ref (loc));
 }
 
 void
-gbk_browser_open (GbkBrowser *b, const char *path)
+gbk_browser_open (GbkBrowser *b, GbkLoc *loc)
 {
-  if (b->path != nullptr)
+  if (b->loc != nullptr)
     {
-      g_autofree char *canon = g_canonicalize_filename (path, nullptr);
-      if (g_str_equal (canon, b->path))
+      if (gbk_loc_equal (loc, b->loc))
         return;
-      push_history (b->back, b->path);
+      push_history (b->back, b->loc);
       g_ptr_array_set_size (b->forward, 0);
     }
-  open_path (b, path, nullptr);
+  open_loc (b, loc, nullptr);
 }
 
 void
@@ -287,12 +287,11 @@ gbk_browser_back (GbkBrowser *b)
 {
   if (b->back->len == 0)
     return;
-  g_autofree char *target = g_ptr_array_steal_index (b->back, b->back->len - 1);
-  g_autofree char *came_from = g_path_get_basename (b->path);
-  push_history (b->forward, b->path);
+  g_autoptr (GbkLoc) target = g_ptr_array_steal_index (b->back, b->back->len - 1);
+  g_autofree char *came_from = gbk_loc_name (b->loc);
+  push_history (b->forward, b->loc);
   /* If we're going back to the parent we came from, select where we were. */
-  g_autofree char *parent = g_path_get_dirname (b->path);
-  open_path (b, target, g_str_equal (parent, target) ? came_from : nullptr);
+  open_loc (b, target, gbk_loc_is_child_of (b->loc, target) ? came_from : nullptr);
 }
 
 void
@@ -300,27 +299,27 @@ gbk_browser_forward (GbkBrowser *b)
 {
   if (b->forward->len == 0)
     return;
-  g_autofree char *target = g_ptr_array_steal_index (b->forward, b->forward->len - 1);
-  push_history (b->back, b->path);
-  open_path (b, target, nullptr);
+  g_autoptr (GbkLoc) target = g_ptr_array_steal_index (b->forward, b->forward->len - 1);
+  push_history (b->back, b->loc);
+  open_loc (b, target, nullptr);
 }
 
 void
 gbk_browser_up (GbkBrowser *b)
 {
-  if (g_str_equal (b->path, "/"))
+  if (gbk_loc_is_root (b->loc))
     return;
-  g_autofree char *parent = g_path_get_dirname (b->path);
-  g_autofree char *child = g_path_get_basename (b->path);
-  push_history (b->back, b->path);
+  g_autoptr (GbkLoc) parent = gbk_loc_parent (b->loc);
+  g_autofree char *child = gbk_loc_name (b->loc);
+  push_history (b->back, b->loc);
   g_ptr_array_set_size (b->forward, 0);
-  open_path (b, parent, child);
+  open_loc (b, parent, child);
 }
 
-const char *
-gbk_browser_path (const GbkBrowser *b)
+GbkLoc *
+gbk_browser_loc (const GbkBrowser *b)
 {
-  return b->path;
+  return b->loc;
 }
 
 GbkView *
@@ -373,9 +372,9 @@ on_view_status (GbkView *v G_GNUC_UNUSED, GbkBrowser *b)
 }
 
 static void
-on_pathbar_navigate (GbkPathbar *bar G_GNUC_UNUSED, const char *path, GbkBrowser *b)
+on_pathbar_navigate (GbkPathbar *bar G_GNUC_UNUSED, GbkLoc *loc, GbkBrowser *b)
 {
-  gbk_browser_open (b, path);
+  gbk_browser_open (b, loc);
   gtk_widget_grab_focus (GTK_WIDGET (b->view));
 }
 
@@ -394,7 +393,7 @@ gbk_browser_finalize (GObject *o)
   GbkBrowser *b = GBK_BROWSER (o);
   g_ptr_array_unref (b->back);
   g_ptr_array_unref (b->forward);
-  g_free (b->path);
+  g_clear_pointer (&b->loc, gbk_loc_unref);
   g_free (b->focus_on_load);
   g_free (b->message);
   g_clear_pointer (&b->pending_select, g_ptr_array_unref);
@@ -418,8 +417,8 @@ gbk_browser_class_init (GbkBrowserClass *klass)
 static void
 gbk_browser_init (GbkBrowser *b)
 {
-  b->back = g_ptr_array_new_with_free_func (g_free);
-  b->forward = g_ptr_array_new_with_free_func (g_free);
+  b->back = gbk_loc_array_new ();
+  b->forward = gbk_loc_array_new ();
 }
 
 GbkBrowser *

@@ -15,12 +15,12 @@ G_DECLARE_FINAL_TYPE (GbkBrowser, gbk_browser, GBK, BROWSER, GtkBox)
 
 GbkBrowser *gbk_browser_new (GbkContext *ctx, bool show_hidden, GbkSortMode sort);
 
-void gbk_browser_open (GbkBrowser *b, const char *path);    /* records history */
+void gbk_browser_open (GbkBrowser *b, GbkLoc *loc);    /* records history */
 void gbk_browser_back (GbkBrowser *b);
 void gbk_browser_forward (GbkBrowser *b);
 void gbk_browser_up (GbkBrowser *b);
 
-const char *gbk_browser_path (const GbkBrowser *b);
+GbkLoc *gbk_browser_loc (const GbkBrowser *b);
 GbkView *gbk_browser_view (const GbkBrowser *b);
 GbkPathbar *gbk_browser_pathbar (const GbkBrowser *b);
 /* The row above the view that holds the path bar; the window adds its menu button here. */

@@ -8,6 +8,7 @@
  * the window asks Move Here / Copy Here / Cancel at the pointer. The drag is finished as
  * "not moved" (del = false) whatever the choice, since we do the work ourselves. */
 #pragma once
+#include "loc.h"
 
 enum
 {
@@ -25,8 +26,10 @@ enum
  * offers it, else COPY, else MOVE; 0 if none (no drop). */
 GdkDragAction gbk_dnd_action (GdkDragContext *ctx);
 
-/* The local paths in dropped data (non-local URIs skipped). Never nullptr. */
-[[nodiscard]] GPtrArray *gbk_dnd_paths (GtkSelectionData *sd);
+/* The local files in dropped data, as GbkLoc* (non-local URIs skipped). Never nullptr. */
+[[nodiscard]] GPtrArray *gbk_dnd_locs (GtkSelectionData *sd);
 
-/* Fill drag data for `paths` (absolute) in format `info`. */
-void gbk_dnd_set_data (GtkSelectionData *sd, guint info, GPtrArray *paths);
+/* Fill drag data for `locs` (GbkLoc*) in format `info`. Other apps get file:// URIs and
+ * paths, so only files on this machine can go: returns false, setting nothing, if any
+ * isn't. */
+bool gbk_dnd_set_data (GtkSelectionData *sd, guint info, const GPtrArray *locs);

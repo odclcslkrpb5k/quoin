@@ -4,6 +4,44 @@
 #include "scanner.h"
 #include "window.h"
 
+/* Windows and tabs on local folders, by path. */
+static const char *
+wpath (GbkWindow *w)
+{
+  const char *p;
+  g_assert_true (gbk_loc_as_local (gbk_window_loc (w), &p));
+  return p;
+}
+
+[[maybe_unused]] static const char *
+tab_path (GbkWindow *w, int i)
+{
+  const char *p;
+  g_assert_true (gbk_loc_as_local (gbk_window_tab_loc (w, i), &p));
+  return p;
+}
+
+static GbkWindow *
+window_at (const GtkApplication *app, GbkContext *ctx, const char *path)
+{
+  g_autoptr (GbkLoc) loc = gbk_loc_new_local (path);
+  return gbk_window_new (app, ctx, loc);
+}
+
+static void
+open_at (GbkWindow *w, const char *path)
+{
+  g_autoptr (GbkLoc) loc = gbk_loc_new_local (path);
+  gbk_window_open (w, loc);
+}
+
+[[maybe_unused]] static void
+new_tab_at (GbkWindow *w, const char *path)
+{
+  g_autoptr (GbkLoc) loc = gbk_loc_new_local (path);
+  gbk_window_new_tab (w, loc);
+}
+
 static GtkApplication *app;
 static GbkContext *ctx;
 
@@ -155,7 +193,7 @@ fm_unmount (GMount *mount, GMountUnmountFlags flags G_GNUC_UNUSED,
   m->calls++;
   m->busy_at_call = gbk_scanner_busy_under (m->root);
   g_free (m->tab_at_call);
-  m->tab_at_call = watched != nullptr ? g_strdup (gbk_window_tab_path (watched, 0)) : nullptr;
+  m->tab_at_call = watched != nullptr ? g_strdup (tab_path (watched, 0)) : nullptr;
   g_autoptr (GTask) t = g_task_new (mount, cancellable, cb, data);
   if (m->busy_at_call)
     g_task_return_new_error (t, G_IO_ERROR, G_IO_ERROR_BUSY, "target is busy");
@@ -534,8 +572,7 @@ static bool
 tab_at (void *data)
 {
   TabCtx *c = data;
-  return gbk_window_n_tabs (c->w) > c->tab
-         && g_str_equal (gbk_window_tab_path (c->w, c->tab), c->path);
+  return gbk_window_n_tabs (c->w) > c->tab && g_str_equal (tab_path (c->w, c->tab), c->path);
 }
 
 static void
@@ -543,13 +580,13 @@ wait_tab (GbkWindow *w, int tab, const char *path)
 {
   TabCtx c = { w, tab, path };
   if (!wait_until (tab_at, &c))
-    gbk_fatal ("tab %d is at %s, expected %s", tab, gbk_window_tab_path (w, tab), path);
+    gbk_fatal ("tab %d is at %s, expected %s", tab, tab_path (w, tab), path);
 }
 
 static GbkWindow *
 new_window (const char *path)
 {
-  GbkWindow *w = gbk_window_new (app, ctx, path);
+  GbkWindow *w = window_at (app, ctx, path);
   gtk_widget_show_all (GTK_WIDGET (w));
   gbk_devices_start (gbk_window_devices (w));   /* don't wait for the delay */
   return w;
@@ -653,14 +690,14 @@ test_menu (void)
   g_autofree char *a = make_dir (media, "Stick_1");
   g_autofree char *c = make_dir (media, "Share");
 
-  GbkWindow *w = gbk_window_new (app, ctx, media);
+  GbkWindow *w = window_at (app, ctx, media);
   gtk_widget_show_all (GTK_WIDGET (w));
   /* Before the delay: only the file system, which needs no monitor. It opens /. */
   g_assert_false (gbk_devices_started (gbk_window_devices (w)));
   expect_menu (w, "File System: Open");
   device_action (w, "File System", "win.device-open");
-  g_assert_cmpstr (gbk_window_path (w), ==, "/");
-  gbk_window_open (w, media);
+  g_assert_cmpstr (wpath (w), ==, "/");
+  open_at (w, media);
 
   fake_mounted_volume_add ("Stick_1", a, true);
   fake_volume_add ("Backup", "/nonexistent", true, 0);
@@ -688,7 +725,7 @@ test_menu (void)
     g_action_group_activate_action (G_ACTION_GROUP (w), "device-open",
                                     g_variant_new_string (stale[i]));
   drain ();
-  g_assert_cmpstr (gbk_window_path (w), ==, media);
+  g_assert_cmpstr (wpath (w), ==, media);
   g_assert_null (visible_dialog ());
 
   gtk_widget_destroy (GTK_WIDGET (w));
@@ -727,7 +764,7 @@ test_open (void)
   device_action (w, "C (not mounted)", "win.device-open");
   expect_error ("Couldn't open the device");
   g_assert_cmpint (vc->calls, ==, 1);
-  g_assert_cmpstr (gbk_window_path (w), ==, b);
+  g_assert_cmpstr (wpath (w), ==, b);
 
   /* Already reported by the mount operation (or a cancelled password prompt): no second
    * dialog. */
@@ -735,7 +772,7 @@ test_open (void)
   wait_count (&vd->calls, 1);
   drain ();
   g_assert_null (visible_dialog ());
-  g_assert_cmpstr (gbk_window_path (w), ==, b);
+  g_assert_cmpstr (wpath (w), ==, b);
 
   gtk_widget_destroy (GTK_WIDGET (w));
   end_fakes ();
@@ -756,9 +793,9 @@ check_removal (const char *action, const char *menu_after)
 
   GbkWindow *w = new_window (deep);
   watched = w;
-  gbk_window_new_tab (w, elsewhere);
-  gbk_window_new_tab (w, a2);
-  gbk_window_new_tab (w, a);
+  new_tab_at (w, elsewhere);
+  new_tab_at (w, a2);
+  new_tab_at (w, a);
   expect_menu (w, "File System: Open | A: Open, Unmount, Eject");
 
   /* Tabs on the device leave it first, and we wait for their readers to let go (the fake,
@@ -831,7 +868,7 @@ test_unmounted_elsewhere (void)
   FakeMount *ma = fake_mounted_volume_add ("A", a, false);
 
   GbkWindow *w = new_window (sub);
-  gbk_window_new_tab (w, media);
+  new_tab_at (w, media);
   expect_menu (w, "File System: Open | A: Open, Unmount");
   g_signal_emit_by_name (monitor, "mount-pre-unmount", ma);
   wait_tab (w, 0, media);

@@ -3,27 +3,28 @@
  * with one click (as Thunar does). The pencil button (or Ctrl+L) swaps the buttons for a
  * text entry; Enter goes there, Escape goes back to buttons. */
 #pragma once
+#include "loc.h"
 
 #define GBK_TYPE_PATHBAR (gbk_pathbar_get_type ())
 G_DECLARE_FINAL_TYPE (GbkPathbar, gbk_pathbar, GBK, PATHBAR, GtkBox)
 
-/* Signals:
- *   "navigate"     (const char *path)   a button was clicked or a location was entered
- *   "context-menu" (const char *path, GdkEvent *trigger)   a button was right-clicked
- *   "drop"         (const char *path, GPtrArray *paths, GdkEvent *trigger)   local files were
- *                  dropped on the button for `path`; nothing has been done with them yet */
+/* Signals (each GbkLoc is borrowed for the emission; ref it to keep it):
+ *   "navigate"     (GbkLoc *loc)   a button was clicked or a location was entered
+ *   "context-menu" (GbkLoc *loc, GdkEvent *trigger)   a button was right-clicked
+ *   "drop"         (GbkLoc *loc, GPtrArray *locs, GdkEvent *trigger)   local files were
+ *                  dropped on the button for `loc`; nothing has been done with them yet */
 
 GtkWidget *gbk_pathbar_new (void);
-void gbk_pathbar_set_path (GbkPathbar *bar, const char *path);
+void gbk_pathbar_set_loc (GbkPathbar *bar, GbkLoc *loc);
 /* Switch to the text entry, focused, with the current path selected. */
 void gbk_pathbar_edit (GbkPathbar *bar);
 bool gbk_pathbar_editing (GbkPathbar *bar);
 
 /* For tests: the button labels, "|"-separated, with the pressed one in [brackets]. */
 char *gbk_pathbar_describe (GbkPathbar *bar);
-/* For tests: click the button for `path`. */
+/* For tests: `path` names a folder on the bar's machine. Click its button. */
 void gbk_pathbar_click (GbkPathbar *bar, const char *path);
-/* For tests: the button for `path`. */
+/* For tests: the button for `path` (on the bar's machine). */
 GtkWidget *gbk_pathbar_button (GbkPathbar *bar, const char *path);
 GtkEntry *gbk_pathbar_entry (const GbkPathbar *bar);
 /* For tests: as if `uri_list` were dropped on the button for `path`. */

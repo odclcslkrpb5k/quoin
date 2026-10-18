@@ -28,6 +28,11 @@ Rules:
               controls, line and paragraph separators) in source: write them as escapes
               (CD-7). GCC rejects the bidirectional ones itself; this covers the rest, in
               every file the compiler doesn't read too (meson.build, scripts).
+  locpath     gbk_loc_path() (a location's path on its own machine, which may not be this
+              one) is called only where a location's path is shown or new locations are
+              built from it: LOC_PATH_FILES. Everywhere else a path for a file API comes from
+              gbk_loc_as_local(), which refuses locations on other machines (both machines
+              have the same layout, so a leaked remote path names a real local file).
   unsequenced one argument of a call hands &x to a nested call while another argument reads
               x: the order the arguments are evaluated in is unspecified, so x may be read
               before the nested call has written it. No compiler warning or analyzer here
@@ -242,6 +247,24 @@ def message(path, text):
     return problems
 
 
+LOC_PATH_CALL = re.compile(r"\bgbk_loc_path\s*\(")
+LOC_PATH_FILES = {
+    "src/loc.c": "defines it",
+    "src/loc.h": "declares it",
+    "src/pathbar.c": "splits the shown location into buttons and builds their locations",
+    "tests/test-loc.c": "tests it",
+}
+
+
+def locpath(path, text):
+    if path in LOC_PATH_FILES:
+        return []
+    code = STRING.sub('""', COMMENT.sub(" ", text))
+    return [f"{path}:{code.count(chr(10), 0, m.start()) + 1}: gbk_loc_path outside "
+            "LOC_PATH_FILES: get a path for file APIs from gbk_loc_as_local"
+            for m in LOC_PATH_CALL.finditer(code)]
+
+
 HIDDEN = re.compile("[\u00a0\u00ad\u180e\u2000-\u200f\u2028-\u202f\u205f-\u206f\ufeff]")
 
 
@@ -251,7 +274,7 @@ def hidden(path, text):
             for m in HIDDEN.finditer(text)]
 
 
-RULES = [nodiscard, unsequenced, discarded, suppression, logpath, message, hidden]
+RULES = [nodiscard, unsequenced, discarded, suppression, logpath, message, hidden, locpath]
 # Declarations of GLib's own functions, for the analyzer: not ours to mark.
 EXEMPT = {"src/analyzer-glib.h"}
 
@@ -326,6 +349,11 @@ EXAMPLES = [
     (logpath, "src/x.c", "gbk_fatal (\"bad kind %d\", (int) kind);", 0),
     (logpath, "src/x.c", "g_warning (\"no path here\");", 0),
     (logpath, "tests/x.c", "gbk_fatal (\"opendir %s\", dir);", 0),
+    (locpath, "src/window.c", "open (gbk_loc_path (loc), O_RDONLY);", 1),
+    (locpath, "tests/x.c", "const char *p = gbk_loc_path(loc);", 1),
+    (locpath, "src/pathbar.c", "const char *rest = gbk_loc_path (bar->deep);", 0),
+    (locpath, "src/window.c", "/* gbk_loc_path (loc) */ g_print (\"gbk_loc_path (x)\");", 0),
+    (locpath, "src/window.c", "if (gbk_loc_as_local (loc, &p)) open (p, O_RDONLY);", 0),
     (message, "x.c", "if (g_str_has_prefix (error->message, \"No such\"))", 1),
     (message, "x.c", "if (strcmp (e->message, m) == 0)", 1),
     (message, "x.c", "if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))", 0),

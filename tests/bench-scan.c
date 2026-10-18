@@ -4,6 +4,14 @@
 #include "dirmodel.h"
 #include "lifetime.h"
 
+/* A model of the local folder `path`. */
+static GbkDirModel *
+model_at (const char *path, GbkTypeTable *t)
+{
+  g_autoptr (GbkLoc) loc = gbk_loc_new_local (path);
+  return gbk_dir_model_new (loc, t);
+}
+
 static int64_t
 now_us (void)
 {
@@ -148,13 +156,13 @@ main (int argc, char **argv)
 
   /* Warm-up pass: page cache and dentries hot, like browsing a folder twice. */
   {
-    g_autoptr (GbkDirModel) w = gbk_dir_model_new (dir, types);
+    g_autoptr (GbkDirModel) w = model_at (dir, types);
     run_until (w, GBK_DIR_READY);
   }
 
   size_t heap0 = heap_used ();
   Timing t = { .start = now_us () };
-  GbkDirModel *m = gbk_dir_model_new (dir, types);
+  GbkDirModel *m = model_at (dir, types);
   gbk_connect (owner, m, "changed", G_CALLBACK (on_changed), &t);
   run_until (m, GBK_DIR_READY);
   int64_t ready = now_us ();

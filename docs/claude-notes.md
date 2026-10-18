@@ -412,6 +412,11 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
 - Not built yet (proposed 2026-10-11): New Folder/New File, rubber-band selection, drag and
   drop (ask user if they use it), remember window size, parallel statx.
 - REMOTE BROWSING (2026-10-17): plan in docs/remote-plan.md, red-teamed, APPROVED by
-  the user with the decisions in its section 11. Execute phase by phase, in order. Phase 0 there
+  the user with the decisions in its section 11. Execute phase by phase, in order.
+  Done: phase 0 (18aa15c), phase 1 GbkLoc (src/loc.{h,c}): every UI path is a GbkLoc; file
+  code gets paths only via gbk_loc_as_local (remote -> NOT_SUPPORTED / EREMOTE, tested with
+  gbk_loc_new_remote_for_test). check-source rule `locpath` limits gbk_loc_path() callers.
+- FORMAT before CHECK: `./build format` rewrites C with clang-format; run it before every
+  `./build check` (check refuses unformatted C; I tripped it twice in one session). Phase 0 there
   (fsync before deleting a moved source; reject "."/".." in entry validation) is a real
   defect fix independent of remote work.

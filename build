@@ -6,6 +6,7 @@
 #   ./build analyze   GCC -fanalyzer build (any finding fails)
 #   ./build fuzz [s]  libFuzzer every target for s seconds each (default 60)
 #   ./build bench     scan/sort/memory benchmark (release build, real filesystem)
+#   ./build format    rewrite the C sources with clang-format (check refuses unformatted ones)
 #   ./build release   check, on a clean tree (the embedded git hash identifies the
 #                     source), then marks the hardened binary as releasable.
 #   ./build install [prefix]
@@ -89,7 +90,7 @@ Install or update: \`curl -fsSL https://raw.githubusercontent.com/odclcslkrpb5k/
 }
 
 case "$cmd" in
-  check|debug|analyze|release|shell|fuzz|bench) ;;
+  check|debug|analyze|release|shell|fuzz|bench|format) ;;
   install) install_release "${2:-}"; exit 0 ;;
   publish) publish_release; exit 0 ;;
   image) build_image; exit 0 ;;

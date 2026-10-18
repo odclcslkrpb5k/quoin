@@ -21,7 +21,7 @@ struct _GbkWindow
 
   bool show_hidden;       /* window-wide: applies to every tab */
   GbkSortMode sort;
-  char *paste_dest;       /* destination of the paste request in flight */
+  GbkLoc *paste_dest;     /* destination of the paste request in flight */
   GtkGesture *mouse_back;     /* mouse buttons 8/9, caught before any child sees them */
   GtkGesture *mouse_forward;
   GbkDevices *devices;    /* the ☰ menu's Devices submenu, and its operations */
@@ -56,11 +56,11 @@ update_status (GbkWindow *w)
   gtk_label_set_text (w->status, text);
 }
 
-/* The title is the full path of the open folder, and nothing else. */
+/* The title is the full location of the open folder, and nothing else. */
 static void
-set_title_path (GbkWindow *w, const char *path)
+set_title_loc (GbkWindow *w, const GbkLoc *loc)
 {
-  g_autofree char *shown = g_filename_display_name (path);
+  g_autofree char *shown = gbk_loc_display (loc);
   gtk_window_set_title (GTK_WINDOW (w), shown);
 }
 
@@ -100,8 +100,7 @@ static void
 update_chrome (GbkWindow *w)
 {
   const GbkBrowser *b = active (w);
-  const char *path = gbk_browser_path (b);
-  set_title_path (w, path);
+  set_title_loc (w, gbk_browser_loc (b));
   update_status (w);
 }
 
@@ -109,12 +108,12 @@ static void
 update_tab_label (GbkBrowser *b)
 {
   GtkLabel *label = g_object_get_data (G_OBJECT (b), "gbk-tab-label");
-  g_autofree char *base = g_path_get_basename (gbk_browser_path (b));
-  g_autofree char *shown = g_filename_display_name (base);
+  g_autofree char *shown = gbk_loc_display_name (gbk_browser_loc (b));
   gtk_label_set_text (label, shown);
   /* An ellipsizing label asks only for "…": give it room for the name, up to a cap. */
   gtk_label_set_width_chars (label, (int) MIN (g_utf8_strlen (shown, -1) + 2, 32));
-  gtk_widget_set_tooltip_text (GTK_WIDGET (label), gbk_browser_path (b));
+  g_autofree char *full = gbk_loc_display (gbk_browser_loc (b));
+  gtk_widget_set_tooltip_text (GTK_WIDGET (label), full);
 }
 
 static void
@@ -160,14 +159,14 @@ update_tabs_visible (GbkWindow *w)
 static void on_activate (GbkView *v, GbkWindow *w);
 static GtkWidget *app_menu_button (GbkWindow *w);
 static void on_context_menu (GbkView *v, GdkEvent *event, GbkWindow *w);
-static void on_pathbar_menu (GbkPathbar *bar, const char *path, GdkEvent *event, GbkWindow *w);
-static void on_view_drop (GbkView *v, GPtrArray *paths, guint64 folder, GdkEvent *trigger,
+static void on_pathbar_menu (GbkPathbar *bar, GbkLoc *loc, GdkEvent *event, GbkWindow *w);
+static void on_view_drop (GbkView *v, GPtrArray *locs, guint64 folder, GdkEvent *trigger,
                           GbkWindow *w);
-static void on_pathbar_drop (GbkPathbar *bar, const char *path, GPtrArray *paths, GdkEvent *trigger,
+static void on_pathbar_drop (GbkPathbar *bar, GbkLoc *loc, GPtrArray *locs, GdkEvent *trigger,
                              GbkWindow *w);
 
 static GbkBrowser *
-add_tab (GbkWindow *w, const char *path, bool switch_to)
+add_tab (GbkWindow *w, GbkLoc *loc, bool switch_to)
 {
   GbkBrowser *b = gbk_browser_new (w->ctx, w->show_hidden, w->sort);
 
@@ -190,8 +189,8 @@ add_tab (GbkWindow *w, const char *path, bool switch_to)
   gtk_box_reorder_child (gbk_browser_toolbar (b), menu_button, 0);
 
   /* Open before joining the notebook: inserting the first page emits "switch-page", which
-   * reads the tab's path. */
-  gbk_browser_open (b, path);
+   * reads the tab's location. */
+  gbk_browser_open (b, loc);
 
   GbkView *v = gbk_browser_view (b);
   gbk_connect (G_OBJECT (b), close, "clicked", G_CALLBACK (on_tab_close_clicked), b);
@@ -223,7 +222,7 @@ on_switch_page (GtkNotebook *nb G_GNUC_UNUSED, GtkWidget *page, guint n G_GNUC_U
 {
   /* "switch-page" runs before the current page changes: use the page we're given. */
   GbkBrowser *b = GBK_BROWSER (page);
-  set_title_path (w, gbk_browser_path (b));
+  set_title_loc (w, gbk_browser_loc (b));
   g_autofree char *text = gbk_browser_status (b);
   gtk_label_set_text (w->status, text);
   gtk_widget_grab_focus (GTK_WIDGET (gbk_browser_view (b)));
@@ -282,7 +281,7 @@ snapshot_selection (const GbkWindow *w, const GbkBrowser *b)
       const GbkEntry *e = gbk_dir_model_get (m, sel[i]);
       if (e != nullptr)
         g_ptr_array_add (items,
-                         gbk_item_new (w->ctx->config, w->ctx->types, gbk_browser_path (b), e));
+                         gbk_item_new (w->ctx->config, w->ctx->types, gbk_browser_loc (b), e));
     }
   return items;
 }
@@ -310,7 +309,7 @@ open_items (GbkWindow *w, GbkBrowser *b, GPtrArray *items)
 {
   if (items->len == 1 && ((GbkItem *) g_ptr_array_index (items, 0))->is_dir)
     {
-      gbk_browser_open (b, ((GbkItem *) g_ptr_array_index (items, 0))->path);
+      gbk_browser_open (b, ((GbkItem *) g_ptr_array_index (items, 0))->loc);
       return;
     }
   g_autoptr (GPtrArray) by_default = g_ptr_array_new ();
@@ -320,13 +319,13 @@ open_items (GbkWindow *w, GbkBrowser *b, GPtrArray *items)
       g_autoptr (GError) error = nullptr;
       switch (gbk_open_plan (it))
         {
-        case GBK_OPEN_ENTER: add_tab (w, it->path, false); break;
+        case GBK_OPEN_ENTER: add_tab (w, it->loc, false); break;
         case GBK_OPEN_RUN:
-          if (!gbk_open_execute (w->ctx->config, it, false, gbk_browser_path (b), &error))
+          if (!gbk_open_execute (w->ctx->config, it, false, gbk_browser_loc (b), &error))
             report (b, it->display, error);
           break;
         case GBK_OPEN_RUN_TERMINAL:
-          if (!gbk_open_execute (w->ctx->config, it, true, gbk_browser_path (b), &error))
+          if (!gbk_open_execute (w->ctx->config, it, true, gbk_browser_loc (b), &error))
             report (b, it->display, error);
           break;
         case GBK_OPEN_DEFAULT: g_ptr_array_add (by_default, it); break;
@@ -355,12 +354,12 @@ on_activate (GbkView *v, GbkWindow *w)
 /* ---- file operations ---- */
 
 static GPtrArray *
-paths_of (GPtrArray *items)
+locs_of (GPtrArray *items)
 {
-  GPtrArray *paths = g_ptr_array_new_with_free_func (g_free);
+  GPtrArray *locs = gbk_loc_array_new ();
   for (guint i = 0; i < items->len; i++)
-    g_ptr_array_add (paths, g_strdup (((GbkItem *) g_ptr_array_index (items, i))->path));
-  return paths;
+    g_ptr_array_add (locs, gbk_loc_ref (((GbkItem *) g_ptr_array_index (items, i))->loc));
+  return locs;
 }
 
 static void
@@ -369,13 +368,13 @@ on_job_finished (GbkJob *job, GError *error, GbkWindow *w)
   if (error == nullptr && g_object_get_data (G_OBJECT (job), "gbk-from-cut") != nullptr)
     gbk_clipboard_clear_if_ours (GTK_WIDGET (w));
   /* Select what was just created in every tab looking at where it went. */
-  const char *dest = gbk_job_dest (job);
+  const GbkLoc *dest = gbk_job_dest (job);
   if (dest == nullptr)
     return;
   for (int i = 0; i < gtk_notebook_get_n_pages (w->tabs); i++)
     {
       GbkBrowser *b = GBK_BROWSER (gtk_notebook_get_nth_page (w->tabs, i));
-      if (g_str_equal (gbk_browser_path (b), dest))
+      if (gbk_loc_equal (gbk_browser_loc (b), dest))
         gbk_browser_select_names (b, gbk_job_created (job));
     }
 }
@@ -392,34 +391,38 @@ copy_items (GbkWindow *w, GbkBrowser *b, GPtrArray *items, bool cut)
 {
   if (items->len == 0)
     return;
-  g_autoptr (GPtrArray) paths = paths_of (items);
-  gbk_clipboard_set_files (GTK_WIDGET (w), paths, cut);
+  g_autoptr (GPtrArray) locs = locs_of (items);
+  if (!gbk_clipboard_set_files (GTK_WIDGET (w), locs, cut))
+    {
+      gbk_browser_set_message (b, "Files on another machine can't be copied yet");
+      return;
+    }
   g_autofree char *msg = g_strdup_printf (
       "%u %s %s", items->len, items->len == 1 ? "item" : "items", cut ? "cut" : "copied");
   gbk_browser_set_message (b, msg);
 }
 
 static void
-on_paste_files (GPtrArray *paths, bool cut, void *data)
+on_paste_files (GPtrArray *locs, bool cut, void *data)
 {
   GbkWindow *w = data;
-  g_autofree char *dest = g_steal_pointer (&w->paste_dest);
-  if (paths->len == 0 || dest == nullptr)
+  g_autoptr (GbkLoc) dest = g_steal_pointer (&w->paste_dest);
+  if (locs->len == 0 || dest == nullptr)
     {
       gbk_browser_set_message (active (w), "Nothing to paste");
       return;
     }
-  g_autoptr (GbkJob) job = gbk_job_new (cut ? GBK_OP_MOVE : GBK_OP_COPY, paths, dest);
+  g_autoptr (GbkJob) job = gbk_job_new (cut ? GBK_OP_MOVE : GBK_OP_COPY, locs, dest);
   if (cut)
     g_object_set_data (G_OBJECT (job), "gbk-from-cut", GINT_TO_POINTER (1));
   start_job (w, job);
 }
 
 static void
-paste_into (GbkWindow *w, const char *dest)
+paste_into (GbkWindow *w, GbkLoc *dest)
 {
-  g_free (w->paste_dest);
-  w->paste_dest = g_strdup (dest);
+  g_clear_pointer (&w->paste_dest, gbk_loc_unref);
+  w->paste_dest = gbk_loc_ref (dest);
   gbk_clipboard_get_files (G_OBJECT (w), GTK_WIDGET (w), on_paste_files, w);
 }
 
@@ -428,8 +431,8 @@ trash_items (GbkWindow *w, GPtrArray *items)
 {
   if (items->len == 0)
     return;
-  g_autoptr (GPtrArray) paths = paths_of (items);
-  g_autoptr (GbkJob) job = gbk_job_new (GBK_OP_TRASH, paths, nullptr);
+  g_autoptr (GPtrArray) locs = locs_of (items);
+  g_autoptr (GbkJob) job = gbk_job_new (GBK_OP_TRASH, locs, nullptr);
   start_job (w, job);
 }
 
@@ -438,8 +441,8 @@ on_delete_response (GtkDialog *d, int response, GbkWindow *w)
 {
   if (response == GTK_RESPONSE_ACCEPT)
     {
-      GPtrArray *paths = g_object_get_data (G_OBJECT (d), "gbk-paths");
-      g_autoptr (GbkJob) job = gbk_job_new (GBK_OP_DELETE, paths, nullptr);
+      const GPtrArray *locs = g_object_get_data (G_OBJECT (d), "gbk-locs");
+      g_autoptr (GbkJob) job = gbk_job_new (GBK_OP_DELETE, locs, nullptr);
       start_job (w, job);
     }
   gtk_widget_destroy (GTK_WIDGET (d));
@@ -465,7 +468,7 @@ delete_items (GbkWindow *w, GPtrArray *items)
   gtk_dialog_add_buttons (GTK_DIALOG (d), "_Cancel", GTK_RESPONSE_CANCEL, "_Delete",
                           GTK_RESPONSE_ACCEPT, nullptr);
   gtk_dialog_set_default_response (GTK_DIALOG (d), GTK_RESPONSE_CANCEL);
-  g_object_set_data_full (G_OBJECT (d), "gbk-paths", paths_of (items),
+  g_object_set_data_full (G_OBJECT (d), "gbk-locs", locs_of (items),
                           (GDestroyNotify) g_ptr_array_unref);
   gbk_connect (G_OBJECT (w), d, "response", G_CALLBACK (on_delete_response), w);
   gtk_widget_show_all (d);
@@ -475,8 +478,8 @@ delete_items (GbkWindow *w, GPtrArray *items)
 
 typedef enum
 {
-  NAME_RENAME,          /* `path` is the item */
-  NAME_CREATE_FILE,     /* `path` is the directory */
+  NAME_RENAME,          /* `loc` is the item */
+  NAME_CREATE_FILE,     /* `loc` is the directory */
   NAME_CREATE_FOLDER,
 } NameAction;
 
@@ -487,7 +490,7 @@ on_name_response (GtkDialog *d, int response, GbkWindow *w)
     {
       NameAction act
           = (NameAction) GPOINTER_TO_INT (g_object_get_data (G_OBJECT (d), "gbk-action"));
-      const char *path = g_object_get_data (G_OBJECT (d), "gbk-path");
+      GbkLoc *loc = g_object_get_data (G_OBJECT (d), "gbk-loc");
       GtkEntry *entry = g_object_get_data (G_OBJECT (d), "gbk-entry");
       const char *what = act == NAME_RENAME ? "Can't rename" : "Can't create";
       /* The entry holds UTF-8; filenames are bytes in the filesystem encoding. */
@@ -499,8 +502,8 @@ on_name_response (GtkDialog *d, int response, GbkWindow *w)
       else
         {
           g_autoptr (GbkJob) job = act == NAME_RENAME
-                                       ? gbk_job_new_rename (path, name)
-                                       : gbk_job_new_create (path, name, act == NAME_CREATE_FOLDER);
+                                       ? gbk_job_new_rename (loc, name)
+                                       : gbk_job_new_create (loc, name, act == NAME_CREATE_FOLDER);
           start_job (w, job);
         }
     }
@@ -510,7 +513,7 @@ on_name_response (GtkDialog *d, int response, GbkWindow *w)
 /* Ask for a name, starting from `initial` (filename bytes). Selects all of it, or only the
  * part before the extension when `select_stem`, so typing replaces the right part. */
 static void
-name_dialog (GbkWindow *w, NameAction act, const char *path, const char *initial, bool select_stem)
+name_dialog (GbkWindow *w, NameAction act, GbkLoc *loc, const char *initial, bool select_stem)
 {
   static const char *const titles[] = { "Rename", "Create File", "Create Folder" };
   GtkWidget *d = gtk_dialog_new_with_buttons (
@@ -528,7 +531,8 @@ name_dialog (GbkWindow *w, NameAction act, const char *path, const char *initial
   gtk_container_set_border_width (GTK_CONTAINER (area), 8);
   gtk_box_pack_start (GTK_BOX (area), entry, true, true, 0);
   g_object_set_data (G_OBJECT (d), "gbk-action", GINT_TO_POINTER ((int) act));
-  g_object_set_data_full (G_OBJECT (d), "gbk-path", g_strdup (path), g_free);
+  g_object_set_data_full (G_OBJECT (d), "gbk-loc", gbk_loc_ref (loc),
+                          (GDestroyNotify) gbk_loc_unref);
   g_object_set_data (G_OBJECT (d), "gbk-entry", entry);
   gbk_connect (G_OBJECT (w), d, "response", G_CALLBACK (on_name_response), w);
   gtk_widget_show_all (d);
@@ -542,14 +546,14 @@ rename_item (GbkWindow *w, const GbkItem *it)
 {
   if (it == nullptr)
     gbk_fatal ("rename without an item");
-  g_autofree char *base = g_path_get_basename (it->path);
-  name_dialog (w, NAME_RENAME, it->path, base, !it->is_dir);
+  g_autofree char *base = gbk_loc_name (it->loc);
+  name_dialog (w, NAME_RENAME, it->loc, base, !it->is_dir);
 }
 
 /* "New Folder", or "New Folder (n)" if the folder (as last listed) has that name. Only a
  * suggestion: creating never replaces, whatever appeared since. */
 static void
-create_item (GbkWindow *w, const GbkBrowser *b, const char *dir, bool folder)
+create_item (GbkWindow *w, const GbkBrowser *b, GbkLoc *dir, bool folder)
 {
   const char *base = folder ? "New Folder" : "New File";
   GbkDirModel *m = gbk_browser_model (b);
@@ -576,15 +580,15 @@ all_executable (const GPtrArray *items)
 static void
 toggle_executable (GbkWindow *w, GPtrArray *items)
 {
-  g_autoptr (GPtrArray) paths = paths_of (items);
-  g_autoptr (GbkJob) job = gbk_job_new_executable (paths, !all_executable (items));
+  g_autoptr (GPtrArray) locs = locs_of (items);
+  g_autoptr (GbkJob) job = gbk_job_new_executable (locs, !all_executable (items));
   start_job (w, job);
 }
 
 static void
 show_properties (GbkWindow *w, const GbkItem *it)
 {
-  GbkProps *p = gbk_props_new (GTK_WINDOW (w), it->path, it->mime);
+  GbkProps *p = gbk_props_new (GTK_WINDOW (w), it->loc, it->mime);
   gtk_widget_show (GTK_WIDGET (p));
 }
 
@@ -622,12 +626,26 @@ menu_items_of (GtkWidget *menu_item)
 }
 
 /* Paths are shown as display names: exact for UTF-8 names (the norm), with U+FFFD for bytes
- * that can't be text at all. */
+ * that can't be text at all. A location on another machine is "host:/path", as scp and
+ * rsync take it: never a bare path, which would name a file on this machine. */
 static void
 copy_paths (GbkWindow *w, GbkBrowser *b, GPtrArray *items)
 {
-  g_autoptr (GPtrArray) paths = paths_of (items);
-  g_autofree char *text = gbk_clip_format_text (paths);
+  g_autoptr (GPtrArray) locs = locs_of (items);
+  g_autoptr (GPtrArray) paths = gbk_loc_array_as_local (locs);
+  g_autofree char *text = nullptr;
+  if (paths != nullptr)
+    text = gbk_clip_format_text (paths);
+  else
+    {
+      GString *s = g_string_new ("");
+      for (guint i = 0; i < locs->len; i++)
+        {
+          g_autofree char *shown = gbk_loc_display (g_ptr_array_index (locs, i));
+          g_string_append_printf (s, "%s%s", i > 0 ? "\n" : "", shown);
+        }
+      text = g_string_free (s, false);
+    }
   gbk_clipboard_set_text (GTK_WIDGET (w), text);
   g_autofree char *msg = items->len == 1 ? g_strdup ("Path copied")
                                          : g_strdup_printf ("%u paths copied", items->len);
@@ -643,7 +661,7 @@ on_menu_item (GtkMenuItem *mi, GbkWindow *w)
   GbkBrowser *b = g_object_get_data (G_OBJECT (menu_of (GTK_WIDGET (mi))), KEY_BROWSER);
   if (b == nullptr)
     return;
-  const char *here = gbk_browser_path (b);
+  GbkLoc *here = gbk_browser_loc (b);
   GbkMenuKind kind = (GbkMenuKind) GPOINTER_TO_INT (g_object_get_data (G_OBJECT (mi), KEY_KIND));
   /* Invariant: a context menu always has a target (empty space = the folder itself). */
   if (items->len == 0 || g_ptr_array_index (items, 0) == nullptr)
@@ -657,13 +675,13 @@ on_menu_item (GtkMenuItem *mi, GbkWindow *w)
     case GBK_MENU_OPEN: open_items (w, b, items); break;
     case GBK_MENU_OPEN_TAB:
       for (guint i = 0; i < items->len; i++)       /* show the first one opened */
-        add_tab (w, ((GbkItem *) g_ptr_array_index (items, i))->path, i == 0);
+        add_tab (w, ((GbkItem *) g_ptr_array_index (items, i))->loc, i == 0);
       break;
     case GBK_MENU_OPEN_WINDOW:
       for (guint i = 0; i < items->len; i++)
         {
           GbkWindow *n = gbk_window_new (gtk_window_get_application (GTK_WINDOW (w)), w->ctx,
-                                         ((GbkItem *) g_ptr_array_index (items, i))->path);
+                                         ((GbkItem *) g_ptr_array_index (items, i))->loc);
           gtk_widget_show_all (GTK_WIDGET (n));
         }
       break;
@@ -680,9 +698,7 @@ on_menu_item (GtkMenuItem *mi, GbkWindow *w)
     case GBK_MENU_EXECUTE_TERMINAL:
       ok = gbk_open_execute (w->ctx->config, first, true, here, &error);
       break;
-    case GBK_MENU_TERMINAL_HERE:
-      ok = gbk_open_terminal (w->ctx->config, first->path, &error);
-      break;
+    case GBK_MENU_TERMINAL_HERE: ok = gbk_open_terminal (w->ctx->config, first->loc, &error); break;
     case GBK_MENU_ACTION:
       ok = gbk_open_action (g_object_get_data (G_OBJECT (mi), KEY_ACTION), items, here, &error);
       break;
@@ -694,14 +710,14 @@ on_menu_item (GtkMenuItem *mi, GbkWindow *w)
     case GBK_MENU_COPY: copy_items (w, b, items, false); break;
     case GBK_MENU_COPY_PATH: copy_paths (w, b, items); break;
     case GBK_MENU_PASTE: paste_into (w, here); break;
-    case GBK_MENU_PASTE_INTO: paste_into (w, first->path); break;
+    case GBK_MENU_PASTE_INTO: paste_into (w, first->loc); break;
     case GBK_MENU_TRASH: trash_items (w, items); break;
     case GBK_MENU_DELETE: delete_items (w, items); break;
     case GBK_MENU_RENAME: rename_item (w, first); break;
     case GBK_MENU_EXECUTABLE: toggle_executable (w, items); break;
     case GBK_MENU_PROPERTIES: show_properties (w, first); break;
-    case GBK_MENU_CREATE_FOLDER: create_item (w, b, first->path, true); break;
-    case GBK_MENU_CREATE_FILE: create_item (w, b, first->path, false); break;
+    case GBK_MENU_CREATE_FOLDER: create_item (w, b, first->loc, true); break;
+    case GBK_MENU_CREATE_FILE: create_item (w, b, first->loc, false); break;
     case GBK_MENU_SEPARATOR:
     default: gbk_fatal ("bad menu entry kind %d", (int) kind);
     }
@@ -860,7 +876,7 @@ static void
 popup_background_menu (GbkWindow *w, GbkBrowser *b, GtkWidget *attach, GdkEvent *event)
 {
   g_autoptr (GPtrArray) items = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_item_free);
-  g_ptr_array_add (items, gbk_item_new_dir (gbk_browser_path (b)));
+  g_ptr_array_add (items, gbk_item_new_dir (gbk_browser_loc (b)));
   popup_menu (w, b, items, GBK_MENU_ON_BACKGROUND, attach, event);
 }
 
@@ -890,7 +906,7 @@ on_status_bar_press (GtkWidget *bar, GdkEventButton *ev, GbkWindow *w)
 /* Dropped files are never moved or copied without asking: an accidental drop onto a
  * folder is the classic way files vanish into the wrong place. The menu sits where they
  * were dropped; Escape, clicking elsewhere or Cancel does nothing. */
-#define KEY_DROP_PATHS "gbk-drop-paths"
+#define KEY_DROP_LOCS "gbk-drop-locs"
 #define KEY_DROP_DEST "gbk-drop-dest"
 #define KEY_DROP_MOVE "gbk-drop-move"
 
@@ -898,38 +914,36 @@ static void
 on_drop_chosen (GtkMenuItem *mi, GbkWindow *w)
 {
   GtkWidget *menu = gtk_widget_get_parent (GTK_WIDGET (mi));
-  GPtrArray *paths = g_object_get_data (G_OBJECT (menu), KEY_DROP_PATHS);
-  const char *dest = g_object_get_data (G_OBJECT (menu), KEY_DROP_DEST);
+  const GPtrArray *locs = g_object_get_data (G_OBJECT (menu), KEY_DROP_LOCS);
+  GbkLoc *dest = g_object_get_data (G_OBJECT (menu), KEY_DROP_DEST);
   bool move = g_object_get_data (G_OBJECT (mi), KEY_DROP_MOVE) != nullptr;
-  g_autoptr (GbkJob) job = gbk_job_new (move ? GBK_OP_MOVE : GBK_OP_COPY, paths, dest);
+  g_autoptr (GbkJob) job = gbk_job_new (move ? GBK_OP_MOVE : GBK_OP_COPY, locs, dest);
   start_job (w, job);
 }
 
 static bool
-all_in (const GPtrArray *paths, const char *dir)
+all_in (const GPtrArray *locs, const GbkLoc *dir)
 {
-  for (guint i = 0; i < paths->len; i++)
-    {
-      g_autofree char *parent = g_path_get_dirname (g_ptr_array_index (paths, i));
-      if (!g_str_equal (parent, dir))
-        return false;
-    }
+  for (guint i = 0; i < locs->len; i++)
+    if (!gbk_loc_is_child_of (g_ptr_array_index (locs, i), dir))
+      return false;
   return true;
 }
 
 static void
-ask_drop (GbkWindow *w, GbkBrowser *b, GPtrArray *paths, const char *dest, GtkWidget *attach,
+ask_drop (GbkWindow *w, GbkBrowser *b, GPtrArray *locs, GbkLoc *dest, GtkWidget *attach,
           GdkEvent *trigger)
 {
-  if (all_in (paths, dest))
+  if (all_in (locs, dest))
     {
       gbk_browser_set_message (b, "Already in this folder");
       return;
     }
   GtkWidget *menu = gtk_menu_new ();
-  g_object_set_data_full (G_OBJECT (menu), KEY_DROP_PATHS, g_ptr_array_ref (paths),
+  g_object_set_data_full (G_OBJECT (menu), KEY_DROP_LOCS, g_ptr_array_ref (locs),
                           (GDestroyNotify) g_ptr_array_unref);
-  g_object_set_data_full (G_OBJECT (menu), KEY_DROP_DEST, g_strdup (dest), g_free);
+  g_object_set_data_full (G_OBJECT (menu), KEY_DROP_DEST, gbk_loc_ref (dest),
+                          (GDestroyNotify) gbk_loc_unref);
   GtkWidget *move = gtk_menu_item_new_with_label ("Move Here");
   g_object_set_data (G_OBJECT (move), KEY_DROP_MOVE, GINT_TO_POINTER (1));
   GtkWidget *copy = gtk_menu_item_new_with_label ("Copy Here");
@@ -951,43 +965,42 @@ ask_drop (GbkWindow *w, GbkBrowser *b, GPtrArray *paths, const char *dest, GtkWi
 }
 
 static void
-on_view_drop (GbkView *v, GPtrArray *paths, guint64 folder, GdkEvent *trigger, GbkWindow *w)
+on_view_drop (GbkView *v, GPtrArray *locs, guint64 folder, GdkEvent *trigger, GbkWindow *w)
 {
   GbkBrowser *b = browser_of (v);
   GbkDirModel *m = gbk_browser_model (b);
-  g_autofree char *dest = nullptr;
+  g_autoptr (GbkLoc) dest = nullptr;
   if (folder == GBK_HANDLE_NONE)
-    dest = g_strdup (gbk_browser_path (b));
+    dest = gbk_loc_ref (gbk_browser_loc (b));
   else
     {
       const GbkEntry *e = m != nullptr ? gbk_dir_model_get (m, folder) : nullptr;
       if (e == nullptr)
         return;                          /* the folder went away mid-drop */
-      dest = g_build_filename (gbk_browser_path (b), gbk_entry_name (e), nullptr);
+      dest = gbk_loc_child (gbk_browser_loc (b), gbk_entry_name (e));
     }
-  ask_drop (w, b, paths, dest, GTK_WIDGET (v), trigger);
+  ask_drop (w, b, locs, dest, GTK_WIDGET (v), trigger);
 }
 
 static void
-on_pathbar_drop (GbkPathbar *bar, const char *path, GPtrArray *paths, GdkEvent *trigger,
-                 GbkWindow *w)
+on_pathbar_drop (GbkPathbar *bar, GbkLoc *loc, GPtrArray *locs, GdkEvent *trigger, GbkWindow *w)
 {
   GtkWidget *b = gtk_widget_get_ancestor (GTK_WIDGET (bar), GBK_TYPE_BROWSER);
   if (b == nullptr)
     gbk_fatal ("path bar outside a browser");
-  ask_drop (w, GBK_BROWSER (b), paths, path, GTK_WIDGET (bar), trigger);
+  ask_drop (w, GBK_BROWSER (b), locs, loc, GTK_WIDGET (bar), trigger);
 }
 
 /* Path bar buttons are folders: the current one and its ancestors (and, after going up,
  * the deeper ones still shown). */
 static void
-on_pathbar_menu (GbkPathbar *bar, const char *path, GdkEvent *event, GbkWindow *w)
+on_pathbar_menu (GbkPathbar *bar, GbkLoc *loc, GdkEvent *event, GbkWindow *w)
 {
   GtkWidget *b = gtk_widget_get_ancestor (GTK_WIDGET (bar), GBK_TYPE_BROWSER);
   if (b == nullptr)
     gbk_fatal ("path bar outside a browser");
   g_autoptr (GPtrArray) items = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_item_free);
-  g_ptr_array_add (items, gbk_item_new_dir (path));
+  g_ptr_array_add (items, gbk_item_new_dir (loc));
   popup_menu (w, GBK_BROWSER (b), items, GBK_MENU_ON_PATHBAR, GTK_WIDGET (bar), event);
 }
 
@@ -1010,7 +1023,8 @@ ACTION (action_up)
 }
 ACTION (action_home)
 {
-  gbk_browser_open (active (data), g_get_home_dir ());
+  g_autoptr (GbkLoc) home = gbk_loc_new_local (g_get_home_dir ());
+  gbk_browser_open (active (data), home);
 }
 
 /* ---- devices ---- */
@@ -1020,11 +1034,12 @@ ACTION (action_home)
 static void
 on_pre_unmount (GbkDevices *d G_GNUC_UNUSED, const char *root, GbkWindow *w)
 {
-  g_autofree char *outside = g_path_get_dirname (root);
+  g_autoptr (GbkLoc) mount = gbk_loc_new_local (root);
+  g_autoptr (GbkLoc) outside = gbk_loc_parent (mount);
   for (int i = 0; i < gtk_notebook_get_n_pages (w->tabs); i++)
     {
       GbkBrowser *b = GBK_BROWSER (gtk_notebook_get_nth_page (w->tabs, i));
-      if (gbk_path_is_under (gbk_browser_path (b), root))
+      if (gbk_loc_is_under (gbk_browser_loc (b), mount))
         gbk_browser_open (b, outside);
     }
 }
@@ -1050,7 +1065,10 @@ device_opened (GObject *owner, const char *path, const GError *error)
 {
   GbkWindow *w = GBK_WINDOW (owner);
   if (error == nullptr)
-    gbk_browser_open (active (w), path);
+    {
+      g_autoptr (GbkLoc) loc = gbk_loc_new_local (path);
+      gbk_browser_open (active (w), loc);
+    }
   else if (!error_shown (error))
     gbk_jobui_error (GTK_WINDOW (w), "Couldn't open the device", error->message);
 }
@@ -1097,7 +1115,7 @@ ACTION (action_terminal)
   GbkWindow *w = data;
   GbkBrowser *b = active (w);
   g_autoptr (GError) error = nullptr;
-  if (!gbk_open_terminal (w->ctx->config, gbk_browser_path (b), &error))
+  if (!gbk_open_terminal (w->ctx->config, gbk_browser_loc (b), &error))
     report (b, "Terminal", error);
 }
 
@@ -1115,7 +1133,7 @@ ACTION (action_cut)
 
 ACTION (action_paste)
 {
-  paste_into (data, gbk_browser_path (active (data)));
+  paste_into (data, gbk_browser_loc (active (data)));
 }
 
 ACTION (action_trash)
@@ -1144,7 +1162,7 @@ ACTION (action_properties)
   GbkBrowser *b = active (w);
   g_autoptr (GPtrArray) items = snapshot_selection (w, b);
   if (items->len == 0)
-    g_ptr_array_add (items, gbk_item_new_dir (gbk_browser_path (b)));
+    g_ptr_array_add (items, gbk_item_new_dir (gbk_browser_loc (b)));
   if (items->len == 1)
     show_properties (w, g_ptr_array_index (items, 0));
   else
@@ -1154,7 +1172,7 @@ ACTION (action_properties)
 ACTION (action_new_tab)
 {
   GbkWindow *w = data;
-  add_tab (w, gbk_browser_path (active (w)), true);
+  add_tab (w, gbk_browser_loc (active (w)), true);
 }
 
 ACTION (action_close_tab)
@@ -1172,7 +1190,7 @@ ACTION (action_new_window)
 {
   GbkWindow *w = data;
   GbkWindow *n = gbk_window_new (gtk_window_get_application (GTK_WINDOW (w)), w->ctx,
-                                 gbk_browser_path (active (w)));
+                                 gbk_browser_loc (active (w)));
   gtk_widget_show_all (GTK_WIDGET (n));
 }
 
@@ -1333,7 +1351,7 @@ static void
 gbk_window_finalize (GObject *o)
 {
   GbkWindow *w = GBK_WINDOW (o);
-  g_free (w->paste_dest);
+  g_clear_pointer (&w->paste_dest, gbk_loc_unref);
   gbk_context_unref (w->ctx);
   G_OBJECT_CLASS (gbk_window_parent_class)->finalize (o);
 }
@@ -1385,7 +1403,7 @@ app_menu_button (GbkWindow *w)
 }
 
 GbkWindow *
-gbk_window_new (const GtkApplication *app, GbkContext *ctx, const char *path)
+gbk_window_new (const GtkApplication *app, GbkContext *ctx, GbkLoc *loc)
 {
   GbkWindow *w = g_object_new (GBK_TYPE_WINDOW, "application", app, nullptr);
   w->ctx = gbk_context_ref (ctx);
@@ -1453,7 +1471,7 @@ gbk_window_new (const GtkApplication *app, GbkContext *ctx, const char *path)
 
   set_show_hidden (w, w->show_hidden);
   set_sort (w, w->sort);
-  add_tab (w, path, true);
+  add_tab (w, loc, true);
   update_chrome (w);
   /* The device list costs a blocking D-Bus round trip or two: not before the first folder. */
   gbk_timeout_add (G_OBJECT (w), GBK_WINDOW_DEVICES_DELAY_MS, start_devices, w);
@@ -1461,30 +1479,30 @@ gbk_window_new (const GtkApplication *app, GbkContext *ctx, const char *path)
 }
 
 void
-gbk_window_open (GbkWindow *w, const char *path)
+gbk_window_open (GbkWindow *w, GbkLoc *loc)
 {
-  gbk_browser_open (active (w), path);
+  gbk_browser_open (active (w), loc);
 }
 
 void
-gbk_window_new_tab (GbkWindow *w, const char *path)
+gbk_window_new_tab (GbkWindow *w, GbkLoc *loc)
 {
-  add_tab (w, path, true);
+  add_tab (w, loc, true);
 }
 
-const char *
-gbk_window_path (GbkWindow *w)
+GbkLoc *
+gbk_window_loc (GbkWindow *w)
 {
-  return gbk_browser_path (active (w));
+  return gbk_browser_loc (active (w));
 }
 
-const char *
-gbk_window_tab_path (GbkWindow *w, int i)
+GbkLoc *
+gbk_window_tab_loc (GbkWindow *w, int i)
 {
   GtkWidget *b = gtk_notebook_get_nth_page (w->tabs, i);
   if (b == nullptr)
     gbk_fatal ("no tab %d", i);
-  return gbk_browser_path (GBK_BROWSER (b));
+  return gbk_browser_loc (GBK_BROWSER (b));
 }
 
 GbkDevices *

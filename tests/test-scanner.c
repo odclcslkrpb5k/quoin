@@ -5,6 +5,14 @@
 
 static GbkTypeTable *types;
 
+/* A model of the local folder `path`. */
+static GbkDirModel *
+model_at (const char *path, GbkTypeTable *t)
+{
+  g_autoptr (GbkLoc) loc = gbk_loc_new_local (path);
+  return gbk_dir_model_new (loc, t);
+}
+
 /* ---- helpers ---- */
 
 typedef bool (*Pred) (void *data);
@@ -151,7 +159,7 @@ test_initial_listing (void)
   put (dir, "prog");
   g_assert_cmpint (chmod (exe, 0755), ==, 0);
 
-  g_autoptr (GbkDirModel) m = gbk_dir_model_new (dir, types);
+  g_autoptr (GbkDirModel) m = model_at (dir, types);
   g_assert_true (wait_until (is_ready, m, 5000));
   g_assert_true (gbk_dir_model_live (m));
   uint64_t free_bytes = 0;
@@ -191,7 +199,7 @@ test_live_updates (void)
 {
   g_autofree char *dir = mktmp ();
   put (dir, "first");
-  g_autoptr (GbkDirModel) m = gbk_dir_model_new (dir, types);
+  g_autoptr (GbkDirModel) m = model_at (dir, types);
   g_assert_true (wait_until (is_ready, m, 5000));
   MatchCtx c = { m, dir };
 
@@ -235,7 +243,7 @@ test_large_directory (void)
       g_snprintf (name, sizeof name, "f%05d.txt", i);
       put (dir, name);
     }
-  g_autoptr (GbkDirModel) m = gbk_dir_model_new (dir, types);
+  g_autoptr (GbkDirModel) m = model_at (dir, types);
   g_assert_true (wait_until (is_ready, m, 30000));
   g_assert_cmpuint (gbk_dir_model_n_visible (m), ==, 20000);
   gbk_dir_model_check_order (m);
@@ -288,7 +296,7 @@ static void
 run_storm (unsigned pending_max)
 {
   g_autofree char *dir = mktmp ();
-  g_autoptr (GbkDirModel) m = gbk_dir_model_new (dir, types);
+  g_autoptr (GbkDirModel) m = model_at (dir, types);
   g_assert_true (wait_until (is_ready, m, 5000));
   gbk_scanner_set_pending_max_for_test (pending_max);
   int rescans_before = gbk_scanner_rescans ();
@@ -335,7 +343,7 @@ test_gone (void)
   g_autofree char *dir = g_build_filename (parent, "victim", nullptr);
   g_assert_cmpint (mkdir (dir, 0755), ==, 0);
   put (dir, "x");
-  g_autoptr (GbkDirModel) m = gbk_dir_model_new (dir, types);
+  g_autoptr (GbkDirModel) m = model_at (dir, types);
   g_assert_true (wait_until (is_ready, m, 5000));
   rm_rf (dir);
   g_assert_true (wait_until (is_gone, m, 5000));
@@ -353,7 +361,7 @@ test_gone_nested (void)
   g_autofree char *ab = g_build_filename (parent, "a", "b", nullptr);
   g_assert_cmpint (g_mkdir_with_parents (ab, 0755), ==, 0);
   put (ab, "f");
-  g_autoptr (GbkDirModel) m = gbk_dir_model_new (ab, types);
+  g_autoptr (GbkDirModel) m = model_at (ab, types);
   g_assert_true (wait_until (is_ready, m, 5000));
   rm_rf (a);
   g_assert_true (wait_until (is_gone, m, 5000));
@@ -369,7 +377,7 @@ test_gone_plain_rmdir (void)
   g_autofree char *parent = mktmp ();
   g_autofree char *dir = g_build_filename (parent, "held", nullptr);
   g_assert_cmpint (mkdir (dir, 0755), ==, 0);
-  g_autoptr (GbkDirModel) m = gbk_dir_model_new (dir, types);
+  g_autoptr (GbkDirModel) m = model_at (dir, types);
   g_assert_true (wait_until (is_ready, m, 5000));
   g_assert_cmpint (rmdir (dir), ==, 0);
   g_assert_true (wait_until (is_gone, m, 5000));
@@ -384,7 +392,7 @@ test_moved_away (void)
   g_autofree char *dir = g_build_filename (parent, "here", nullptr);
   g_autofree char *elsewhere = g_build_filename (parent, "there", nullptr);
   g_assert_cmpint (mkdir (dir, 0755), ==, 0);
-  g_autoptr (GbkDirModel) m = gbk_dir_model_new (dir, types);
+  g_autoptr (GbkDirModel) m = model_at (dir, types);
   g_assert_true (wait_until (is_ready, m, 5000));
   g_assert_cmpint (rename (dir, elsewhere), ==, 0);
   g_assert_true (wait_until (is_gone, m, 5000));
@@ -401,7 +409,7 @@ test_sibling_deleted_is_not_us (void)
   g_autofree char *sib = g_build_filename (parent, "me2", nullptr);
   g_assert_cmpint (mkdir (dir, 0755), ==, 0);
   g_assert_cmpint (mkdir (sib, 0755), ==, 0);
-  g_autoptr (GbkDirModel) m = gbk_dir_model_new (dir, types);
+  g_autoptr (GbkDirModel) m = model_at (dir, types);
   g_assert_true (wait_until (is_ready, m, 5000));
   g_assert_cmpint (rmdir (sib), ==, 0);
   put (dir, "still-alive");                 /* then a real change inside us */
@@ -439,7 +447,7 @@ test_hub_single_instance (void)
     {
       g_autofree char *sub = g_strdup_printf ("%s/d%d", dir, i);
       g_assert_cmpint (mkdir (sub, 0755), ==, 0);
-      models[i] = gbk_dir_model_new (sub, types);
+      models[i] = model_at (sub, types);
     }
   for (int i = 0; i < 10; i++)
     {
@@ -457,8 +465,8 @@ static void
 test_hub_same_dir_twice (void)
 {
   g_autofree char *dir = mktmp ();
-  GbkDirModel *a = gbk_dir_model_new (dir, types);
-  GbkDirModel *b = gbk_dir_model_new (dir, types);
+  GbkDirModel *a = model_at (dir, types);
+  GbkDirModel *b = model_at (dir, types);
   g_assert_true (wait_until (is_ready, a, 5000));
   g_assert_true (wait_until (is_ready, b, 5000));
   put (dir, "one");
@@ -483,8 +491,8 @@ test_hub_parent_and_child (void)
   g_autofree char *dir = mktmp ();
   g_autofree char *child = g_build_filename (dir, "child", nullptr);
   g_assert_cmpint (mkdir (child, 0755), ==, 0);
-  GbkDirModel *parent = gbk_dir_model_new (dir, types);
-  GbkDirModel *kid = gbk_dir_model_new (child, types);
+  GbkDirModel *parent = model_at (dir, types);
+  GbkDirModel *kid = model_at (child, types);
   g_assert_true (wait_until (is_ready, parent, 5000));
   g_assert_true (wait_until (is_ready, kid, 5000));
 
@@ -505,7 +513,7 @@ static void
 test_hub_subscriber_overflow (void)
 {
   g_autofree char *dir = mktmp ();
-  g_autoptr (GbkDirModel) m = gbk_dir_model_new (dir, types);
+  g_autoptr (GbkDirModel) m = model_at (dir, types);
   g_assert_true (wait_until (is_ready, m, 5000));
   gbk_inotify_set_max_pending_for_test (0);   /* every event overflows: deterministic */
   int before = gbk_scanner_rescans ();
@@ -526,15 +534,25 @@ test_hub_subscriber_overflow (void)
 static void
 test_errors (void)
 {
-  g_autoptr (GbkDirModel) missing = gbk_dir_model_new ("/nonexistent/gbk/dir", types);
+  g_autoptr (GbkDirModel) missing = model_at ("/nonexistent/gbk/dir", types);
   g_assert_true (wait_until (not_loading, missing, 5000));
   g_assert_cmpint (gbk_dir_model_state (missing), ==, GBK_DIR_ERROR);
   g_assert_cmpint (gbk_dir_model_error (missing), ==, ENOENT);
 
+  /* A folder on another machine is never read here, even though the same path exists on
+   * this one: no scanner starts, and the model says why. */
+  int workers = gbk_scanner_live_workers ();
+  g_autoptr (GbkLoc) elsewhere = gbk_loc_new_remote_for_test ("ws", "/tmp");
+  g_autoptr (GbkDirModel) remote = gbk_dir_model_new (elsewhere, types);
+  g_assert_cmpint (gbk_dir_model_state (remote), ==, GBK_DIR_ERROR);
+  g_assert_cmpint (gbk_dir_model_error (remote), ==, EREMOTE);
+  g_assert_cmpuint (gbk_dir_model_n_entries (remote), ==, 0);
+  g_assert_cmpint (gbk_scanner_live_workers (), ==, workers);
+
   g_autofree char *file_dir = mktmp ();
   put (file_dir, "plain");
   g_autofree char *plain = g_build_filename (file_dir, "plain", nullptr);
-  g_autoptr (GbkDirModel) notdir = gbk_dir_model_new (plain, types);
+  g_autoptr (GbkDirModel) notdir = model_at (plain, types);
   g_assert_true (wait_until (not_loading, notdir, 5000));
   g_assert_cmpint (gbk_dir_model_error (notdir), ==, ENOTDIR);
 
@@ -542,7 +560,7 @@ test_errors (void)
     {
       g_autofree char *locked = g_build_filename (file_dir, "locked", nullptr);
       g_assert_cmpint (mkdir (locked, 0000), ==, 0);
-      g_autoptr (GbkDirModel) denied = gbk_dir_model_new (locked, types);
+      g_autoptr (GbkDirModel) denied = model_at (locked, types);
       g_assert_true (wait_until (not_loading, denied, 5000));
       g_assert_cmpint (gbk_dir_model_state (denied), ==, GBK_DIR_ERROR);
       g_assert_cmpint (gbk_dir_model_error (denied), ==, EACCES);
@@ -563,7 +581,7 @@ test_cancel_mid_scan (void)
     }
   for (int round = 0; round < 50; round++)
     {
-      GbkDirModel *m = gbk_dir_model_new (dir, types);
+      GbkDirModel *m = model_at (dir, types);
       for (int i = 0; i < round % 5; i++)
         g_main_context_iteration (nullptr, false);
       g_object_unref (m);

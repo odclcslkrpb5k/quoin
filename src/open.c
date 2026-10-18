@@ -6,18 +6,18 @@ gbk_item_free (GbkItem *it)
 {
   if (it == nullptr)
     return;
-  g_free (it->path);
+  g_clear_pointer (&it->loc, gbk_loc_unref);
   g_free (it->display);
   g_free (it->mime);
   g_free (it);
 }
 
 GbkItem *
-gbk_item_new (const GbkConfig *config, const GbkTypeTable *types, const char *dir,
+gbk_item_new (const GbkConfig *config, const GbkTypeTable *types, const GbkLoc *dir,
               const GbkEntry *e)
 {
   GbkItem *it = g_new0 (GbkItem, 1);
-  it->path = g_build_filename (dir, gbk_entry_name (e), nullptr);
+  it->loc = gbk_loc_child (dir, gbk_entry_name (e));
   it->display = g_strdup (gbk_entry_display (e));
   it->mime = g_strdup (gbk_type_table_mime (types, e->type));
   it->is_dir = gbk_entry_is_dir (e);
@@ -28,14 +28,26 @@ gbk_item_new (const GbkConfig *config, const GbkTypeTable *types, const char *di
 }
 
 GbkItem *
-gbk_item_new_dir (const char *dir)
+gbk_item_new_dir (GbkLoc *dir)
 {
   GbkItem *it = g_new0 (GbkItem, 1);
-  it->path = g_strdup (dir);
-  it->display = g_filename_display_name (dir);
+  it->loc = gbk_loc_ref (dir);
+  it->display = gbk_loc_display (dir);
   it->mime = g_strdup ("inode/directory");
   it->is_dir = true;
   return it;
+}
+
+/* The local path of `loc`, or an error naming `display`: launching, running and actions
+ * need the file on this machine. */
+[[nodiscard]] static bool
+local_path (const GbkLoc *loc, const char *display, const char **out, GError **error)
+{
+  if (gbk_loc_as_local (loc, out))
+    return true;
+  g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+               "\"%s\" is on another machine: not possible there yet", display);
+  return false;
 }
 
 GbkOpenKind
@@ -57,27 +69,32 @@ gbk_open_can_execute (const GbkItem *it)
 char **
 gbk_open_exec_argv (const GbkConfig *config, const GbkItem *it)
 {
-  if (!gbk_open_can_execute (it))
+  const char *path;
+  if (!gbk_open_can_execute (it) || !gbk_loc_as_local (it->loc, &path))
     return nullptr;
   GPtrArray *argv = g_ptr_array_new ();
   if (!it->executable)
     {
-      g_autofree char *base = g_path_get_basename (it->path);
+      g_autofree char *base = gbk_loc_name (it->loc);
       const char *const *interp = gbk_config_interpreter (config, base);
       if (interp == nullptr)
         gbk_fatal ("script without interpreter");   /* it->script says there is one */
       for (size_t i = 0; interp[i] != nullptr; i++)
         g_ptr_array_add (argv, g_strdup (interp[i]));
     }
-  g_ptr_array_add (argv, g_strdup (it->path));
+  g_ptr_array_add (argv, g_strdup (path));
   g_ptr_array_add (argv, nullptr);
   return (char **) g_ptr_array_free (argv, false);
 }
 
 bool
-gbk_open_execute (const GbkConfig *config, const GbkItem *it, bool terminal, const char *cwd,
+gbk_open_execute (const GbkConfig *config, const GbkItem *it, bool terminal, const GbkLoc *cwd_loc,
                   GError **error)
 {
+  const char *path, *cwd;
+  if (!local_path (it->loc, it->display, &path, error)
+      || !local_path (cwd_loc, it->display, &cwd, error))
+    return false;
   g_auto (GStrv) argv = gbk_open_exec_argv (config, it);
   if (argv == nullptr)
     {
@@ -95,22 +112,31 @@ gbk_open_execute (const GbkConfig *config, const GbkItem *it, bool terminal, con
   return gbk_launch_command (config->terminal_run, &args, error);
 }
 
-static GList *
-files_of (GPtrArray *items)
+/* Local files only: never a GFile for anything else (gvfs would mount it). */
+[[nodiscard]] static bool
+files_of (GPtrArray *items, GList **files, GError **error)
 {
-  GList *files = nullptr;
+  *files = nullptr;
   for (guint i = items->len; i > 0; i--)
     {
       const GbkItem *it = g_ptr_array_index (items, i - 1);
-      files = g_list_prepend (files, g_file_new_for_path (it->path));
+      const char *path;
+      if (!local_path (it->loc, it->display, &path, error))
+        {
+          g_list_free_full (g_steal_pointer (files), g_object_unref);
+          return false;
+        }
+      *files = g_list_prepend (*files, g_file_new_for_path (path));
     }
-  return files;
+  return true;
 }
 
 bool
 gbk_open_with (GAppInfo *app, GPtrArray *items, GAppLaunchContext *launch, GError **error)
 {
-  GList *files = files_of (items);
+  GList *files;
+  if (!files_of (items, &files, error))
+    return false;
   bool ok = g_app_info_launch (app, files, launch, error);
   g_list_free_full (files, g_object_unref);
   return ok;
@@ -158,11 +184,21 @@ gbk_open_default (GPtrArray *items, GAppLaunchContext *launch, GError **error)
 }
 
 bool
-gbk_open_action (const GbkAction *a, GPtrArray *items, const char *cwd, GError **error)
+gbk_open_action (const GbkAction *a, GPtrArray *items, const GbkLoc *cwd_loc, GError **error)
 {
-  g_autoptr (GPtrArray) paths = g_ptr_array_new ();
+  g_autoptr (GPtrArray) paths = g_ptr_array_new_with_free_func (g_free);
   for (guint i = 0; i < items->len; i++)
-    g_ptr_array_add (paths, ((GbkItem *) g_ptr_array_index (items, i))->path);
+    {
+      const GbkItem *it = g_ptr_array_index (items, i);
+      const char *path;
+      if (!local_path (it->loc, it->display, &path, error))
+        return false;
+      g_ptr_array_add (paths, g_strdup (path));
+    }
+  g_autofree char *shown = gbk_loc_display (cwd_loc);
+  const char *cwd;
+  if (!local_path (cwd_loc, shown, &cwd, error))
+    return false;
   GbkCommandArgs args = {
     .dir = cwd,
     .files = (const char *const *) paths->pdata,
@@ -172,8 +208,12 @@ gbk_open_action (const GbkAction *a, GPtrArray *items, const char *cwd, GError *
 }
 
 bool
-gbk_open_terminal (const GbkConfig *config, const char *dir, GError **error)
+gbk_open_terminal (const GbkConfig *config, const GbkLoc *dir_loc, GError **error)
 {
+  g_autofree char *shown = gbk_loc_display (dir_loc);
+  const char *dir;
+  if (!local_path (dir_loc, shown, &dir, error))
+    return false;
   GbkCommandArgs args = { .dir = dir };
   return gbk_launch_command (config->terminal, &args, error);
 }

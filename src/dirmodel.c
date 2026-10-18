@@ -25,7 +25,7 @@ struct _GbkDirModel
 {
   GObject parent_instance;
 
-  char *path;
+  GbkLoc *loc;           /* nullptr when detached */
   GbkTypeTable *types;
   GbkScanner *scanner;   /* nullptr once finished, failed, or detached */
   guint watch_id;
@@ -488,7 +488,7 @@ gbk_dir_model_finalize (GObject *object)
   g_array_unref (m->order);
   g_array_unref (m->touched);
   gbk_type_table_unref (m->types);
-  g_free (m->path);
+  g_clear_pointer (&m->loc, gbk_loc_unref);
   G_OBJECT_CLASS (gbk_dir_model_parent_class)->finalize (object);
 }
 
@@ -523,16 +523,21 @@ gbk_dir_model_new_detached (GbkTypeTable *types)
 {
   GbkDirModel *m = g_object_new (GBK_TYPE_DIR_MODEL, nullptr);
   m->types = gbk_type_table_ref (types);
-  m->path = g_strdup ("");
   return m;
 }
 
 GbkDirModel *
-gbk_dir_model_new (const char *path, GbkTypeTable *types)
+gbk_dir_model_new (GbkLoc *loc, GbkTypeTable *types)
 {
   GbkDirModel *m = gbk_dir_model_new_detached (types);
-  g_free (m->path);
-  m->path = g_strdup (path);
+  m->loc = gbk_loc_ref (loc);
+  const char *path;
+  if (!gbk_loc_as_local (loc, &path))
+    {
+      m->state = GBK_DIR_ERROR;      /* remote folders aren't readable yet */
+      m->error = EREMOTE;
+      return m;
+    }
   m->scanner = gbk_scanner_start (path, types);
   m->watch_id
       = gbk_fd_watch (G_OBJECT (m), gbk_scanner_wake_fd (m->scanner), G_IO_IN, on_scanner_wake, m);
@@ -581,10 +586,10 @@ gbk_dir_model_check_order (GbkDirModel *m)
 
 /* ---- accessors ---- */
 
-const char *
-gbk_dir_model_path (const GbkDirModel *m)
+const GbkLoc *
+gbk_dir_model_loc (const GbkDirModel *m)
 {
-  return m->path;
+  return m->loc;
 }
 
 GbkDirState

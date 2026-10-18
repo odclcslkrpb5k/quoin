@@ -7,7 +7,7 @@ static GbkItem *
 item (const char *path, const char *mime, bool dir, bool exec, bool script)
 {
   GbkItem *it = g_new0 (GbkItem, 1);
-  it->path = g_strdup (path);
+  it->loc = gbk_loc_new_local (path);
   it->display = g_strdup (path);
   it->mime = g_strdup (mime);
   it->is_dir = dir;

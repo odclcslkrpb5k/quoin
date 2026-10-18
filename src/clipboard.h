@@ -1,15 +1,18 @@
 /* The file clipboard (Ctrl+C / Ctrl+X / Ctrl+V), interoperable with other file managers. */
 #pragma once
 
-/* Put absolute `paths` on the CLIPBOARD as a copy or a cut. */
-void gbk_clipboard_set_files (GtkWidget *widget, GPtrArray *paths, bool cut);
+#include "loc.h"
+
+/* Put `locs` (GbkLoc*) on the CLIPBOARD as a copy or a cut. Other apps get file:// URIs, so
+ * only files on this machine can go there: returns false, changing nothing, if any isn't. */
+[[nodiscard]] bool gbk_clipboard_set_files (GtkWidget *widget, const GPtrArray *locs, bool cut);
 
 /* Put plain text on the CLIPBOARD (replacing any files we put there). */
 void gbk_clipboard_set_text (GtkWidget *widget, const char *text);
 
 /* Read files from the CLIPBOARD (asynchronously). `fn` runs only if `owner` is still alive;
- * `paths` is empty if the clipboard holds no files. */
-typedef void (*GbkFilesFunc) (GPtrArray *paths, bool cut, void *data);
+ * `locs` (GbkLoc*, local files) is empty if the clipboard holds no files. */
+typedef void (*GbkFilesFunc) (GPtrArray *locs, bool cut, void *data);
 void gbk_clipboard_get_files (GObject *owner, GtkWidget *widget, GbkFilesFunc fn, void *data);
 
 /* After a cut has been pasted: clear the clipboard if we still own it. */

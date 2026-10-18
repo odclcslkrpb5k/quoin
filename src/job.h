@@ -7,6 +7,7 @@
 #pragma once
 
 #include "fileops.h"
+#include "loc.h"
 
 typedef enum
 {
@@ -46,17 +47,19 @@ G_DECLARE_FINAL_TYPE (GbkJob, gbk_job, GBK, JOB, GObject)
  *   "question"  (GbkQuestion *q)  answer with gbk_job_answer (now or later)
  *   "finished"  (GError *error)   nullptr on success (cancelled: G_IO_ERROR_CANCELLED) */
 
-/* `sources`: absolute paths, copied. `dest_dir` for COPY/MOVE. */
-[[nodiscard]] GbkJob *gbk_job_new (GbkOpKind kind, GPtrArray *sources, const char *dest_dir);
-[[nodiscard]] GbkJob *gbk_job_new_rename (const char *path, const char *new_name);
+/* Locations are GbkLoc (arrays hold GbkLoc*, referenced). A job on a location that isn't on
+ * this machine finishes at once with G_IO_ERROR_NOT_SUPPORTED (remote jobs: a later phase of
+ * docs/remote-plan.md). `dest_dir` for COPY/MOVE. */
+[[nodiscard]] GbkJob *gbk_job_new (GbkOpKind kind, const GPtrArray *sources, GbkLoc *dest_dir);
+[[nodiscard]] GbkJob *gbk_job_new_rename (GbkLoc *loc, const char *new_name);
 /* Create an empty file or folder `name` in `dir` (never replacing anything). */
-[[nodiscard]] GbkJob *gbk_job_new_create (const char *dir, const char *name, bool folder);
+[[nodiscard]] GbkJob *gbk_job_new_create (GbkLoc *dir, const char *name, bool folder);
 /* Execute permission on/off for regular files (see gbk_ops_set_executable). */
-[[nodiscard]] GbkJob *gbk_job_new_executable (GPtrArray *paths, bool executable);
-/* Set the rwx bits of `path` (see gbk_ops_set_permissions). */
-[[nodiscard]] GbkJob *gbk_job_new_permissions (const char *path, uint32_t rwx);
-/* Read `path`'s details (gbk_ops_info); the result is gbk_job_info() once finished. */
-[[nodiscard]] GbkJob *gbk_job_new_info (const char *path);
+[[nodiscard]] GbkJob *gbk_job_new_executable (const GPtrArray *locs, bool executable);
+/* Set the rwx bits of `loc` (see gbk_ops_set_permissions). */
+[[nodiscard]] GbkJob *gbk_job_new_permissions (GbkLoc *loc, uint32_t rwx);
+/* Read `loc`'s details (gbk_ops_info); the result is gbk_job_info() once finished. */
+[[nodiscard]] GbkJob *gbk_job_new_info (GbkLoc *loc);
 
 void gbk_job_start (GbkJob *job);
 void gbk_job_cancel (GbkJob *job);
@@ -64,7 +67,7 @@ void gbk_job_answer (GbkJob *job, GbkChoice choice, bool apply_all);
 
 bool gbk_job_running (const GbkJob *job);
 GbkJobKind gbk_job_kind (GbkJob *job);
-const char *gbk_job_dest (GbkJob *job);        /* where things were created, or nullptr */
+const GbkLoc *gbk_job_dest (const GbkJob *job); /* where things are created, or nullptr */
 size_t gbk_job_n_sources (GbkJob *job);
 double gbk_job_fraction (const GbkJob *job);         /* 0..1, or -1 if unknown yet */
 const char *gbk_job_current (GbkJob *job);     /* item being processed (display name) */

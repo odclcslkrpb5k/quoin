@@ -36,7 +36,8 @@ typedef struct
   bool answer_all;
 
   GbkJobKind kind;
-  GPtrArray *sources;
+  bool remote;             /* a location isn't on this machine: the job fails at start */
+  GPtrArray *sources;      /* local paths */
   char *dest;
   char *name;              /* rename: the new name; create: the name to create */
   uint32_t rwx;            /* permissions */
@@ -50,6 +51,7 @@ struct _GbkJob
   guint watch;
   bool running;
   bool waiting;            /* a question is outstanding */
+  GbkLoc *dest_loc;        /* where things are created, or nullptr */
   uint64_t done, total;
   char *current;
   GPtrArray *created;
@@ -358,7 +360,12 @@ gbk_job_start (GbkJob *job)
   job->watch = gbk_fd_watch (G_OBJECT (job), job->s->wake_fd, G_IO_IN, on_wake, job);
   g_atomic_ref_count_inc (&job->s->rc);
   g_autoptr (GError) error = nullptr;
-  GThread *t = g_thread_try_new ("gbk-job", worker, job->s, &error);
+  GThread *t = nullptr;
+  if (job->s->remote)
+    g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                         "Not possible for files on another machine yet");
+  else
+    t = g_thread_try_new ("gbk-job", worker, job->s, &error);
   if (t == nullptr)
     {
       shared_unref (job->s);
@@ -378,6 +385,7 @@ gbk_job_finalize (GObject *o)
   GbkJob *job = GBK_JOB (o);
   g_assert (!job->running);
   shared_unref (job->s);
+  g_clear_pointer (&job->dest_loc, gbk_loc_unref);
   g_free (job->current);
   g_clear_pointer (&job->created, g_ptr_array_unref);
   g_clear_pointer (&job->info, gbk_file_info_free);
@@ -403,8 +411,9 @@ gbk_job_init (GbkJob *job G_GNUC_UNUSED)
 {
 }
 
+/* `sources` are GbkLoc*; `dest` may be nullptr. */
 static GbkJob *
-job_new (GbkJobKind kind, GPtrArray *sources, const char *dest)
+job_new (GbkJobKind kind, const GPtrArray *sources, GbkLoc *dest)
 {
   GbkJob *job = g_object_new (GBK_TYPE_JOB, nullptr);
   Shared *s = g_new0 (Shared, 1);
@@ -416,17 +425,20 @@ job_new (GbkJobKind kind, GPtrArray *sources, const char *dest)
   g_mutex_init (&s->lock);
   g_cond_init (&s->cond);
   s->kind = kind;
-  s->sources = g_ptr_array_new_with_free_func (g_free);
-  for (guint i = 0; i < sources->len; i++)
-    g_ptr_array_add (s->sources, g_strdup (g_ptr_array_index (sources, i)));
-  s->dest = g_strdup (dest);
+  s->sources = gbk_loc_array_as_local (sources);
+  const char *dest_path = nullptr;
+  s->remote = s->sources == nullptr || (dest != nullptr && !gbk_loc_as_local (dest, &dest_path));
+  if (s->sources == nullptr)
+    s->sources = g_ptr_array_new_with_free_func (g_free);
+  s->dest = g_strdup (dest_path);
+  job->dest_loc = dest != nullptr ? gbk_loc_ref (dest) : nullptr;
   job->s = s;
   job->total = 0;
   return job;
 }
 
 GbkJob *
-gbk_job_new (GbkOpKind kind, GPtrArray *sources, const char *dest_dir)
+gbk_job_new (GbkOpKind kind, const GPtrArray *sources, GbkLoc *dest_dir)
 {
   GbkJobKind k;
   switch (kind)
@@ -447,51 +459,51 @@ gbk_job_new (GbkOpKind kind, GPtrArray *sources, const char *dest_dir)
 }
 
 static GbkJob *
-job_new_one (GbkJobKind kind, const char *path, const char *dest)
+job_new_one (GbkJobKind kind, GbkLoc *loc, GbkLoc *dest)
 {
-  g_autoptr (GPtrArray) one = g_ptr_array_new_with_free_func (g_free);
-  g_ptr_array_add (one, g_strdup (path));
+  g_autoptr (GPtrArray) one = gbk_loc_array_new ();
+  g_ptr_array_add (one, gbk_loc_ref (loc));
   return job_new (kind, one, dest);
 }
 
 GbkJob *
-gbk_job_new_rename (const char *path, const char *new_name)
+gbk_job_new_rename (GbkLoc *loc, const char *new_name)
 {
-  g_autofree char *dir = g_path_get_dirname (path);
-  GbkJob *job = job_new_one (GBK_JOB_RENAME, path, dir);
+  g_autoptr (GbkLoc) dir = gbk_loc_parent (loc);
+  GbkJob *job = job_new_one (GBK_JOB_RENAME, loc, dir);
   job->s->name = g_strdup (new_name);
   return job;
 }
 
 GbkJob *
-gbk_job_new_create (const char *dir, const char *name, bool folder)
+gbk_job_new_create (GbkLoc *dir, const char *name, bool folder)
 {
-  g_autofree char *path = g_build_filename (dir, name, nullptr);
-  GbkJob *job = job_new_one (folder ? GBK_JOB_CREATE_FOLDER : GBK_JOB_CREATE_FILE, path, dir);
+  /* The worker uses dest + name; the folder is also the one "source", for the count. */
+  GbkJob *job = job_new_one (folder ? GBK_JOB_CREATE_FOLDER : GBK_JOB_CREATE_FILE, dir, dir);
   job->s->name = g_strdup (name);
   return job;
 }
 
 GbkJob *
-gbk_job_new_executable (GPtrArray *paths, bool executable)
+gbk_job_new_executable (const GPtrArray *locs, bool executable)
 {
-  if (paths->len == 0)
+  if (locs->len == 0)
     gbk_fatal ("executable job without files");
-  return job_new (executable ? GBK_JOB_SET_EXECUTABLE : GBK_JOB_CLEAR_EXECUTABLE, paths, nullptr);
+  return job_new (executable ? GBK_JOB_SET_EXECUTABLE : GBK_JOB_CLEAR_EXECUTABLE, locs, nullptr);
 }
 
 GbkJob *
-gbk_job_new_permissions (const char *path, uint32_t rwx)
+gbk_job_new_permissions (GbkLoc *loc, uint32_t rwx)
 {
-  GbkJob *job = job_new_one (GBK_JOB_PERMISSIONS, path, nullptr);
+  GbkJob *job = job_new_one (GBK_JOB_PERMISSIONS, loc, nullptr);
   job->s->rwx = rwx & 0777;
   return job;
 }
 
 GbkJob *
-gbk_job_new_info (const char *path)
+gbk_job_new_info (GbkLoc *loc)
 {
-  return job_new_one (GBK_JOB_INFO, path, nullptr);
+  return job_new_one (GBK_JOB_INFO, loc, nullptr);
 }
 
 bool
@@ -509,10 +521,10 @@ gbk_job_info (const GbkJob *job)
 {
   return job->info;
 }
-const char *
-gbk_job_dest (GbkJob *job)
+const GbkLoc *
+gbk_job_dest (const GbkJob *job)
 {
-  return job->s->dest;
+  return job->dest_loc;
 }
 size_t
 gbk_job_n_sources (GbkJob *job)

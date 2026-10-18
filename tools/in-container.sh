@@ -80,6 +80,16 @@ fuzz() {
 
 # Every check, in one command: sanitizer tests, the analyzers, fuzzing, then the hardened
 # build that ships, tested again.
+# The C sources clang-format owns: `check` refuses them unformatted, `format` rewrites them.
+format_files() {
+  ls src/*.c src/*.h tests/*.c tests/fuzz/*.c
+}
+
+format() {
+  format_files | xargs clang-format -i
+  echo "formatted $(format_files | wc -l) files"
+}
+
 check() {
   debug
   analyze
@@ -87,7 +97,7 @@ check() {
   sed "s|@BIN@|/usr/bin/quoin|g" data/quoin.desktop.in > out/quoin.desktop
   desktop-file-validate out/quoin.desktop
   echo "== formatting (clang-format) =="
-  clang-format --dry-run --Werror src/*.c src/*.h tests/*.c tests/fuzz/*.c
+  format_files | xargs clang-format --dry-run --Werror
   echo "== source rules =="
   python3 tools/check-source.py self-test
   python3 tools/check-source.py
@@ -129,6 +139,7 @@ case "${1:-}" in
   release) release ;;
   fuzz) fuzz "${2:-60}" ;;
   bench) bench ;;
+  format) format ;;
   shell) exec bash ;;
   *) echo "unknown command: ${1:-}" >&2; exit 2 ;;
 esac

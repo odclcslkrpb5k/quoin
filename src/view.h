@@ -16,7 +16,7 @@ G_DECLARE_FINAL_TYPE (GbkView, gbk_view, GBK, VIEW, GtkWidget)
  *   "context-menu"      (GdkEvent *trigger, may be nullptr for keyboard) right-click or
  *                       Menu key. Selection already reflects the target: empty selection
  *                       means the current directory itself.
- *   "drop"              (GPtrArray *paths, guint64 folder, GdkEvent *trigger) local files
+ *   "drop"              (GPtrArray *locs, guint64 folder, GdkEvent *trigger) local files
  *                       were dropped; `folder` is the GbkHandle of the folder item they
  *                       were dropped on, or GBK_HANDLE_NONE for the view's own folder.
  *                       Nothing has been done with them: the handler decides (asks). */

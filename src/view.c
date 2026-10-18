@@ -71,7 +71,7 @@ struct _GbkView
   bool press_pending;
   double press_x, press_y;
   GbkHandle press_item;
-  GPtrArray *drag_paths;        /* what's being dragged out (absolute paths) */
+  GPtrArray *drag_locs;         /* what's being dragged out (GbkLoc*) */
 
   /* Being dropped onto: the highlighted folder item, or the whole view (its folder). */
   bool drop_hover;
@@ -956,23 +956,23 @@ gbk_view_motion (GtkWidget *w, GdkEventMotion *ev)
 
 /* ---- drag and drop ---- */
 
-/* The selection as absolute paths, in view order. */
+/* The selection as locations (GbkLoc*), in view order. */
 static GPtrArray *
-selected_paths (GbkView *v)
+selected_locs (GbkView *v)
 {
-  GPtrArray *paths = g_ptr_array_new_with_free_func (g_free);
-  const char *dir = v->model != nullptr ? gbk_dir_model_path (v->model) : nullptr;
+  GPtrArray *locs = gbk_loc_array_new ();
+  const GbkLoc *dir = v->model != nullptr ? gbk_dir_model_loc (v->model) : nullptr;
   if (dir == nullptr)
-    return paths;
+    return locs;
   size_t n;
   g_autofree GbkHandle *sel = gbk_view_selected (v, &n);
   for (size_t i = 0; i < n; i++)
     {
       const GbkEntry *e = gbk_dir_model_get (v->model, sel[i]);
       if (e != nullptr)
-        g_ptr_array_add (paths, g_build_filename (dir, gbk_entry_name (e), nullptr));
+        g_ptr_array_add (locs, gbk_loc_child (dir, gbk_entry_name (e)));
     }
-  return paths;
+  return locs;
 }
 
 static void
@@ -980,8 +980,8 @@ gbk_view_drag_begin (GtkWidget *w, GdkDragContext *ctx)
 {
   GbkView *v = GBK_VIEW (w);
   /* Snapshot now: the folder can change while the drag is in flight. */
-  g_clear_pointer (&v->drag_paths, g_ptr_array_unref);
-  v->drag_paths = selected_paths (v);
+  g_clear_pointer (&v->drag_locs, g_ptr_array_unref);
+  v->drag_locs = selected_locs (v);
   const GbkEntry *e = v->model != nullptr ? gbk_dir_model_get (v->model, v->press_item) : nullptr;
   cairo_surface_t *icon = e != nullptr ? icon_for (v, e->type) : nullptr;
   if (icon != nullptr)
@@ -994,15 +994,17 @@ static void
 gbk_view_drag_data_get (GtkWidget *w, GdkDragContext *ctx G_GNUC_UNUSED, GtkSelectionData *sd,
                         guint info, guint time G_GNUC_UNUSED)
 {
-  GbkView *v = GBK_VIEW (w);
-  if (v->drag_paths != nullptr && v->drag_paths->len > 0)
-    gbk_dnd_set_data (sd, info, v->drag_paths);
+  const GbkView *v = GBK_VIEW (w);
+  /* Files on another machine can't be handed to other apps: nothing is set, no drop. */
+  if (v->drag_locs != nullptr && v->drag_locs->len > 0
+      && !gbk_dnd_set_data (sd, info, v->drag_locs))
+    return;
 }
 
 static void
 gbk_view_drag_end (GtkWidget *w, GdkDragContext *ctx G_GNUC_UNUSED)
 {
-  g_clear_pointer (&GBK_VIEW (w)->drag_paths, g_ptr_array_unref);
+  g_clear_pointer (&GBK_VIEW (w)->drag_locs, g_ptr_array_unref);
 }
 
 /* Where a drop at (x, y) would go: a folder item under the pointer, else the view's own
@@ -1100,10 +1102,10 @@ gbk_view_drag_drop (GtkWidget *w, GdkDragContext *ctx, int x, int y, guint time)
 }
 
 static void
-deliver_drop (GbkView *v, GPtrArray *paths, GbkHandle folder, GdkEvent *trigger)
+deliver_drop (GbkView *v, GPtrArray *locs, GbkHandle folder, GdkEvent *trigger)
 {
-  if (paths->len > 0)
-    g_signal_emit (v, signals[SIGNAL_DROP], 0, paths, (guint64) folder, trigger);
+  if (locs->len > 0)
+    g_signal_emit (v, signals[SIGNAL_DROP], 0, locs, (guint64) folder, trigger);
 }
 
 static void
@@ -1117,11 +1119,11 @@ gbk_view_drag_data_received (GtkWidget *w, GdkDragContext *ctx, int x G_GNUC_UNU
   if (!v->drop_requested)
     return;
   v->drop_requested = false;
-  g_autoptr (GPtrArray) paths = gbk_dnd_paths (sd);
+  g_autoptr (GPtrArray) locs = gbk_dnd_locs (sd);
   /* del = false always: whatever the user picks, we do it; the source deletes nothing. */
-  gtk_drag_finish (ctx, paths->len > 0, false, time);
+  gtk_drag_finish (ctx, locs->len > 0, false, time);
   g_autoptr (GdkEvent) trigger = gtk_get_current_event ();
-  deliver_drop (v, paths, folder, trigger);
+  deliver_drop (v, locs, folder, trigger);
 }
 
 static gboolean
@@ -1437,7 +1439,7 @@ gbk_view_finalize (GObject *o)
   g_array_unref (v->widths);
   g_hash_table_unref (v->selected);
   g_string_free (v->search, true);
-  g_clear_pointer (&v->drag_paths, g_ptr_array_unref);
+  g_clear_pointer (&v->drag_locs, g_ptr_array_unref);
   gbk_type_table_unref (v->types);
   G_OBJECT_CLASS (gbk_view_parent_class)->finalize (o);
 }
@@ -1532,8 +1534,9 @@ gbk_view_new (GbkTypeTable *types)
 char *
 gbk_view_drag_uris (GbkView *v)
 {
-  g_autoptr (GPtrArray) paths = selected_paths (v);
-  return gbk_clip_format_uri_list (paths);
+  g_autoptr (GPtrArray) locs = selected_locs (v);
+  g_autoptr (GPtrArray) paths = gbk_loc_array_as_local (locs);
+  return paths != nullptr ? gbk_clip_format_uri_list (paths) : g_strdup ("");
 }
 
 bool
@@ -1550,6 +1553,7 @@ gbk_view_drop_for_test (GbkView *v, const char *uri_list, double x, double y, Gd
     return false;
   bool cut;
   g_autoptr (GPtrArray) paths = gbk_clip_parse (uri_list, strlen (uri_list), false, &cut);
-  deliver_drop (v, paths, folder, trigger);
-  return paths->len > 0;
+  g_autoptr (GPtrArray) locs = gbk_loc_array_from_local (paths);
+  deliver_drop (v, locs, folder, trigger);
+  return locs->len > 0;
 }
