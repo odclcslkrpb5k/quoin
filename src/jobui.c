@@ -49,10 +49,20 @@ on_error_response (GtkDialog *d, int response G_GNUC_UNUSED, void *data G_GNUC_U
 }
 
 void
+gbk_jobui_keep_app (GtkWindow *w, GtkApplication *app)
+{
+  if (app == nullptr && GTK_IS_APPLICATION (g_application_get_default ()))
+    app = GTK_APPLICATION (g_application_get_default ());
+  if (app != nullptr)
+    gtk_window_set_application (w, app);
+}
+
+void
 gbk_jobui_error (GtkWindow *parent, const char *title, const char *message)
 {
   GtkWidget *d = gtk_message_dialog_new (parent, GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_ERROR,
                                          GTK_BUTTONS_CLOSE, "%s", title);
+  gbk_jobui_keep_app (GTK_WINDOW (d), nullptr);
   gtk_message_dialog_format_secondary_text (GTK_MESSAGE_DIALOG (d), "%s", message);
   gbk_connect (G_OBJECT (d), d, "response", G_CALLBACK (on_error_response), nullptr);
   gtk_widget_show (d);
@@ -210,6 +220,7 @@ gbk_jobui_start (GbkJob *job, GtkWindow *parent)
   g_object_set_data_full (G_OBJECT (ui->window), "gbk-ui", ui, (GDestroyNotify) ui_free);
   GtkWindow *win = GTK_WINDOW (ui->window);
   gtk_window_set_transient_for (win, parent);
+  gbk_jobui_keep_app (win, nullptr);   /* a running job outlives its file window */
   gtk_window_set_title (win, verb (job));
   gtk_window_set_default_size (win, 420, -1);
   gtk_window_set_resizable (win, false);

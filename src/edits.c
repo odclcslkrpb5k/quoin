@@ -92,10 +92,13 @@ static struct
   Survey *surveyed;       /* (scan_lock) the last survey's answers, for the timer */
   bool notice_due;        /* the last window closed: say so once a fresh survey is in */
   GMenu *menu;            /* files being edited, for every window's ☰ menu */
+  GtkWidget *notice;      /* "Quoin keeps running…", while it is on screen */
 } E;
 
 static void changed (void);
 static void notice (void);
+static void on_notice_destroyed (GtkWidget *d, void *data);
+static void notice_withdraw (void);
 
 static void
 unsent_free (Unsent *u)
@@ -744,6 +747,8 @@ tick (void *data G_GNUC_UNUSED)
       if (E.edits->len > 0)
         notice ();
     }
+  if (E.edits->len == 0)
+    notice_withdraw ();
   if (E.edits->len > 0 || scanning || surveying)
     return true;
   hold (false);
@@ -921,13 +926,43 @@ notice (void)
   g_string_free (list, true);
   gtk_window_set_title (GTK_WINDOW (d), "Quoin");
   gbk_connect (G_OBJECT (d), d, "response", G_CALLBACK (on_notice_response), nullptr);
+  gbk_connect (G_OBJECT (d), d, "destroy", G_CALLBACK (on_notice_destroyed), nullptr);
+  gbk_jobui_keep_app (GTK_WINDOW (d), E.app);
+  if (E.notice != nullptr)
+    gtk_widget_destroy (E.notice);         /* one at a time */
+  E.notice = d;
   gtk_widget_show (d);
 }
 
+/* Nothing is open any more: the notice isn't true now, so it goes. */
 static void
-on_window_added (GtkApplication *app G_GNUC_UNUSED, GtkWindow *w G_GNUC_UNUSED,
-                 void *data G_GNUC_UNUSED)
+notice_withdraw (void)
 {
+  if (E.notice != nullptr)
+    gtk_widget_destroy (E.notice);         /* clears E.notice */
+}
+
+static void
+on_notice_destroyed (GtkWidget *d G_GNUC_UNUSED, void *data G_GNUC_UNUSED)
+{
+  E.notice = nullptr;
+}
+
+/* File windows only: dialogs join the application too (gbk_jobui_keep_app). */
+static bool
+file_window_open (GtkApplication *app)
+{
+  for (GList *l = gtk_application_get_windows (app); l != nullptr; l = l->next)
+    if (GBK_IS_WINDOW (l->data))
+      return true;
+  return false;
+}
+
+static void
+on_window_added (GtkApplication *app G_GNUC_UNUSED, GtkWindow *w, void *data G_GNUC_UNUSED)
+{
+  if (!GBK_IS_WINDOW (w))
+    return;
   E.windows_gone_us = 0;
   E.notice_due = false;
 }
@@ -935,9 +970,9 @@ on_window_added (GtkApplication *app G_GNUC_UNUSED, GtkWindow *w G_GNUC_UNUSED,
 /* The last window closed: look again at once whether anything still uses the copies, and
  * only then say that Quoin stays (tick); when nothing does, it simply ends. */
 static void
-on_window_removed (GtkApplication *app, GtkWindow *w G_GNUC_UNUSED, void *data G_GNUC_UNUSED)
+on_window_removed (GtkApplication *app, GtkWindow *w, void *data G_GNUC_UNUSED)
 {
-  if (gtk_application_get_windows (app) != nullptr)
+  if (!GBK_IS_WINDOW (w) || file_window_open (app))
     return;
   E.windows_gone_us = g_get_monotonic_time ();
   if (E.edits->len == 0)
@@ -1046,6 +1081,7 @@ offer_unsent (GPtrArray *found)
   gtk_dialog_add_buttons (GTK_DIALOG (d), "_Discard", RESP_DISCARD, "_Show", RESP_SHOW, "_Upload",
                           RESP_UPLOAD, nullptr);
   gtk_dialog_set_default_response (GTK_DIALOG (d), RESP_UPLOAD);
+  gbk_jobui_keep_app (GTK_WINDOW (d), E.app);
   g_object_set_data_full (G_OBJECT (d), "gbk-unsent", found, (GDestroyNotify) g_ptr_array_unref);
   gbk_connect (G_OBJECT (d), d, "response", G_CALLBACK (on_unsent_response), found);
   gtk_widget_show (d);
@@ -1176,6 +1212,7 @@ gbk_edits_shutdown (void)
       g_usleep (10000);
     }
   gbk_source_cancel (&E.timer);
+  notice_withdraw ();
   hold (false);
   g_mutex_lock (&E.scan_lock);
   g_clear_pointer (&E.found, g_ptr_array_unref);

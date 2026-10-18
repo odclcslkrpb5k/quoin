@@ -476,11 +476,15 @@ test_edit_upload (void)
   g_autofree char *list = nullptr;
   g_object_get (notice.found, "secondary-text", &list, nullptr);
   g_assert_nonnull (strstr (list, "notes.txt (Opener) from ws"));
-  gtk_widget_destroy (GTK_WIDGET (notice.found));
+  g_assert_true (gtk_window_get_application (GTK_WINDOW (notice.found)) == app);   /* holds it */
   g_assert_cmpuint (gbk_edits_count (), ==, 1);    /* the app is still open */
 
-  unlink (hold);                                   /* the app closes: watching ends */
+  /* The app closes: watching ends, and the notice, no longer true, goes with it (left up,
+   * it once outlived the process: the exit's lifetime check aborted). */
+  unlink (hold);
   g_assert_true (wait_until (no_edits, nullptr));
+  Wanted still = { .starts = "Quoin keeps running to upload your saves" };
+  g_assert_false (dialog_shown (&still));
 }
 
 /* The ☰ list's labels. */
@@ -954,6 +958,7 @@ main (int argc, char **argv)
   if (!g_application_register (G_APPLICATION (app), nullptr, &error))
     gbk_fatal ("register: %s", error->message);
 
+  g_application_set_default (G_APPLICATION (app));
   gbk_edits_set_timing_for_test (50, 400, 400);
   gbk_edits_init (app, ctx);
   g_test_add_func ("/remotewin/browse", test_browse);

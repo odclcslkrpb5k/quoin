@@ -475,6 +475,11 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   Test lessons: a forked child of the test process was invisible in /proc (the test process
   isn't dumpable), so tests watch with a separate python3 program; and a plain g_usleep in
   a GUI test stops Quoin's timer (surveys replace each other unread): use run_for().
+- STRAY DIALOGS (bug, user, 2026-10-18): a parentless dialog isn't an app window, so the
+  process could exit under it; the exit lifetime check then aborted (core dump). Now every
+  window that can be up with no file window joins the app (gbk_jobui_keep_app: progress
+  windows, errors, the edits notice and unsent question); edits counts only GbkWindows for
+  "last window closed"; the notice withdraws itself when nothing is open any more.
 - ANALYZER + REFCOUNTS: -fanalyzer can't follow refcounts: a task/job referenced by a
   table AND its worker gets "use after free" on error paths. Give such things ONE owner
   (the worker) and let tables borrow them under a lock (peer.c tasks and jobs).
