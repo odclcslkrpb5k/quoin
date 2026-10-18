@@ -543,6 +543,64 @@ delete_path (Ctx *c, const char *path)
 
 /* ---- moving ---- */
 
+static int force_exdev;     /* test hooks (atomic: jobs run on worker threads) */
+static int flush_error;
+static int flushes;
+
+void
+gbk_ops_force_exdev_for_test (bool force)
+{
+  g_atomic_int_set (&force_exdev, force ? 1 : 0);
+}
+
+void
+gbk_ops_fail_flush_for_test (int err)
+{
+  g_atomic_int_set (&flush_error, err);
+}
+
+int
+gbk_ops_flushes (void)
+{
+  return g_atomic_int_get (&flushes);
+}
+
+/* rename(2) / renameat2(2), or EXDEV when a test forces the copy path. */
+static int
+move_rename (const char *src, const char *dst, bool replace)
+{
+  if (g_atomic_int_get (&force_exdev))
+    {
+      errno = EXDEV;
+      return -1;
+    }
+  return replace ? rename (src, dst) : renameat2 (AT_FDCWD, src, AT_FDCWD, dst, RENAME_NOREPLACE);
+}
+
+/* A copy made by a move must be on disk before the source is deleted: otherwise a crash or
+ * power cut right after the move loses the file in both places. syncfs covers the data,
+ * the metadata and the directory entries of everything just copied, in one call. Returns
+ * true if the source may now be deleted; on failure the error is reported and the source
+ * is kept. */
+static bool
+make_durable (Ctx *c, const char *dst_dir)
+{
+  int err = g_atomic_int_get (&flush_error);
+  if (err == 0)
+    {
+      int fd = open (dst_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+      if (fd < 0 || syncfs (fd) != 0)
+        err = errno;
+      if (fd >= 0)
+        close (fd);
+    }
+  g_atomic_int_inc (&flushes);
+  if (err == 0)
+    return true;
+  fail_errno (c, dst_dir, err, "The original was kept: the copy couldn't be saved to disk in");
+  return false;
+}
+
 static bool move_into (Ctx *c, const char *src, const char *dst_dir, const char *name, int depth,
                        GPtrArray *created);
 
@@ -555,9 +613,11 @@ move_by_copy (Ctx *c, const char *src, const char *dst_dir, const char *name, in
   bool ok = copy_into (c, src, dst_dir, name, depth, nullptr);
   bool complete = ok && !c->incomplete;
   c->incomplete = c->incomplete || was_incomplete;
-  if (complete)
-    return delete_path (c, src);
-  return ok;
+  if (!complete)
+    return ok;
+  if (!make_durable (c, dst_dir))
+    return !c->cancelled;
+  return delete_path (c, src);
 }
 
 static bool
@@ -618,7 +678,7 @@ move_into (Ctx *c, const char *src, const char *dst_dir, const char *name, int d
               return true;
             }
           /* File over file: rename(2) replaces atomically. */
-          if (rename (src, dst) == 0)
+          if (move_rename (src, dst, true) == 0)
             {
               c->done += (uint64_t) st.st_size;
               if (created != nullptr)
@@ -631,12 +691,14 @@ move_into (Ctx *c, const char *src, const char *dst_dir, const char *name, int d
             return false;
           if (created != nullptr)
             g_ptr_array_add (created, g_strdup (final_name));
+          if (!make_durable (c, dst_dir))
+            return !c->cancelled;
           return delete_path (c, src);
         default: gbk_fatal ("bad choice %d", (int) ch);
         }
     }
 
-  if (renameat2 (AT_FDCWD, src, AT_FDCWD, dst, RENAME_NOREPLACE) == 0)
+  if (move_rename (src, dst, false) == 0)
     {
       c->done += S_ISREG (st.st_mode) ? (uint64_t) st.st_size : 0;
       progress (c, src);

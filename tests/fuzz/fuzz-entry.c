@@ -28,7 +28,8 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
   g_autoptr (GbkEntry) e = gbk_entry_new (name, len, &info, types);
 
   bool valid = len >= 1 && len <= 255 && memchr (name, '/', len) == nullptr
-               && memchr (name, '\0', len) == nullptr;
+               && memchr (name, '\0', len) == nullptr && !(len == 1 && name[0] == '.')
+               && !(len == 2 && memcmp (name, "..", 2) == 0);
   g_assert ((e != nullptr) == valid);
   if (e == nullptr)
     return 0;

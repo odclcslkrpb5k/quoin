@@ -10,6 +10,10 @@ valid_name (const char *name, size_t len)
     return false;
   if (memchr (name, '/', len) != nullptr || memchr (name, '\0', len) != nullptr)
     return false;
+  /* "." and ".." name the folder itself and its parent: acting on them as entries (delete
+   * "..") would reach outside the folder. */
+  if ((len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.'))
+    return false;
   return true;
 }
 

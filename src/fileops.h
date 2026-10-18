@@ -100,3 +100,10 @@ typedef struct
 [[nodiscard]] GbkFileInfo *gbk_ops_info (const char *path, GError **error);
 void gbk_file_info_free (GbkFileInfo *info);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (GbkFileInfo, gbk_file_info_free)
+
+/* Test hooks. Moves act as if source and destination were on different filesystems (the
+ * copy-then-delete path); a cross-filesystem move makes its copy durable (syncfs) before
+ * deleting the source, and these count those flushes and can make them fail with `err`. */
+void gbk_ops_force_exdev_for_test (bool force);
+void gbk_ops_fail_flush_for_test (int err);
+int gbk_ops_flushes (void);

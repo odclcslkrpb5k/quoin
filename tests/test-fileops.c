@@ -258,6 +258,46 @@ test_move (void)
   assert_content ("dst/m (1).txt", "M2");
 }
 
+/* Across filesystems a move is copy, flush, delete. The copy must reach the disk before the
+ * source goes; if it can't, the source is kept. */
+static void
+test_move_across_filesystems (void)
+{
+  mk ("src/f.txt", "F");
+  mk ("src/d/inner", "I");
+  mk ("src/r.txt", "new");
+  mk ("dst/r.txt", "old");
+  gbk_ops_force_exdev_for_test (true);
+  int before = gbk_ops_flushes ();
+  g_autoptr (GPtrArray) src = paths ("src/f.txt", "src/d", "src/r.txt", (char *) nullptr);
+  Script s = { .answer = GBK_CHOICE_REPLACE };
+  g_assert_true (run (GBK_OP_MOVE, src, "dst", &s, nullptr));
+  g_assert_cmpint (gbk_ops_flushes () - before, ==, 3);   /* one per item, before its delete */
+  g_assert_cmpint (s.errors, ==, 0);
+  g_assert_false (exists ("src/f.txt"));
+  g_assert_false (exists ("src/d"));
+  g_assert_false (exists ("src/r.txt"));
+  assert_content ("dst/f.txt", "F");
+  assert_content ("dst/d/inner", "I");
+  assert_content ("dst/r.txt", "new");
+
+  /* The flush fails: the copy stays, and so does the original. */
+  mk ("src/g.txt", "G");
+  mk ("src/h.txt", "H");
+  mk ("dst/h.txt", "old");
+  gbk_ops_fail_flush_for_test (EIO);
+  g_autoptr (GPtrArray) again = paths ("src/g.txt", "src/h.txt", (char *) nullptr);
+  Script skip = { .answer = GBK_CHOICE_REPLACE, .error_answer = GBK_CHOICE_SKIP };
+  g_assert_true (run (GBK_OP_MOVE, again, "dst", &skip, nullptr));
+  gbk_ops_fail_flush_for_test (0);
+  gbk_ops_force_exdev_for_test (false);
+  g_assert_cmpint (skip.errors, ==, 2);
+  assert_content ("src/g.txt", "G");
+  assert_content ("dst/g.txt", "G");
+  assert_content ("src/h.txt", "H");
+  assert_content ("dst/h.txt", "H");
+}
+
 static void
 test_delete_does_not_follow_symlinks (void)
 {
@@ -605,6 +645,7 @@ WRAP (test_copy_conflicts)
 WRAP (test_copy_merge_and_apply_all)
 WRAP (test_copy_onto_itself_and_into_itself)
 WRAP (test_move)
+WRAP (test_move_across_filesystems)
 WRAP (test_delete_does_not_follow_symlinks)
 WRAP (test_trash)
 WRAP (test_errors_and_cancel)
@@ -637,6 +678,7 @@ main (int argc, char **argv)
   ADD ("/fileops/copy-merge-apply-all", test_copy_merge_and_apply_all);
   ADD ("/fileops/onto-and-into-itself", test_copy_onto_itself_and_into_itself);
   ADD ("/fileops/move", test_move);
+  ADD ("/fileops/move-across-filesystems", test_move_across_filesystems);
   ADD ("/fileops/delete-no-follow", test_delete_does_not_follow_symlinks);
   ADD ("/fileops/trash", test_trash);
   ADD ("/fileops/errors-and-cancel", test_errors_and_cancel);
