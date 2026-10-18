@@ -95,7 +95,15 @@ Install or update: \`curl -fsSL https://raw.githubusercontent.com/odclcslkrpb5k/
 }
 
 case "$cmd" in
-  check|debug|analyze|release|shell|fuzz|bench|format) ;;
+  check|debug|analyze|release|shell|fuzz|bench|format)
+    # Left by a scripted edit that didn't apply (Claude's out/edit.py): the tree is half
+    # changed, so nothing built from it means anything until that is sorted out.
+    if [[ -e $root/out/EDIT-FAILED ]]; then
+      echo "build: a scripted edit failed (out/EDIT-FAILED); fix it, then remove that file." >&2
+      cat "$root/out/EDIT-FAILED" >&2
+      exit 1
+    fi
+    ;;
   install) install_release "${2:-}"; exit 0 ;;
   publish) publish_release; exit 0 ;;
   image) build_image; exit 0 ;;

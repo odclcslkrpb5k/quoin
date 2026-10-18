@@ -38,9 +38,13 @@ typedef struct
 
   GbkJobKind kind;
   GError *refused;         /* can't run at all (another machine, beyond what works there) */
-  GbkSource *source;       /* a copy from another machine: read through it (else here) */
-  GPtrArray *sources;      /* local paths */
-  char *dest;
+  GbkSource *source;       /* a copy or move from another machine: read through it */
+  /* Run on another machine (the destination's): asked through `asker`; when the sources are
+   * here, it reads them through `answerer`, in a session for just them. */
+  GbkAsker *asker;
+  GbkAnswerer *answerer;
+  GPtrArray *sources;      /* paths on the machine that has them */
+  char *dest;              /* a path on the machine that has it */
   char *name;              /* rename: the new name; create: the name to create */
   uint32_t rwx;            /* permissions */
   int64_t last_progress;   /* worker only */
@@ -103,6 +107,8 @@ shared_unref (Shared *s)
   g_free (s->dest);
   g_clear_error (&s->refused);
   gbk_source_free (s->source);
+  gbk_asker_unref (s->asker);
+  gbk_answerer_unref (s->answerer);
   g_free (s->name);
   g_free (s);
 }
@@ -213,6 +219,26 @@ run_executable (Shared *s, bool on, GError **error)
     g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Cancelled");
 }
 
+/* COPY or MOVE: here, from another machine, or on another machine. */
+[[nodiscard]] static bool
+run_transfer (Shared *s, GbkOpKind kind, const GbkOpsHooks *hooks, GPtrArray *created,
+              GError **error)
+{
+  if (s->asker == nullptr)
+    return s->source != nullptr
+               ? gbk_ops_run_from (s->source, kind, s->sources, s->dest, hooks, created, error)
+               : gbk_ops_run (kind, s->sources, s->dest, hooks, created, error);
+  /* Sources here: the other machine may read them (and, moving, remove them) and nothing
+   * else, for as long as this job runs. */
+  bool here = s->answerer != nullptr;
+  uint64_t session = here ? gbk_answerer_open (s->answerer, s->sources, kind == GBK_OP_MOVE) : 0;
+  GbkJobRequest req = { .kind = kind, .sources_here = here, .session = session, .dest = s->dest };
+  bool ok = gbk_asker_run_job (s->asker, &req, s->sources, hooks, created, error);
+  if (here)
+    gbk_answerer_close (s->answerer, session);
+  return ok;
+}
+
 /* The result travels as `error` alone, so it must say what the return value said: false
  * exactly when the error is set (GError's convention). Read the error only after the call
  * has returned: as two arguments of one call, their order is unspecified. */
@@ -237,14 +263,9 @@ worker (void *data)
   switch (s->kind)
     {
     case GBK_JOB_COPY:
-      ok = s->source != nullptr ? gbk_ops_run_from (s->source, GBK_OP_COPY, s->sources, s->dest,
-                                                    &hooks, done->created, &done->error)
-                                : gbk_ops_run (GBK_OP_COPY, s->sources, s->dest, &hooks,
-                                               done->created, &done->error);
-      agree (ok, done->error);
-      break;
     case GBK_JOB_MOVE:
-      ok = gbk_ops_run (GBK_OP_MOVE, s->sources, s->dest, &hooks, done->created, &done->error);
+      ok = run_transfer (s, s->kind == GBK_JOB_COPY ? GBK_OP_COPY : GBK_OP_MOVE, &hooks,
+                         done->created, &done->error);
       agree (ok, done->error);
       break;
     case GBK_JOB_TRASH:
@@ -416,34 +437,72 @@ gbk_job_init (GbkJob *job G_GNUC_UNUSED)
 {
 }
 
-/* `sources` are GbkLoc*; `dest` may be nullptr. */
-/* Copying from another machine (all of `locs` on one, the destination here): their paths
- * there, read through that machine's connection. nullptr with s->refused otherwise. */
-static GPtrArray *
-remote_sources (Shared *s, const GPtrArray *locs)
+/* The one machine all of `locs` are on: "" for this one, nullptr if they are on several. */
+static const char *
+one_machine (const GPtrArray *locs)
 {
   const char *host = locs->len > 0 ? gbk_loc_host (g_ptr_array_index (locs, 0)) : nullptr;
-  for (guint i = 0; i < locs->len; i++)
-    if (g_strcmp0 (gbk_loc_host (g_ptr_array_index (locs, i)), host) != 0 || host == nullptr)
-      {
-        s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                                          "Copy from one machine at a time");
-        return nullptr;
-      }
-  GbkRemote *r = gbk_remote_default ();
-  g_autoptr (GbkConn) c = r != nullptr ? gbk_remote_conn (r, host, &s->refused) : nullptr;
-  if (c == nullptr)
-    {
-      if (s->refused == nullptr)
-        s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                                          "Other machines can't be reached from here");
+  for (guint i = 1; i < locs->len; i++)
+    if (g_strcmp0 (gbk_loc_host (g_ptr_array_index (locs, i)), host) != 0)
       return nullptr;
-    }
-  s->source = gbk_conn_source (c);
+  return host != nullptr ? host : "";
+}
+
+static GbkConn *
+conn_for (Shared *s, const char *host)
+{
+  GbkRemote *r = gbk_remote_default ();
+  GbkConn *c = r != nullptr ? gbk_remote_conn (r, host, &s->refused) : nullptr;
+  if (c == nullptr && s->refused == nullptr)
+    s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                      "Other machines can't be reached from here");
+  return c;
+}
+
+/* Paths of `locs`, on whichever machine they are. */
+static GPtrArray *
+paths_of (const GPtrArray *locs)
+{
   GPtrArray *paths = g_ptr_array_new_with_free_func (g_free);
   for (guint i = 0; i < locs->len; i++)
     g_ptr_array_add (paths, g_strdup (gbk_loc_path (g_ptr_array_index (locs, i))));
   return paths;
+}
+
+/* COPY or MOVE with another machine on either side: decide where it runs (s->source,
+ * s->asker, s->answerer), or why it can't (s->refused). */
+static void
+plan_transfer (Shared *s, const GPtrArray *locs, const GbkLoc *dest)
+{
+  if (dest == nullptr)
+    gbk_fatal ("a copy or move without a destination");
+  const char *from = one_machine (locs);
+  const char *to = gbk_loc_is_local (dest) ? "" : gbk_loc_host (dest);
+  if (from == nullptr)
+    {
+      s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                        "Copy or move from one machine at a time");
+      return;
+    }
+  if (from[0] != '\0' && to[0] != '\0' && !g_str_equal (from, to))
+    {
+      s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                        "Copying between two other machines isn't possible yet");
+      return;
+    }
+  g_autoptr (GbkConn) c = conn_for (s, to[0] != '\0' ? to : from);
+  if (c == nullptr)
+    return;
+  s->sources = paths_of (locs);
+  s->dest = g_strdup (gbk_loc_path (dest));
+  if (to[0] == '\0')
+    s->source = gbk_conn_source (c, s->kind == GBK_JOB_MOVE); /* here, reading there */
+  else
+    {
+      s->asker = gbk_conn_asker (c); /* there */
+      if (from[0] == '\0')
+        s->answerer = gbk_conn_answerer (c); /* reading here */
+    }
 }
 
 static GbkJob *
@@ -462,14 +521,18 @@ job_new (GbkJobKind kind, const GPtrArray *sources, GbkLoc *dest)
   const char *dest_path = nullptr;
   bool dest_here = dest == nullptr || gbk_loc_as_local (dest, &dest_path);
   s->sources = gbk_loc_array_as_local (sources);
-  if (s->sources == nullptr && kind == GBK_JOB_COPY && dest_here)
-    s->sources = remote_sources (s, sources); /* sets s->source, or s->refused */
-  else if (s->sources == nullptr || !dest_here)
+  if (s->sources != nullptr && dest_here)
+    s->dest = g_strdup (dest_path); /* all on this machine */
+  else if (kind == GBK_JOB_COPY || kind == GBK_JOB_MOVE)
+    {
+      g_clear_pointer (&s->sources, g_ptr_array_unref);
+      plan_transfer (s, sources, dest);
+    }
+  else
     s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                                       "Not possible for files on another machine yet");
   if (s->sources == nullptr)
     s->sources = g_ptr_array_new_with_free_func (g_free);
-  s->dest = g_strdup (dest_path);
   job->dest_loc = dest != nullptr ? gbk_loc_ref (dest) : nullptr;
   job->s = s;
   job->total = 0;

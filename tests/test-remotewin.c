@@ -35,6 +35,21 @@ model_of (GbkWindow *w)
   return gbk_view_get_model (gbk_window_view (w));
 }
 
+/* The active tab lists a name. */
+typedef struct
+{
+  GbkWindow *w;
+  const char *name;
+} Named;
+
+static bool
+has_name (void *data)
+{
+  const Named *n = data;
+  GbkDirModel *m = model_of (n->w);
+  return m != nullptr && gbk_dir_model_find (m, n->name) != GBK_HANDLE_NONE;
+}
+
 static GbkDirState
 state_of (GbkWindow *w)
 {
@@ -141,7 +156,8 @@ test_browse (void)
   gtk_widget_destroy (GTK_WIDGET (w));
 }
 
-/* Nothing that changes anything there: each says so, starts no job, changes nothing. */
+/* Nothing that changes anything there, apart from copies and moves: each says so, starts
+ * no job, changes nothing. */
 static void
 test_refusals (void)
 {
@@ -149,7 +165,7 @@ test_refusals (void)
   GbkWindow *w = window_on_remote_data ();
   GbkDirModel *m = model_of (w);
   gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (m, "a.txt"));
-  const char *actions[] = { "cut", "paste", "trash", "delete", "rename" };
+  const char *actions[] = { "trash", "delete", "rename" };
   for (size_t i = 0; i < G_N_ELEMENTS (actions); i++)
     {
       g_action_group_activate_action (G_ACTION_GROUP (w), actions[i], nullptr);
@@ -175,7 +191,7 @@ no_jobs (void *data G_GNUC_UNUSED)
   return gbk_job_live () == 0;
 }
 
-/* Copy there, paste here: the file arrives. A cut from there is refused (moving comes later). */
+/* Copy there, paste here: the file arrives. Cut there, paste here: it moves. */
 static void
 test_copy_paste_here (void)
 {
@@ -200,19 +216,71 @@ test_copy_paste_here (void)
   g_assert_true (g_file_get_contents (arrived, &content, nullptr, nullptr));
   g_assert_cmpstr (content, ==, "aaa");
 
-  /* Cut there, paste here: refused, nothing moves. */
-  gbk_window_tab_loc (w, 0);
-  gtk_notebook_set_current_page (
-      GTK_NOTEBOOK (gtk_widget_get_ancestor (GTK_WIDGET (gbk_window_view (w)), GTK_TYPE_NOTEBOOK)),
-      0);
-  while (gtk_events_pending ())
-    gtk_main_iteration ();
-  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "a.txt"));
+  /* Cut there, paste into another folder here: it moves. */
+  put ("data/b.txt", "bbb");
+  GtkNotebook *tabs = GTK_NOTEBOOK (
+      gtk_widget_get_ancestor (GTK_WIDGET (gbk_window_view (w)), GTK_TYPE_NOTEBOOK));
+  gtk_notebook_set_current_page (tabs, 0);
+  Named b_txt = { w, "b.txt" };
+  g_assert_true (wait_until (has_name, &b_txt));
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "b.txt"));
   g_action_group_activate_action (G_ACTION_GROUP (w), "cut", nullptr);
   while (gtk_events_pending ())
     gtk_main_iteration ();
-  g_assert_cmpstr (gbk_window_status (w), ==, "Not possible on another machine yet");
-  g_assert_true (exists ("data/a.txt"));
+  g_assert_cmpstr (gbk_window_status (w), ==, "1 item cut");
+  gtk_notebook_set_current_page (tabs, 1);
+  while (gtk_events_pending ())
+    gtk_main_iteration ();
+  g_action_group_activate_action (G_ACTION_GROUP (w), "paste", nullptr);
+  g_autofree char *moved = g_build_filename (here, "b.txt", nullptr);
+  g_assert_true (wait_until (file_there, moved));
+  g_assert_true (wait_until (no_jobs, nullptr));
+  g_assert_false (exists ("data/b.txt"));
+  gtk_widget_destroy (GTK_WIDGET (w));
+}
+
+/* Copy here, paste there: the file arrives there. Cut here, paste there: it moves. */
+static void
+test_paste_there (void)
+{
+  put ("data/keep", "");
+  put ("local/up.txt", "up");
+  put ("local/mv.txt", "mv");
+  g_autofree char *local = g_build_filename (home, "local", nullptr);
+  g_autoptr (GbkLoc) local_loc = gbk_loc_new_local (local);
+  GbkWindow *w = window_on_remote_data ();
+  gbk_window_new_tab (w, local_loc);
+  Named up_txt = { w, "up.txt" };
+  g_assert_true (wait_until (has_name, &up_txt));
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "up.txt"));
+  g_action_group_activate_action (G_ACTION_GROUP (w), "copy", nullptr);
+  GtkNotebook *tabs = GTK_NOTEBOOK (
+      gtk_widget_get_ancestor (GTK_WIDGET (gbk_window_view (w)), GTK_TYPE_NOTEBOOK));
+  gtk_notebook_set_current_page (tabs, 0);
+  while (gtk_events_pending ())
+    gtk_main_iteration ();
+  g_action_group_activate_action (G_ACTION_GROUP (w), "paste", nullptr);
+  g_autofree char *arrived = g_build_filename (home, "data", "up.txt", nullptr);
+  g_assert_true (wait_until (file_there, arrived));
+  g_assert_true (wait_until (no_jobs, nullptr));
+  g_autofree char *content = nullptr;
+  g_assert_true (g_file_get_contents (arrived, &content, nullptr, nullptr));
+  g_assert_cmpstr (content, ==, "up");
+  g_assert_true (exists ("local/up.txt"));
+
+  gtk_notebook_set_current_page (tabs, 1);
+  while (gtk_events_pending ())
+    gtk_main_iteration ();
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "mv.txt"));
+  g_action_group_activate_action (G_ACTION_GROUP (w), "cut", nullptr);
+  gtk_notebook_set_current_page (tabs, 0);
+  while (gtk_events_pending ())
+    gtk_main_iteration ();
+  g_action_group_activate_action (G_ACTION_GROUP (w), "paste", nullptr);
+  g_autofree char *moved = g_build_filename (home, "data", "mv.txt", nullptr);
+  g_assert_true (wait_until (file_there, moved));
+  g_assert_true (wait_until (no_jobs, nullptr));
+  g_assert_false (exists ("local/mv.txt"));
   gtk_widget_destroy (GTK_WIDGET (w));
 }
 
@@ -488,6 +556,7 @@ main (int argc, char **argv)
   g_test_add_func ("/remotewin/disconnect-and-back", test_disconnect_and_back);
   g_test_add_func ("/remotewin/network-action", test_network_action);
   g_test_add_func ("/remotewin/copy-paste-here", test_copy_paste_here);
+  g_test_add_func ("/remotewin/paste-there", test_paste_there);
   g_test_add_func ("/remotewin/open-copy", test_open_copy);
   g_test_add_func ("/remotewin/cache-cleanup", test_cache_cleanup);
   g_test_add_func ("/remotewin/open-names-app", test_open_names_app);

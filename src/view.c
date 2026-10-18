@@ -1020,7 +1020,7 @@ drop_target (GbkView *v, double x, double y, bool from_self, GbkHandle *folder)
   *folder = GBK_HANDLE_NONE;
   if (v->model == nullptr || gbk_dir_model_state (v->model) == GBK_DIR_ERROR)
     return false;
-  /* Nothing can be copied to another machine yet: no drops there. */
+  /* Drag and drop with another machine comes later (phase 8 of docs/remote-plan.md). */
   const GbkLoc *here = gbk_dir_model_loc (v->model);
   if (here != nullptr && !gbk_loc_is_local (here))
     return false;

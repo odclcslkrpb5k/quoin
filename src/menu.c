@@ -73,13 +73,13 @@ gbk_menu_works_remote (GbkMenuKind kind)
     case GBK_MENU_SHOW_HIDDEN:
     case GBK_MENU_OPEN:        /* files: a read-only copy (fetch.h) */
     case GBK_MENU_OPEN_WITH:
-    case GBK_MENU_COPY: return true;   /* pasted here, it copies from there */
+    case GBK_MENU_COPY:        /* copies and moves cross between machines (job.c) */
+    case GBK_MENU_CUT:
+    case GBK_MENU_PASTE:
+    case GBK_MENU_PASTE_INTO: return true;
     case GBK_MENU_EXECUTE:
     case GBK_MENU_EXECUTE_TERMINAL:
     case GBK_MENU_ACTION:
-    case GBK_MENU_CUT:
-    case GBK_MENU_PASTE:
-    case GBK_MENU_PASTE_INTO:
     case GBK_MENU_TRASH:
     case GBK_MENU_DELETE:
     case GBK_MENU_RENAME:

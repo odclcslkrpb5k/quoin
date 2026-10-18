@@ -82,7 +82,8 @@ GbkStatEntry *
 gbk_stat_entry_at (int dirfd, const char *name, const char *entry_name, GError **error)
 {
   struct stat st;
-  if (fstatat (dirfd, name, &st, AT_SYMLINK_NOFOLLOW) != 0)
+  int flags = AT_SYMLINK_NOFOLLOW | (name[0] == '\0' ? AT_EMPTY_PATH : 0);
+  if (fstatat (dirfd, name, &st, flags) != 0)
     {
       set_errno_gerror (error, errno);
       return nullptr;
@@ -210,6 +211,7 @@ static const GbkSourceOps local_ops = {
   .read = local_read,
   .fd = local_fd,
   .close = local_close,
+  .remove = nullptr,          /* a move here renames, or copies and deletes (move_into) */
   .free = local_free,
 };
 
@@ -839,6 +841,95 @@ delete_path (Ctx *c, const char *path)
   return ok;
 }
 
+/* ---- deleting what a move copied ---- */
+
+typedef struct
+{
+  GbkUnchangedFn unchanged;
+  void *data;
+  unsigned kept;
+  GError *error;
+} Removal;
+
+/* False to stop (an error: in r->error). */
+static bool
+remove_at (Removal *r, int parent, const char *name, const char *path, int depth)
+{
+  if (depth > GBK_OPS_MAX_DEPTH)
+    {
+      g_set_error_literal (&r->error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Folder structure is too deep");
+      return false;
+    }
+  struct stat st;
+  if (fstatat (parent, name, &st, AT_SYMLINK_NOFOLLOW) != 0)
+    {
+      if (errno == ENOENT)
+        return true;                     /* already gone */
+      set_errno_gerror (&r->error, errno);
+      return false;
+    }
+  if (!r->unchanged (path, &st, r->data))
+    {
+      r->kept++;
+      return true;
+    }
+  if (!S_ISDIR (st.st_mode))
+    {
+      if (unlinkat (parent, name, 0) == 0 || errno == ENOENT)
+        return true;
+      set_errno_gerror (&r->error, errno);
+      return false;
+    }
+  int fd = openat (parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  DIR *d = fd >= 0 ? fdopendir (fd) : nullptr;
+  if (d == nullptr)
+    {
+      set_errno_gerror (&r->error, errno);
+      if (fd >= 0)
+        close (fd);
+      return false;
+    }
+  const struct dirent *de;
+  bool ok = true;
+  while (ok && (de = readdir (d)) != nullptr)
+    {
+      if (g_str_equal (de->d_name, ".") || g_str_equal (de->d_name, ".."))
+        continue;
+      g_autofree char *child = g_build_filename (path, de->d_name, nullptr);
+      ok = remove_at (r, fd, de->d_name, child, depth + 1);
+    }
+  closedir (d);
+  if (!ok)
+    return false;
+  /* Not empty: something kept is inside (counted), or arrived since (it wasn't moved). */
+  if (unlinkat (parent, name, AT_REMOVEDIR) == 0 || errno == ENOTEMPTY || errno == EEXIST)
+    return true;
+  set_errno_gerror (&r->error, errno);
+  return false;
+}
+
+bool
+gbk_ops_remove_unchanged (int dirfd, const char *name, const char *path, GbkUnchangedFn unchanged,
+                          void *data, GError **error)
+{
+  Removal r = { .unchanged = unchanged, .data = data };
+  if (!remove_at (&r, dirfd, name, path, 0))
+    {
+      g_propagate_error (error, r.error);
+      return false;
+    }
+  if (r.kept > 0)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   r.kept == 1 ? "%u item changed after it was copied"
+                               : "%u items changed after they were copied",
+                   r.kept);
+      return false;
+    }
+  return true;
+}
+
 /* ---- moving ---- */
 
 static int force_exdev;     /* test hooks (atomic: jobs run on worker threads) */
@@ -1014,6 +1105,23 @@ move_into (Ctx *c, const char *src, const char *dst_dir, const char *name, int d
   return !cancelled (c);
 }
 
+/* From another machine: copy, make the copy durable, then the source machine deletes the
+ * original (only as it was when listed) if the copy was complete. */
+static bool
+move_from (Ctx *c, const char *src, const char *dst_dir, const char *name, GPtrArray *created)
+{
+  c->incomplete = false;
+  bool ok = copy_into (c, src, dst_dir, name, 0, created, nullptr);
+  if (!ok || c->incomplete)
+    return ok;
+  if (!make_durable (c, dst_dir))
+    return !c->cancelled;
+  g_autoptr (GError) e = nullptr;
+  if (!c->src->ops->remove (c->src, src, &e))
+    return fail_error (c, src, "Copied, but kept the original of", e);
+  return !cancelled (c);
+}
+
 /* ---- trash ---- */
 
 static bool
@@ -1055,10 +1163,10 @@ bool
 gbk_ops_run_from (GbkSource *src, GbkOpKind kind, GPtrArray *sources, const char *dest_dir,
                   const GbkOpsHooks *hooks, GPtrArray *created, GError **error)
 {
-  if (!src->local && kind != GBK_OP_COPY)
+  if (!src->local && !(kind == GBK_OP_COPY || (kind == GBK_OP_MOVE && src->ops->remove != nullptr)))
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                           "Only copying from another machine is possible yet");
+                           "Only copying and moving from another machine are possible");
       return false;
     }
   src->cancelled = hooks->cancelled;
@@ -1102,7 +1210,12 @@ gbk_ops_run_from (GbkSource *src, GbkOpKind kind, GPtrArray *sources, const char
       switch (kind)
         {
         case GBK_OP_COPY: copy_into (&c, path, dest_dir, name, 0, created, nullptr); break;
-        case GBK_OP_MOVE: move_into (&c, path, dest_dir, name, 0, created); break;
+        case GBK_OP_MOVE:
+          if (src->local)
+            move_into (&c, path, dest_dir, name, 0, created);
+          else
+            move_from (&c, path, dest_dir, name, created);
+          break;
         case GBK_OP_TRASH: trash_path (&c, path); break;
         case GBK_OP_DELETE: delete_path (&c, path); break;
         default: gbk_fatal ("bad op %d", (int) kind);

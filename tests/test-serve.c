@@ -82,6 +82,24 @@ send_path (const Server *s, GbkMsgType type, uint64_t channel, const char *path)
   send_bytes (s, b);
 }
 
+#define SESSION 5                        /* the session test requests are made in */
+
+static void
+send_request (const Server *s, GbkMsgType type, uint64_t channel, const char *path)
+{
+  g_autoptr (GByteArray) b = g_byte_array_new ();
+  gbk_proto_put_request (b, type, channel, SESSION, path);
+  send_bytes (s, b);
+}
+
+static void
+open_session (const Server *s, uint64_t session, bool record)
+{
+  g_autoptr (GByteArray) b = g_byte_array_new ();
+  gbk_proto_put_session (b, session, record);
+  send_bytes (s, b);
+}
+
 /* Read more from the server, waiting up to 10 s. False at end of output. */
 static bool
 fill (Server *s)
@@ -309,7 +327,7 @@ static void
 put_read (GByteArray *b, const void *arg)
 {
   const Req *r = arg;
-  gbk_proto_put_read (b, r->channel, r->path, r->n);
+  gbk_proto_put_read (b, r->channel, SESSION, r->path, r->n);
 }
 
 static void
@@ -335,8 +353,9 @@ test_list_and_lstat (void)
   g_assert_cmpint (symlink ("file", link), ==, 0);
   Server *s = server_start ();
   expect_hello (s);
+  open_session (s, SESSION, false);
   g_autofree char *dir = in_root ("l");
-  send_path (s, GBK_MSG_LIST, 9, dir);
+  send_request (s, GBK_MSG_LIST, 9, dir);
   g_autoptr (GByteArray) keep = nullptr;
   GbkFrame f = next (s, &keep);
   GPtrArray *entries;
@@ -359,19 +378,28 @@ test_list_and_lstat (void)
     }
   g_ptr_array_unref (entries);
 
-  send_path (s, GBK_MSG_LSTAT, 10, link);
+  send_request (s, GBK_MSG_LSTAT, 10, link);
   g_autoptr (GByteArray) keep2 = nullptr;
   GbkFrame f2 = next (s, &keep2);
   g_autoptr (GbkStatEntry) e = gbk_proto_get_stated (&f2);
   g_assert_nonnull (e);
   g_assert_true (S_ISLNK (e->mode));
 
-  send_path (s, GBK_MSG_LIST, 11, "/nonexistent/quoin/dir");
+  send_request (s, GBK_MSG_LIST, 11, "/nonexistent/quoin/dir");
   g_autoptr (GByteArray) keep3 = nullptr;
   GbkFrame f3 = next (s, &keep3);
   g_autoptr (GError) err = nullptr;
   g_assert_true (gbk_proto_get_failed (&f3, &err));
   g_assert_error (err, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+
+  /* Outside a session it opened: refused, and still serving. */
+  g_autoptr (GByteArray) b = g_byte_array_new ();
+  gbk_proto_put_request (b, GBK_MSG_LIST, 12, SESSION + 1, dir);
+  send_bytes (s, b);
+  g_autoptr (GByteArray) keep4 = nullptr;
+  GbkFrame f4 = next (s, &keep4);
+  g_autoptr (GError) err4 = nullptr;
+  g_assert_true (gbk_proto_get_failed (&f4, &err4));
   close (s->in);
   s->in = -1;
   g_assert_cmpint (server_wait (s), ==, 0);
@@ -387,6 +415,7 @@ test_read_credit_and_change (void)
   g_autofree char *path = in_root ("r/data");
   Server *s = server_start ();
   expect_hello (s);
+  open_session (s, SESSION, false);
   Req r = { 20, path, 4 };
   send_frame (s, put_read, &r);
   g_autoptr (GByteArray) k1 = nullptr;
@@ -445,6 +474,73 @@ test_read_credit_and_change (void)
   GbkFrame f4 = next (s, &k4);
   g_autoptr (GError) err = nullptr;
   g_assert_true (gbk_proto_get_failed (&f4, &err));
+  close (s->in);
+  s->in = -1;
+  g_assert_cmpint (server_wait (s), ==, 0);
+  server_free (s);
+}
+
+static GError *
+expect_removed (Server *s, uint64_t channel, const char *path)
+{
+  g_autoptr (GByteArray) b = g_byte_array_new ();
+  gbk_proto_put_request (b, GBK_MSG_REMOVE, channel, SESSION, path);
+  send_bytes (s, b);
+  g_autoptr (GByteArray) k = nullptr;
+  GbkFrame f = next (s, &k);
+  g_assert_cmpuint (f.channel, ==, channel);
+  GError *error = nullptr;
+  if (f.type != GBK_MSG_REMOVED)
+    g_assert_true (gbk_proto_get_failed (&f, &error));
+  return error;
+}
+
+static void
+listed (Server *s, GbkMsgType type, uint64_t channel, const char *path)
+{
+  send_request (s, type, channel, path);
+  g_autoptr (GByteArray) k = nullptr;
+  GbkFrame f = next (s, &k);
+  g_assert_true (f.type == (type == GBK_MSG_LIST ? GBK_MSG_LISTING : GBK_MSG_STATED));
+}
+
+/* What a move copied is removed only where it is as it was listed: a file changed since is
+ * kept (and so is its folder), and nothing is removed outside a recording session. */
+static void
+test_remove_unchanged (void)
+{
+  put ("m/a/same", "1");
+  put ("m/a/edited", "2");
+  put ("m/b", "3");
+  g_autofree char *a = in_root ("m/a");
+  g_autofree char *b = in_root ("m/b");
+  g_autofree char *edited = in_root ("m/a/edited");
+  g_autofree char *same = in_root ("m/a/same");
+  Server *s = server_start ();
+  expect_hello (s);
+
+  open_session (s, SESSION, false);
+  listed (s, GBK_MSG_LSTAT, 30, b);
+  g_autoptr (GError) refused = expect_removed (s, 31, b);
+  g_assert_error (refused, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED);
+  g_assert_true (g_file_test (b, G_FILE_TEST_EXISTS));
+  g_autoptr (GByteArray) forget = g_byte_array_new ();
+  gbk_proto_put_empty (forget, GBK_MSG_FORGET, SESSION);
+  send_bytes (s, forget);
+
+  open_session (s, SESSION, true);
+  listed (s, GBK_MSG_LSTAT, 32, a);
+  listed (s, GBK_MSG_LIST, 33, a);
+  listed (s, GBK_MSG_LSTAT, 34, b);
+  g_usleep (20000);                      /* a later mtime, on any filesystem */
+  g_assert_true (g_file_set_contents (edited, "changed", -1, nullptr));
+  g_autoptr (GError) kept = expect_removed (s, 35, a);
+  g_assert_error (kept, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_false (g_file_test (same, G_FILE_TEST_EXISTS));
+  g_assert_true (g_file_test (edited, G_FILE_TEST_EXISTS));
+  g_autoptr (GError) none = expect_removed (s, 36, b);
+  g_assert_no_error (none);
+  g_assert_false (g_file_test (b, G_FILE_TEST_EXISTS));
   close (s->in);
   s->in = -1;
   g_assert_cmpint (server_wait (s), ==, 0);
@@ -591,6 +687,7 @@ main (int argc, char **argv)
   g_test_add_func ("/serve/idle", test_idle);
   g_test_add_func ("/serve/list-and-lstat", test_list_and_lstat);
   g_test_add_func ("/serve/read-credit-and-change", test_read_credit_and_change);
+  g_test_add_func ("/serve/remove-unchanged", test_remove_unchanged);
   int status = g_test_run ();
   gbk_type_table_unref (types);
   g_free (root);

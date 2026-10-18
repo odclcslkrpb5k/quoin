@@ -211,6 +211,31 @@ As built in phase 5 (2026-10-18), where it differs from the above:
   older than 7 days are removed at startup (no manifest yet: nothing is ever edited there
   before phase 6).
 
+As built in phase 6 (2026-10-18), copying and moving across machines:
+- Both ends ask and both answer (src/peer.c, shared by Quoin and quoin-serve). A copy or
+  move INTO the other machine runs there, as a job: gbk_ops_run_from with the same safety
+  rules as here, its questions and progress sent here, its sources read from here through
+  the same LIST/LSTAT/READ requests the laptop uses the other way. A copy or move FROM
+  there runs here, reading through the connection, as in phase 5. Copy and move within
+  one other machine run there with its own files (nothing crosses the network).
+- What the other machine may read here is limited (Engineer): only inside a session this
+  machine opened for one of its own jobs, only the files given to that job and what is
+  under them, resolved with openat2 RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS from the folder
+  above each one. It can't open, close or widen sessions, or ask for file details.
+  tests/test-peer.c tries "..", "./", "//", symlinks out, a longer name with the same start,
+  "/", a closed session and another session.
+- A move deletes an original only after the copy is stored (syncfs on the destination's
+  machine) and only where the original is still as it was first listed in that move's
+  session (type, device, inode, size, mtime, ctime; a folder only has to be the same
+  folder; a file with several links may have a new ctime). Anything changed or new is
+  kept, and the job says how many. This replaces the plan's "token taken when reading
+  began" and also covers two names for one machine: a Replace there gives the file a new
+  inode, so its "original" is never deleted.
+- Channels: requests from the server have the top bit set, so the two directions never
+  share one.
+- Drag and drop with another machine stays off until phase 8 (a message says to use
+  Copy/Cut and Paste).
+
 ## 9. Testing
 
 - `QUOIN_SSH` replaces the ssh command; tests point it at a script running quoin-serve

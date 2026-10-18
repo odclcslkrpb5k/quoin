@@ -1,5 +1,6 @@
 #include "conn.h"
 #include "lifetime.h"
+#include "peer.h"
 
 #define READ_CHUNK ((size_t) 64 * 1024)
 #define STDERR_KEEP 4096u                /* the end of ssh's messages, for errors */
@@ -11,18 +12,6 @@
 
 static int test_ping_ms, test_dead_ms, test_connect_ms;   /* atomic */
 static int live_conns;                                    /* atomic */
-/* Channel numbers, from any thread: never reused in this process. */
-static uint64_t
-new_channel (void)
-{
-  static GMutex lock;
-  static uint64_t next = 1;
-  g_mutex_lock (&lock);
-  uint64_t ch = next++;
-  g_mutex_unlock (&lock);
-  return ch;
-}
-
 void
 gbk_conn_set_timeouts_for_test (int ping_ms, int dead_ms, int connect_ms)
 {
@@ -88,19 +77,17 @@ typedef struct
   char *host;
   GbkTypeTable *types;
   int ping_ms, dead_ms, connect_ms;
-  GMutex lock;             /* guards out and closing */
-  GByteArray *out;         /* frames for the server, sent once connected */
+  GMutex lock;             /* guards closing */
   bool closing;
-  int wake_io;             /* eventfd: main -> I/O */
+  int wake_io;             /* eventfd: main -> I/O (closing) */
+  GbkOutbox *out;          /* frames for the server, sent once connected */
   GAsyncQueue *events;     /* Event*: I/O -> main */
   int wake_main;           /* eventfd: I/O -> main */
-  /* Requests from worker threads (copies): their answers go straight to them. */
-  GMutex calls_lock;       /* guards calls, dead, dead_error */
-  GHashTable *calls;       /* &Call.channel -> Call* */
-  bool dead;
-  GError *dead_error;
-  int workers;             /* sources in use (atomic): the connection is busy */
-  int64_t workers_done_us; /* when the last one finished (under lock) */
+  /* Copies and jobs (worker threads) ask the server; its answers go straight to them. */
+  GbkAsker *asker;
+  /* Jobs the server runs for us ask about this machine's files; only within their own
+   * sessions (restricted). */
+  GbkAnswerer *answerer;
 } Shared;
 
 static void
@@ -111,13 +98,12 @@ shared_unref (Shared *s)
   g_free (s->host);
   gbk_type_table_unref (s->types);
   g_mutex_clear (&s->lock);
-  g_byte_array_unref (s->out);
+  gbk_outbox_unref (s->out);
   close (s->wake_io);
   g_async_queue_unref (s->events);
   close (s->wake_main);
-  g_mutex_clear (&s->calls_lock);
-  g_hash_table_unref (s->calls);
-  g_clear_error (&s->dead_error);
+  gbk_asker_unref (s->asker);
+  gbk_answerer_unref (s->answerer);
   g_free (s);
 }
 
@@ -674,363 +660,15 @@ typedef struct
   GByteArray *in;
 } Live;
 
-/* ---- worker-thread requests ---- */
-
-typedef struct
-{
-  GbkMsgType type;
-  GBytes *payload;
-  GError *error; /* the connection died */
-} CallItem;
-
-typedef struct
-{
-  Shared *s; /* referenced */
-  uint64_t channel;
-  GAsyncQueue *q; /* CallItem* */
-} Call;
-
-static void
-call_item_free (CallItem *it)
-{
-  g_clear_pointer (&it->payload, g_bytes_unref);
-  g_clear_error (&it->error);
-  g_free (it);
-}
-
-/* An answer for a worker's request: queued for it. True if the channel is one. */
-static bool
-route_to_call (Shared *s, const GbkFrame *f, bool *valid)
-{
-  g_mutex_lock (&s->calls_lock);
-  Call *call = g_hash_table_lookup (s->calls, &f->channel);
-  if (call != nullptr)
-    {
-      CallItem *it = g_new0 (CallItem, 1);
-      it->type = f->type;
-      it->payload = g_bytes_new (f->payload, f->len);
-      g_async_queue_push (call->q, it);
-    }
-  g_mutex_unlock (&s->calls_lock);
-  *valid = f->type == GBK_MSG_LISTING || f->type == GBK_MSG_STATED || f->type == GBK_MSG_DATA
-           || f->type == GBK_MSG_END || f->type == GBK_MSG_FAILED;
-  return call != nullptr;
-}
-
-/* The connection ended: every waiting request hears it now. */
-static void
-calls_dead (Shared *s, const GError *error)
-{
-  g_mutex_lock (&s->calls_lock);
-  s->dead = true;
-  s->dead_error = g_error_copy (error);
-  GHashTableIter it;
-  void *call;
-  g_hash_table_iter_init (&it, s->calls);
-  while (g_hash_table_iter_next (&it, nullptr, &call))
-    {
-      CallItem *item = g_new0 (CallItem, 1);
-      item->error = g_error_copy (error);
-      g_async_queue_push (((Call *) call)->q, item);
-    }
-  g_mutex_unlock (&s->calls_lock);
-}
-
-[[nodiscard]] static Call *
-call_start (Shared *s, GError **error)
-{
-  g_mutex_lock (&s->calls_lock);
-  if (s->dead)
-    {
-      g_propagate_error (error, g_error_copy (s->dead_error));
-      g_mutex_unlock (&s->calls_lock);
-      return nullptr;
-    }
-  Call *call = g_new0 (Call, 1);
-  g_atomic_ref_count_inc (&s->rc);
-  call->s = s;
-  call->channel = new_channel ();
-  call->q = g_async_queue_new_full ((GDestroyNotify) call_item_free);
-  g_hash_table_insert (s->calls, &call->channel, call);
-  g_mutex_unlock (&s->calls_lock);
-  return call;
-}
-
-static void
-call_end (Call *call)
-{
-  g_mutex_lock (&call->s->calls_lock);
-  g_hash_table_remove (call->s->calls, &call->channel);
-  g_mutex_unlock (&call->s->calls_lock);
-  g_async_queue_unref (call->q);
-  shared_unref (call->s);
-  g_free (call);
-}
-
-static void
-call_send (const Call *call, GByteArray *frame)
-{
-  g_mutex_lock (&call->s->lock);
-  g_byte_array_append (call->s->out, frame->data, frame->len);
-  g_mutex_unlock (&call->s->lock);
-  poke (call->s->wake_io);
-}
-
-/* The next answer, checking `src`'s cancellation while waiting. nullptr with *error when
- * cancelled or the connection died. */
-[[nodiscard]] static CallItem *
-call_wait (Call *call, const GbkSource *src, GError **error)
-{
-  for (;;)
-    {
-      CallItem *it = g_async_queue_timeout_pop (call->q, G_USEC_PER_SEC / 10);
-      if (it != nullptr && it->error != nullptr)
-        {
-          g_propagate_error (error, g_steal_pointer (&it->error));
-          call_item_free (it);
-          return nullptr;
-        }
-      if (it != nullptr)
-        return it;
-      if (src->cancelled != nullptr && src->cancelled (src->cancel_data))
-        {
-          g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Cancelled");
-          return nullptr;
-        }
-    }
-}
-
-static GbkFrame
-item_frame (const CallItem *it, uint64_t channel)
-{
-  gsize len;
-  const uint8_t *data = g_bytes_get_data (it->payload, &len);
-  return (GbkFrame) { it->type, channel, data, len };
-}
-
-/* An answer that isn't one of the expected kinds: the server's FAILED, or a broken reply. */
-static void
-unexpected (const CallItem *it, uint64_t channel, GError **error)
-{
-  GbkFrame f = item_frame (it, channel);
-  if (f.type == GBK_MSG_FAILED && gbk_proto_get_failed (&f, error))
-    return;
-  g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                       "The other machine answered with something Quoin doesn't understand");
-}
-
-/* ---- another machine as a copy's source ---- */
-
-#define READ_WINDOW (1u << 20) /* bytes a READ may send ahead of what's been copied */
-
-typedef struct
-{
-  GbkSource base;
-  Shared *s; /* referenced */
-} RemoteSource;
-
-typedef struct
-{
-  GbkSourceFile base;
-  Call *call;
-  GBytes *chunk; /* the DATA being copied out */
-  size_t off;
-  uint32_t unacked; /* bytes copied out since the last CREDIT */
-  bool ended;
-} RemoteFile;
-
-static Shared *
-shared_of (const GbkSource *src)
-{
-  return ((const RemoteSource *) (const void *) src)->s;
-}
-
-[[nodiscard]] static GbkStatEntry *
-remote_lstat (GbkSource *src, const char *path, GError **error)
-{
-  Call *call = call_start (shared_of (src), error);
-  if (call == nullptr)
-    return nullptr;
-  g_autoptr (GByteArray) req = g_byte_array_new ();
-  gbk_proto_put_path (req, GBK_MSG_LSTAT, call->channel, path);
-  call_send (call, req);
-  GbkStatEntry *e = nullptr;
-  CallItem *it = call_wait (call, src, error);
-  if (it != nullptr)
-    {
-      GbkFrame f = item_frame (it, call->channel);
-      e = f.type == GBK_MSG_STATED ? gbk_proto_get_stated (&f) : nullptr;
-      if (e == nullptr)
-        unexpected (it, call->channel, error);
-      call_item_free (it);
-    }
-  call_end (call);
-  return e;
-}
-
-[[nodiscard]] static GPtrArray *
-remote_list (GbkSource *src, const char *path, GError **error)
-{
-  Call *call = call_start (shared_of (src), error);
-  if (call == nullptr)
-    return nullptr;
-  g_autoptr (GByteArray) req = g_byte_array_new ();
-  gbk_proto_put_path (req, GBK_MSG_LIST, call->channel, path);
-  call_send (call, req);
-  g_autoptr (GPtrArray) all = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_stat_entry_free);
-  g_autoptr (GHashTable) seen = g_hash_table_new (g_str_hash, g_str_equal);
-  bool last = false, ok = true;
-  while (ok && !last)
-    {
-      CallItem *it = call_wait (call, src, error);
-      if (it == nullptr)
-        break;
-      GbkFrame f = item_frame (it, call->channel);
-      GPtrArray *part = nullptr;
-      ok = f.type == GBK_MSG_LISTING && gbk_proto_get_listing (&f, &part, &last);
-      if (!ok)
-        unexpected (it, call->channel, error);
-      for (guint i = 0; ok && i < part->len; i++)
-        {
-          GbkStatEntry *e = g_ptr_array_index (part, i);
-          if (!g_hash_table_add (seen, e->name))
-            {
-              ok = false; /* the same name in two parts */
-              g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                                   "The other machine listed a name twice");
-              break;
-            }
-          g_ptr_array_add (all, e);
-          part->pdata[i] = nullptr; /* moved */
-        }
-      if (part != nullptr)
-        g_ptr_array_unref (part);
-      call_item_free (it);
-    }
-  call_end (call);
-  return ok && last ? g_steal_pointer (&all) : nullptr;
-}
-
-[[nodiscard]] static GbkSourceFile *
-remote_open (GbkSource *src, const char *path, GError **error)
-{
-  Call *call = call_start (shared_of (src), error);
-  if (call == nullptr)
-    return nullptr;
-  g_autoptr (GByteArray) req = g_byte_array_new ();
-  gbk_proto_put_read (req, call->channel, path, READ_WINDOW);
-  call_send (call, req);
-  RemoteFile *f = g_new0 (RemoteFile, 1);
-  f->base.source = src;
-  f->call = call;
-  return &f->base;
-}
-
-[[nodiscard]] static ssize_t
-remote_read (GbkSourceFile *file, void *buf, size_t len, GError **error)
-{
-  RemoteFile *f = (RemoteFile *) (void *) file;
-  while (f->chunk == nullptr || f->off == g_bytes_get_size (f->chunk))
-    {
-      g_clear_pointer (&f->chunk, g_bytes_unref);
-      if (f->ended)
-        return 0;
-      CallItem *it = call_wait (f->call, file->source, error);
-      if (it == nullptr)
-        return -1;
-      GbkFrame frame = item_frame (it, f->call->channel);
-      const uint8_t *data;
-      size_t n;
-      bool changed;
-      if (gbk_proto_get_data (&frame, &data, &n))
-        {
-          f->chunk = g_bytes_ref (it->payload);
-          f->off = 0;
-        }
-      else if (gbk_proto_get_end (&frame, &changed))
-        {
-          f->ended = true;
-          if (changed)
-            {
-              g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                                   "It changed while it was being copied");
-              call_item_free (it);
-              return -1;
-            }
-        }
-      else
-        {
-          f->ended = true; /* FAILED ends it on the other side too */
-          unexpected (it, f->call->channel, error);
-          call_item_free (it);
-          return -1;
-        }
-      call_item_free (it);
-    }
-  size_t take = MIN (len, g_bytes_get_size (f->chunk) - f->off);
-  memcpy (buf, (const uint8_t *) g_bytes_get_data (f->chunk, nullptr) + f->off, take);
-  f->off += take;
-  f->unacked += (uint32_t) take;
-  if (f->unacked >= READ_WINDOW / 2)
-    {
-      g_autoptr (GByteArray) credit = g_byte_array_new ();
-      gbk_proto_put_credit (credit, f->call->channel, f->unacked);
-      call_send (f->call, credit);
-      f->unacked = 0;
-    }
-  return (ssize_t) take;
-}
-
-static int
-remote_fd (const GbkSourceFile *f G_GNUC_UNUSED)
-{
-  return -1;
-}
-
-static void
-remote_close (GbkSourceFile *file)
-{
-  RemoteFile *f = (RemoteFile *) (void *) file;
-  if (!f->ended)
-    {
-      g_autoptr (GByteArray) cancel = g_byte_array_new ();
-      gbk_proto_put_empty (cancel, GBK_MSG_CANCEL, f->call->channel);
-      call_send (f->call, cancel);
-    }
-  g_clear_pointer (&f->chunk, g_bytes_unref);
-  call_end (f->call);
-  g_free (f);
-}
-
-static void
-remote_free (GbkSource *src)
-{
-  RemoteSource *r = (RemoteSource *) (void *) src;
-  Shared *s = r->s;
-  g_mutex_lock (&s->lock);
-  if (g_atomic_int_dec_and_test (&s->workers))
-    s->workers_done_us = g_get_monotonic_time ();
-  g_mutex_unlock (&s->lock);
-  shared_unref (s);
-  g_free (r);
-}
-
-static const GbkSourceOps remote_ops = {
-  .lstat = remote_lstat,
-  .list = remote_list,
-  .open = remote_open,
-  .read = remote_read,
-  .fd = remote_fd,
-  .close = remote_close,
-  .free = remote_free,
-};
-
 /* Decode one frame from the server into an event. False: it broke the protocol. */
 static bool
 on_frame (Live *l, const GbkFrame *f)
 {
+  /* The server's own requests, for its jobs: about this machine's files. */
+  if (gbk_answerer_takes (f->type))
+    return gbk_answerer_handle (l->s->answerer, f);
   bool valid;
-  if (route_to_call (l->s, f, &valid))
+  if (gbk_asker_route (l->s->asker, f, &valid))
     return valid;
   Event *e = g_new0 (Event, 1);
   e->channel = f->channel;
@@ -1060,12 +698,23 @@ on_frame (Live *l, const GbkFrame *f)
     case GBK_MSG_LISTING: /* answers to a worker's request that has ended */
     case GBK_MSG_STATED:
     case GBK_MSG_DATA:
-    case GBK_MSG_END: event_free (e); return true;
+    case GBK_MSG_END:
+    case GBK_MSG_REMOVED:
+    case GBK_MSG_QUESTION:
+    case GBK_MSG_PROGRESS:
+    case GBK_MSG_CREATED:
+    case GBK_MSG_DONE: event_free (e); return true;
     case GBK_MSG_LIST:
     case GBK_MSG_LSTAT:
     case GBK_MSG_READ:
     case GBK_MSG_CREDIT:
     case GBK_MSG_CANCEL:
+    case GBK_MSG_REMOVE:
+    case GBK_MSG_SESSION:
+    case GBK_MSG_FORGET:
+    case GBK_MSG_SOURCES:
+    case GBK_MSG_JOB:
+    case GBK_MSG_ANSWER:
     case GBK_MSG_HELLO:
     case GBK_MSG_WATCH:
     case GBK_MSG_UNWATCH:
@@ -1125,23 +774,21 @@ run (Live *l, GError **error)
         }
       if (close_by == 0 && now >= next_ping)
         {
-          g_mutex_lock (&s->lock);
-          gbk_proto_put_empty (s->out, GBK_MSG_PING, 0);
-          g_mutex_unlock (&s->lock);
+          gbk_proto_put_empty (gbk_outbox_begin (s->out), GBK_MSG_PING, 0);
+          gbk_outbox_end (s->out);
           next_ping = now + (int64_t) s->ping_ms * 1000;
         }
 
-      g_mutex_lock (&s->lock);
-      bool pending = s->out->len > 0 && close_by == 0;
-      g_mutex_unlock (&s->lock);
+      bool pending = gbk_outbox_len (s->out) > 0 && close_by == 0;
       int64_t until
           = close_by != 0 ? close_by : MIN (next_ping, last_rx + (int64_t) s->dead_ms * 1000);
-      struct pollfd p[3] = {
+      struct pollfd p[4] = {
         { l->ssh.sock, (short) (POLLIN | (pending ? POLLOUT : 0)), 0 },
         { l->ssh.err, POLLIN, 0 },
         { s->wake_io, POLLIN, 0 },
+        { gbk_outbox_wake_fd (s->out), POLLIN, 0 },
       };
-      if (poll (p, 3, remaining_ms (until)) < 0 && errno != EINTR)
+      if (poll (p, 4, remaining_ms (until)) < 0 && errno != EINTR)
         {
           g_set_error (error, G_IO_ERROR, (int) g_io_error_from_errno (errno), "poll: %s",
                        g_strerror (errno));
@@ -1149,16 +796,18 @@ run (Live *l, GError **error)
         }
       if (p[2].revents & POLLIN)
         drain_eventfd (s->wake_io);
+      if (p[3].revents & POLLIN)
+        gbk_outbox_woken (s->out); /* new frames: sent when the socket takes them */
       if (p[1].revents)
         ssh_drain_stderr (&l->ssh);
       if (p[0].revents & POLLOUT)
         {
-          g_mutex_lock (&s->lock);
-          ssize_t n = send (l->ssh.sock, s->out->data, s->out->len, MSG_NOSIGNAL);
+          GByteArray *out = gbk_outbox_begin (s->out);
+          ssize_t n = send (l->ssh.sock, out->data, out->len, MSG_NOSIGNAL);
           int err = errno;
           if (n > 0)
-            g_byte_array_remove_range (s->out, 0, (guint) n);
-          g_mutex_unlock (&s->lock);
+            g_byte_array_remove_range (out, 0, (guint) n);
+          gbk_outbox_end (s->out);
           if (n < 0 && err != EAGAIN && err != EINTR)
             {
               g_set_error (error, G_IO_ERROR, G_IO_ERROR_CONNECTION_CLOSED,
@@ -1239,7 +888,8 @@ io_main (void *data)
   dead->error = g_steal_pointer (&error);
   if (dead->error == nullptr)
     dead->error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "The connection ended");
-  calls_dead (s, dead->error);
+  gbk_asker_dead (s->asker, dead->error);
+  gbk_answerer_stop (s->answerer);
   dead->needs_login = needs_login;
   post (s, dead);
   g_byte_array_unref (l.in);
@@ -1337,13 +987,11 @@ note_use (GbkConn *c)
 int64_t
 gbk_conn_unused_since (const GbkConn *c)
 {
-  /* A copy reading through it is a use too. */
-  if (g_atomic_int_get (&c->s->workers) > 0 || c->unused_since == 0)
+  /* A copy or a job working through it is a use too. */
+  int64_t asked = gbk_asker_unused_since (c->s->asker);
+  if (asked == 0 || c->unused_since == 0)
     return 0;
-  g_mutex_lock (&c->s->lock);
-  int64_t done = c->s->workers_done_us;
-  g_mutex_unlock (&c->s->lock);
-  return MAX (c->unused_since, done);
+  return MAX (c->unused_since, asked);
 }
 
 static void
@@ -1447,10 +1095,8 @@ on_events (int fd G_GNUC_UNUSED, GIOCondition cond G_GNUC_UNUSED, void *data)
 static void
 send_frame (GbkConn *c, void (*put) (GByteArray *, void *), void *arg)
 {
-  g_mutex_lock (&c->s->lock);
-  put (c->s->out, arg);
-  g_mutex_unlock (&c->s->lock);
-  poke (c->s->wake_io);
+  put (gbk_outbox_begin (c->s->out), arg);
+  gbk_outbox_end (c->s->out);
 }
 
 typedef struct
@@ -1484,7 +1130,7 @@ gbk_conn_watch (GbkConn *c, const char *path, GObject *owner, GbkConnScanFn fn, 
 {
   GbkConnWatch *w = g_new0 (GbkConnWatch, 1);
   w->conn = g_object_ref (c);
-  w->channel = new_channel ();
+  w->channel = gbk_peer_channel (false);
   g_weak_ref_init (&w->owner, owner);
   w->fn = fn;
   w->data = data;
@@ -1555,7 +1201,7 @@ gbk_conn_info (GbkConn *c, const char *path, GObject *owner, GbkConnInfoFn fn, v
       return;
     }
   uint64_t *key = g_new (uint64_t, 1);
-  *key = new_channel ();
+  *key = gbk_peer_channel (false);
   g_hash_table_insert (c->infos, key, r);
   note_use (c);
   PathFrame f = { GBK_MSG_GET_INFO, *key, path };
@@ -1581,12 +1227,12 @@ gbk_conn_new (const char *host, GbkTypeTable *types, GError **error)
   s->dead_ms = dead > 0 ? dead : GBK_CONN_DEAD_MS;
   s->connect_ms = conn > 0 ? conn : GBK_CONN_CONNECT_MS;
   g_mutex_init (&s->lock);
-  s->out = g_byte_array_new ();
+  s->out = gbk_outbox_new ();
   s->wake_io = eventfd (0, EFD_CLOEXEC | EFD_NONBLOCK);
   s->wake_main = eventfd (0, EFD_CLOEXEC | EFD_NONBLOCK);
   s->events = g_async_queue_new_full ((GDestroyNotify) event_free);
-  g_mutex_init (&s->calls_lock);
-  s->calls = g_hash_table_new (g_int64_hash, g_int64_equal);
+  s->asker = gbk_asker_new (false, s->out);
+  s->answerer = gbk_answerer_new (true, s->out);
   if (s->wake_io < 0 || s->wake_main < 0)
     gbk_fatal ("eventfd: %s", g_strerror (errno));
 
@@ -1699,13 +1345,19 @@ gbk_conn_init (GbkConn *c)
 }
 
 GbkSource *
-gbk_conn_source (GbkConn *c)
+gbk_conn_source (GbkConn *c, bool record)
 {
-  RemoteSource *r = g_new0 (RemoteSource, 1);
-  r->base.ops = &remote_ops;
-  r->base.local = false;
-  g_atomic_ref_count_inc (&c->s->rc);
-  r->s = c->s;
-  g_atomic_int_inc (&c->s->workers);
-  return &r->base;
+  return gbk_asker_source (c->s->asker, record);
+}
+
+GbkAsker *
+gbk_conn_asker (GbkConn *c)
+{
+  return gbk_asker_ref (c->s->asker);
+}
+
+GbkAnswerer *
+gbk_conn_answerer (GbkConn *c)
+{
+  return gbk_answerer_ref (c->s->answerer);
 }

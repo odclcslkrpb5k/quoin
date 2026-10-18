@@ -439,12 +439,110 @@ test_scan_refused (void)
   }
 }
 
+/* A job: its sources (many: several frames), the job itself, then its questions, answers,
+ * progress and the names it made, each round trip intact; what can't be is refused. */
+static void
+test_job_messages (void)
+{
+  g_autoptr (GPtrArray) sources = g_ptr_array_new_with_free_func (g_free);
+  g_autofree char *long_dir = g_strnfill (3000, 'd');
+  for (int i = 0; i < 1000; i++)
+    g_ptr_array_add (sources, g_strdup_printf ("/%s/%d", long_dir, i));
+  char dest[] = "/x y", rel[] = "rel", absolute[] = "/x";
+  GbkJobRequest r = { .kind = GBK_OP_MOVE, .sources_here = true, .session = 77, .dest = dest };
+  g_autoptr (GByteArray) out = g_byte_array_new ();
+  gbk_proto_put_job (out, 9, &r, sources);
+  g_autoptr (GArray) frames = frames_of (out);
+  g_assert_cmpuint (frames->len, >, 2);    /* the sources took several frames */
+  g_autoptr (GPtrArray) got = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; i + 1 < frames->len; i++)
+    g_assert_true (gbk_proto_get_sources (&g_array_index (frames, GbkFrame, i), got));
+  g_assert_cmpuint (got->len, ==, sources->len);
+  for (guint i = 0; i < got->len; i++)
+    g_assert_cmpstr (g_ptr_array_index (got, i), ==, g_ptr_array_index (sources, i));
+  GbkJobRequest back;
+  g_assert_true (gbk_proto_get_job (&g_array_index (frames, GbkFrame, frames->len - 1), &back));
+  g_assert_cmpint (back.kind, ==, GBK_OP_MOVE);
+  g_assert_true (back.sources_here);
+  g_assert_cmpuint (back.session, ==, 77);
+  g_assert_cmpstr (back.dest, ==, "/x y");
+  gbk_job_request_clear (&back);
+
+  /* A copy needs an absolute destination; a trash has none. */
+  GbkJobRequest bad[] = { { .kind = GBK_OP_COPY, .dest = rel },
+                          { .kind = GBK_OP_COPY, .dest = nullptr },
+                          { .kind = GBK_OP_TRASH, .dest = absolute } };
+  for (size_t i = 0; i < G_N_ELEMENTS (bad); i++)
+    {
+      g_autoptr (GByteArray) b = g_byte_array_new ();
+      gbk_proto_put_job (b, 9, &bad[i], sources);
+      g_autoptr (GArray) fs = frames_of (b);
+      g_assert_false (gbk_proto_get_job (&g_array_index (fs, GbkFrame, fs->len - 1), &back));
+    }
+
+  g_autoptr (GError) e = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED, "No");
+  g_autoptr (GByteArray) q = g_byte_array_new ();
+  gbk_proto_put_question (q, 9, GBK_ASK_CONFLICT, "/a", "/b", true, nullptr);
+  gbk_proto_put_question (q, 9, GBK_ASK_ERROR, "/a", nullptr, false, e);
+  gbk_proto_put_question (q, 9, GBK_ASK_UNTRASHABLE, "/a", nullptr, false, nullptr);
+  g_autoptr (GArray) qs = frames_of (q);
+  GbkAsk a;
+  g_assert_true (gbk_proto_get_question (&g_array_index (qs, GbkFrame, 0), &a));
+  g_assert_true (a.kind == GBK_ASK_CONFLICT && a.other_is_dir);
+  g_assert_cmpstr (a.other, ==, "/b");
+  gbk_ask_clear (&a);
+  g_assert_true (gbk_proto_get_question (&g_array_index (qs, GbkFrame, 1), &a));
+  g_assert_error (a.error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED);
+  g_assert_null (a.other);
+  gbk_ask_clear (&a);
+  g_assert_true (gbk_proto_get_question (&g_array_index (qs, GbkFrame, 2), &a));
+  g_assert_true (a.kind == GBK_ASK_UNTRASHABLE && a.error == nullptr && a.other == nullptr);
+  gbk_ask_clear (&a);
+
+  g_autoptr (GByteArray) rest = g_byte_array_new ();
+  gbk_proto_put_answer (rest, 9, GBK_CHOICE_KEEP_BOTH, true);
+  gbk_proto_put_progress (rest, 9, 5, 10, "/now");
+  g_autoptr (GPtrArray) names = g_ptr_array_new_with_free_func (g_free);
+  g_ptr_array_add (names, g_strdup ("made"));
+  gbk_proto_put_created (rest, 9, names);
+  gbk_proto_put_empty (rest, GBK_MSG_DONE, 9);
+  g_autoptr (GArray) rs = frames_of (rest);
+  GbkChoice ch;
+  bool all;
+  g_assert_true (gbk_proto_get_answer (&g_array_index (rs, GbkFrame, 0), &ch, &all));
+  g_assert_true (ch == GBK_CHOICE_KEEP_BOTH && all);
+  uint64_t done, total;
+  g_autofree char *current = nullptr;
+  g_assert_true (
+      gbk_proto_get_progress (&g_array_index (rs, GbkFrame, 1), &done, &total, &current));
+  g_assert_true (done == 5 && total == 10);
+  g_assert_cmpstr (current, ==, "/now");
+  g_autoptr (GPtrArray) made = g_ptr_array_new_with_free_func (g_free);
+  g_assert_true (gbk_proto_get_created (&g_array_index (rs, GbkFrame, 2), made));
+  g_assert_cmpstr (g_ptr_array_index (made, 0), ==, "made");
+  g_assert_true (gbk_proto_get_empty (&g_array_index (rs, GbkFrame, 3)));
+
+  /* A made name that isn't one name, and an empty list: refused. */
+  g_free (g_ptr_array_index (names, 0));
+  g_ptr_array_index (names, 0) = g_strdup ("a/b");
+  g_autoptr (GByteArray) badname = g_byte_array_new ();
+  gbk_proto_put_created (badname, 9, names);
+  g_autoptr (GArray) keep = nullptr;
+  g_assert_false (gbk_proto_get_created (only_frame (badname, &keep), made));
+  g_assert_cmpuint (made->len, ==, 1);
+  g_autoptr (GByteArray) none = g_byte_array_new ();
+  g_autoptr (GPtrArray) empty = g_ptr_array_new ();
+  gbk_proto_put_created (none, 9, empty);
+  g_assert_cmpuint (none->len, ==, 0);   /* no names, no frame */
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, nullptr);
   types = gbk_type_builder_finish (gbk_type_builder_new ());
   g_test_add_func ("/proto/magic", test_magic);
+  g_test_add_func ("/proto/job-messages", test_job_messages);
   g_test_add_func ("/proto/framing", test_framing);
   g_test_add_func ("/proto/hello-path-failed", test_hello_path_failed);
   g_test_add_func ("/proto/info", test_info);

@@ -21,7 +21,7 @@
  * locally); QUOIN_SERVE names the quoin-serve to send (default: next to this program). */
 #pragma once
 #include "loc.h"
-#include "proto.h"
+#include "peer.h"
 
 typedef enum
 {
@@ -77,10 +77,16 @@ void gbk_conn_info (GbkConn *c, const char *path, GObject *owner, GbkConnInfoFn 
  * added to the agent) or accept a host key. nullptr for an invalid host. g_strfreev. */
 [[nodiscard]] char **gbk_conn_login_argv (const char *host);
 
-/* A source for copies (fileops.h) reading from this machine through the connection, for
+/* A source for copies (fileops.h) reading from that machine through the connection, for
  * a job's worker thread: it blocks there, never here. Free it on any thread. A connection
- * that dies fails every read in progress at once. */
-[[nodiscard]] GbkSource *gbk_conn_source (GbkConn *c);
+ * that dies fails every read in progress at once. `record`: for a move (the source can
+ * remove what it copied, if unchanged). */
+[[nodiscard]] GbkSource *gbk_conn_source (GbkConn *c, bool record);
+/* For jobs that run there (peer.h): asking it to run them, and answering what they ask
+ * about this machine's files (only within the sessions such a job opens). Referenced;
+ * usable from any thread, and after the connection is gone (everything then fails). */
+[[nodiscard]] GbkAsker *gbk_conn_asker (GbkConn *c);
+[[nodiscard]] GbkAnswerer *gbk_conn_answerer (GbkConn *c);
 
 /* This machine's /etc/machine-id (hex), or "" without one. g_free. */
 [[nodiscard]] char *gbk_conn_local_machine_id (void);

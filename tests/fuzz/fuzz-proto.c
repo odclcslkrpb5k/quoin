@@ -106,9 +106,82 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
         case GBK_MSG_READ:
           {
             g_autofree char *path = nullptr;
+            uint64_t session;
             uint32_t credit;
-            if (gbk_proto_get_read (&f, &path, &credit))
+            if (gbk_proto_get_read (&f, &session, &path, &credit))
               g_assert (path[0] == '/');
+            break;
+          }
+        case GBK_MSG_LIST:
+        case GBK_MSG_LSTAT:
+        case GBK_MSG_REMOVE:
+          {
+            g_autofree char *path = nullptr;
+            uint64_t session;
+            if (gbk_proto_get_request (&f, &session, &path))
+              g_assert (path[0] == '/');
+            break;
+          }
+        case GBK_MSG_SESSION:
+          {
+            bool record;
+            g_assert (!gbk_proto_get_session (&f, &record) || f.len == 1);
+            break;
+          }
+        case GBK_MSG_SOURCES:
+        case GBK_MSG_CREATED:
+          {
+            g_autoptr (GPtrArray) got = g_ptr_array_new_with_free_func (g_free);
+            bool ok = f.type == GBK_MSG_SOURCES ? gbk_proto_get_sources (&f, got)
+                                                : gbk_proto_get_created (&f, got);
+            g_assert (ok == (got->len > 0));
+            for (guint i = 0; i < got->len; i++)
+              {
+                const char *str = g_ptr_array_index (got, i);
+                g_assert (f.type == GBK_MSG_SOURCES ? str[0] == '/'
+                                                    : gbk_entry_name_valid (str, strlen (str)));
+              }
+            break;
+          }
+        case GBK_MSG_JOB:
+          {
+            GbkJobRequest job;
+            if (gbk_proto_get_job (&f, &job))
+              {
+                g_assert ((job.dest != nullptr)
+                          == (job.kind == GBK_OP_COPY || job.kind == GBK_OP_MOVE));
+                g_assert (job.dest == nullptr || job.dest[0] == '/');
+                gbk_job_request_clear (&job);
+              }
+            break;
+          }
+        case GBK_MSG_QUESTION:
+          {
+            GbkAsk q;
+            if (gbk_proto_get_question (&f, &q))
+              {
+                g_assert (q.path[0] == '/');
+                g_assert ((q.other != nullptr) == (q.kind == GBK_ASK_CONFLICT));
+                g_assert ((q.error != nullptr) == (q.kind == GBK_ASK_ERROR));
+                g_assert (q.error == nullptr || g_utf8_validate (q.error->message, -1, nullptr));
+                gbk_ask_clear (&q);
+              }
+            break;
+          }
+        case GBK_MSG_ANSWER:
+          {
+            GbkChoice ch;
+            bool all;
+            if (gbk_proto_get_answer (&f, &ch, &all))
+              g_assert (ch <= GBK_CHOICE_CANCEL);
+            break;
+          }
+        case GBK_MSG_PROGRESS:
+          {
+            uint64_t d, t;
+            g_autofree char *current = nullptr;
+            if (gbk_proto_get_progress (&f, &d, &t, &current))
+              g_assert (current != nullptr);
             break;
           }
         case GBK_MSG_CREDIT:
@@ -119,8 +192,6 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
           }
         case GBK_MSG_WATCH:
         case GBK_MSG_GET_INFO:
-        case GBK_MSG_LIST:
-        case GBK_MSG_LSTAT:
           {
             g_autofree char *path = gbk_proto_get_path (&f);
             g_assert (path == nullptr || path[0] == '/');
@@ -130,6 +201,9 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
         case GBK_MSG_PING:
         case GBK_MSG_PONG:
         case GBK_MSG_CANCEL:
+        case GBK_MSG_REMOVED:
+        case GBK_MSG_FORGET:
+        case GBK_MSG_DONE:
         default:
           {
             bool empty = gbk_proto_get_empty (&f);

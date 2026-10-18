@@ -125,6 +125,26 @@ end_frame (GByteArray *out, size_t start)
     out->data[start + i] = (uint8_t) (body >> (8 * i));
 }
 
+/* A message cut at a character boundary to fit MESSAGE_MAX. */
+static void
+put_message (GByteArray *out, const char *msg)
+{
+  size_t len = strlen (msg);
+  if (len > MESSAGE_MAX)
+    len = (size_t) (g_utf8_find_prev_char (msg, msg + MESSAGE_MAX + 1) - msg);
+  put_u16 (out, (uint16_t) len);
+  g_byte_array_append (out, (const guint8 *) msg, (guint) len);
+}
+
+/* A GError as a G_IO_ERROR code (another domain: FAILED). */
+static uint32_t
+io_code (const GError *error)
+{
+  bool io = error->domain == G_IO_ERROR && error->code >= 0
+            && (unsigned) error->code < IO_ERROR_CODE_MAX;
+  return io ? (uint32_t) error->code : (uint32_t) G_IO_ERROR_FAILED;
+}
+
 void
 gbk_proto_put_magic (GByteArray *out, const char *build)
 {
@@ -162,16 +182,8 @@ void
 gbk_proto_put_failed (GByteArray *out, uint64_t channel, const GError *error)
 {
   size_t f = begin_frame (out, GBK_MSG_FAILED, channel);
-  bool io = error->domain == G_IO_ERROR && error->code >= 0
-            && (unsigned) error->code < IO_ERROR_CODE_MAX;
-  put_u32 (out, io ? (uint32_t) error->code : (uint32_t) G_IO_ERROR_FAILED);
-  /* Cut at a character boundary to fit. */
-  const char *msg = error->message;
-  size_t len = strlen (msg);
-  if (len > MESSAGE_MAX)
-    len = (size_t) (g_utf8_find_prev_char (msg, msg + MESSAGE_MAX + 1) - msg);
-  put_u16 (out, (uint16_t) len);
-  g_byte_array_append (out, (const guint8 *) msg, (guint) len);
+  put_u32 (out, io_code (error));
+  put_message (out, error->message);
   end_frame (out, f);
 }
 
@@ -373,12 +385,112 @@ gbk_proto_put_end (GByteArray *out, uint64_t channel, bool changed)
 }
 
 void
-gbk_proto_put_read (GByteArray *out, uint64_t channel, const char *path, uint32_t credit)
+gbk_proto_put_request (GByteArray *out, GbkMsgType type, uint64_t channel, uint64_t session,
+                       const char *path)
+{
+  size_t f = begin_frame (out, type, channel);
+  put_u64 (out, session);
+  put_str16 (out, path, PATH_MAX_BYTES);
+  end_frame (out, f);
+}
+
+void
+gbk_proto_put_read (GByteArray *out, uint64_t channel, uint64_t session, const char *path,
+                    uint32_t credit)
 {
   size_t f = begin_frame (out, GBK_MSG_READ, channel);
+  put_u64 (out, session);
   put_str16 (out, path, PATH_MAX_BYTES);
   put_u32 (out, credit);
   end_frame (out, f);
+}
+
+void
+gbk_proto_put_session (GByteArray *out, uint64_t session, bool record)
+{
+  size_t f = begin_frame (out, GBK_MSG_SESSION, session);
+  put_u8 (out, record ? 1 : 0);
+  end_frame (out, f);
+}
+
+/* Strings in as many frames of `type` as they need: u32 count, then each one. */
+static void
+put_strings (GByteArray *out, GbkMsgType type, uint64_t channel, const GPtrArray *strs, size_t max)
+{
+  const size_t budget = GBK_PROTO_FRAME_MAX - HEADER_BODY - 4u;
+  guint i = 0;
+  while (i < strs->len)
+    {
+      guint first = i;
+      size_t used = 0;
+      while (i < strs->len && used + 2u + strlen (g_ptr_array_index (strs, i)) <= budget)
+        used += 2u + strlen (g_ptr_array_index (strs, i++));
+      size_t f = begin_frame (out, type, channel);
+      put_u32 (out, i - first);
+      for (guint k = first; k < i; k++)
+        put_str16 (out, g_ptr_array_index (strs, k), max);
+      end_frame (out, f);
+    }
+}
+
+void
+gbk_proto_put_job (GByteArray *out, uint64_t channel, const GbkJobRequest *r,
+                   const GPtrArray *sources)
+{
+  put_strings (out, GBK_MSG_SOURCES, channel, sources, PATH_MAX_BYTES);
+  size_t f = begin_frame (out, GBK_MSG_JOB, channel);
+  put_u8 (out, (uint8_t) r->kind);
+  put_u8 (out, r->sources_here ? 1 : 0);
+  put_u64 (out, r->session);
+  put_str16 (out, r->dest != nullptr ? r->dest : "", PATH_MAX_BYTES);
+  end_frame (out, f);
+}
+
+void
+gbk_proto_put_question (GByteArray *out, uint64_t channel, GbkAskKind kind, const char *path,
+                        const char *other, bool other_is_dir, const GError *error)
+{
+  size_t f = begin_frame (out, GBK_MSG_QUESTION, channel);
+  put_u8 (out, (uint8_t) kind);
+  put_u8 (out, kind == GBK_ASK_CONFLICT && other_is_dir ? 1 : 0);
+  put_str16 (out, path, PATH_MAX_BYTES);
+  switch (kind)
+    {
+    case GBK_ASK_CONFLICT: put_str16 (out, other, PATH_MAX_BYTES); break;
+    case GBK_ASK_ERROR:
+      put_u32 (out, io_code (error));
+      put_message (out, error->message);
+      break;
+    case GBK_ASK_UNTRASHABLE: break;
+    default: gbk_fatal ("protocol: question kind %d", (int) kind);
+    }
+  end_frame (out, f);
+}
+
+void
+gbk_proto_put_answer (GByteArray *out, uint64_t channel, GbkChoice choice, bool apply_all)
+{
+  size_t f = begin_frame (out, GBK_MSG_ANSWER, channel);
+  put_u8 (out, (uint8_t) choice);
+  put_u8 (out, apply_all ? 1 : 0);
+  end_frame (out, f);
+}
+
+void
+gbk_proto_put_progress (GByteArray *out, uint64_t channel, uint64_t done, uint64_t total,
+                        const char *current)
+{
+  size_t f = begin_frame (out, GBK_MSG_PROGRESS, channel);
+  put_u64 (out, done);
+  put_u64 (out, total);
+  put_str16 (out, current, PATH_MAX_BYTES);
+  end_frame (out, f);
+}
+
+void
+gbk_proto_put_created (GByteArray *out, uint64_t channel, const GPtrArray *names)
+{
+  put_strings (out, GBK_MSG_CREATED, channel, names, NAME_MAX_BYTES);
 }
 
 void
@@ -422,7 +534,18 @@ known_type (uint8_t t)
     case GBK_MSG_LSTAT:
     case GBK_MSG_READ:
     case GBK_MSG_CREDIT:
-    case GBK_MSG_CANCEL: return true;
+    case GBK_MSG_CANCEL:
+    case GBK_MSG_REMOVED:
+    case GBK_MSG_QUESTION:
+    case GBK_MSG_PROGRESS:
+    case GBK_MSG_CREATED:
+    case GBK_MSG_DONE:
+    case GBK_MSG_REMOVE:
+    case GBK_MSG_SESSION:
+    case GBK_MSG_FORGET:
+    case GBK_MSG_SOURCES:
+    case GBK_MSG_JOB:
+    case GBK_MSG_ANSWER: return true;
     default: return false;
     }
 }
@@ -620,8 +743,7 @@ gbk_proto_get_hello (const GbkFrame *f, GbkHello *h)
 char *
 gbk_proto_get_path (const GbkFrame *f)
 {
-  if (f->type != GBK_MSG_WATCH && f->type != GBK_MSG_GET_INFO && f->type != GBK_MSG_LIST
-      && f->type != GBK_MSG_LSTAT)
+  if (f->type != GBK_MSG_WATCH && f->type != GBK_MSG_GET_INFO)
     return nullptr;
   Reader r = reader (f);
   g_autofree char *path = get_str (&r, PATH_MAX_BYTES);
@@ -632,7 +754,8 @@ bool
 gbk_proto_get_empty (const GbkFrame *f)
 {
   return (f->type == GBK_MSG_UNWATCH || f->type == GBK_MSG_PING || f->type == GBK_MSG_PONG
-          || f->type == GBK_MSG_CANCEL)
+          || f->type == GBK_MSG_CANCEL || f->type == GBK_MSG_REMOVED || f->type == GBK_MSG_FORGET
+          || f->type == GBK_MSG_DONE)
          && f->len == 0;
 }
 
@@ -896,18 +1019,209 @@ gbk_proto_get_end (const GbkFrame *f, bool *changed)
 }
 
 bool
-gbk_proto_get_read (const GbkFrame *f, char **path, uint32_t *credit)
+gbk_proto_get_read (const GbkFrame *f, uint64_t *session, char **path, uint32_t *credit)
 {
   *path = nullptr;
   if (f->type != GBK_MSG_READ)
     return false;
   Reader r = reader (f);
+  uint64_t s = get_u64 (&r);
   g_autofree char *p = get_str (&r, PATH_MAX_BYTES);
   uint32_t c = get_u32 (&r);
   if (!done (&r) || !absolute (p))
     return false;
+  *session = s;
   *path = g_steal_pointer (&p);
   *credit = c;
+  return true;
+}
+
+bool
+gbk_proto_get_request (const GbkFrame *f, uint64_t *session, char **path)
+{
+  *path = nullptr;
+  if (f->type != GBK_MSG_LIST && f->type != GBK_MSG_LSTAT && f->type != GBK_MSG_REMOVE)
+    return false;
+  Reader r = reader (f);
+  uint64_t s = get_u64 (&r);
+  g_autofree char *p = get_str (&r, PATH_MAX_BYTES);
+  if (!done (&r) || !absolute (p))
+    return false;
+  *session = s;
+  *path = g_steal_pointer (&p);
+  return true;
+}
+
+bool
+gbk_proto_get_session (const GbkFrame *f, bool *record)
+{
+  if (f->type != GBK_MSG_SESSION)
+    return false;
+  Reader r = reader (f);
+  uint8_t v = get_u8 (&r);
+  if (!done (&r) || v > 1)
+    return false;
+  *record = v == 1;
+  return true;
+}
+
+/* A string list frame (SOURCES, CREATED): each one checked by `valid`, appended to `out`
+ * only if all of them are. */
+static bool
+get_strings (const GbkFrame *f, size_t max, bool (*valid) (const char *), GPtrArray *out)
+{
+  Reader r = reader (f);
+  uint32_t n = get_u32 (&r);
+  g_autoptr (GPtrArray) got = g_ptr_array_new_with_free_func (g_free);
+  for (uint32_t i = 0; r.ok && i < n; i++)
+    {
+      char *s = get_str (&r, max);
+      if (s == nullptr || !valid (s))
+        {
+          g_free (s);
+          return false;
+        }
+      g_ptr_array_add (got, s);
+    }
+  if (!done (&r) || n == 0)
+    return false;
+  for (guint i = 0; i < got->len; i++)
+    g_ptr_array_add (out, g_steal_pointer (&got->pdata[i]));
+  return true;
+}
+
+static bool
+valid_absolute (const char *s)
+{
+  return absolute (s);
+}
+
+static bool
+valid_name (const char *s)
+{
+  return gbk_entry_name_valid (s, strlen (s));
+}
+
+bool
+gbk_proto_get_sources (const GbkFrame *f, GPtrArray *sources)
+{
+  return f->type == GBK_MSG_SOURCES && get_strings (f, PATH_MAX_BYTES, valid_absolute, sources);
+}
+
+bool
+gbk_proto_get_created (const GbkFrame *f, GPtrArray *names)
+{
+  return f->type == GBK_MSG_CREATED && get_strings (f, NAME_MAX_BYTES, valid_name, names);
+}
+
+void
+gbk_job_request_clear (GbkJobRequest *r)
+{
+  g_free (r->dest);
+  r->dest = nullptr;
+}
+
+bool
+gbk_proto_get_job (const GbkFrame *f, GbkJobRequest *r)
+{
+  *r = (GbkJobRequest) { 0 };
+  if (f->type != GBK_MSG_JOB)
+    return false;
+  Reader rd = reader (f);
+  uint8_t kind = get_u8 (&rd);
+  uint8_t here = get_u8 (&rd);
+  uint64_t session = get_u64 (&rd);
+  g_autofree char *dest = get_str (&rd, PATH_MAX_BYTES);
+  if (!done (&rd) || kind > GBK_OP_DELETE || here > 1)
+    return false;
+  bool needs_dest = kind == GBK_OP_COPY || kind == GBK_OP_MOVE;
+  if (needs_dest ? !absolute (dest) : dest[0] != '\0')
+    return false;
+  r->kind = (GbkOpKind) kind;
+  r->sources_here = here == 1;
+  r->session = session;
+  r->dest = needs_dest ? g_steal_pointer (&dest) : nullptr;
+  return true;
+}
+
+void
+gbk_ask_clear (GbkAsk *a)
+{
+  g_clear_pointer (&a->path, g_free);
+  g_clear_pointer (&a->other, g_free);
+  g_clear_error (&a->error);
+}
+
+bool
+gbk_proto_get_question (const GbkFrame *f, GbkAsk *a)
+{
+  *a = (GbkAsk) { 0 };
+  if (f->type != GBK_MSG_QUESTION)
+    return false;
+  Reader r = reader (f);
+  uint8_t kind = get_u8 (&r);
+  uint8_t dir = get_u8 (&r);
+  g_autofree char *path = get_str (&r, PATH_MAX_BYTES);
+  if (!r.ok || kind > GBK_ASK_UNTRASHABLE || dir > (kind == GBK_ASK_CONFLICT ? 1 : 0)
+      || !absolute (path))
+    return false;
+  g_autofree char *other = nullptr;
+  g_autoptr (GError) error = nullptr;
+  if (kind == GBK_ASK_CONFLICT)
+    {
+      other = get_str (&r, PATH_MAX_BYTES);
+      if (!absolute (other))
+        return false;
+    }
+  else if (kind == GBK_ASK_ERROR)
+    {
+      uint32_t code = get_u32 (&r);
+      g_autofree char *msg = get_str (&r, MESSAGE_MAX);
+      if (!r.ok || code >= IO_ERROR_CODE_MAX)
+        return false;
+      g_autofree char *shown = g_utf8_make_valid (msg, -1);
+      error = g_error_new_literal (G_IO_ERROR, (int) code, shown);
+    }
+  if (!done (&r))
+    return false;
+  a->kind = (GbkAskKind) kind;
+  a->other_is_dir = dir == 1;
+  a->path = g_steal_pointer (&path);
+  a->other = g_steal_pointer (&other);
+  a->error = g_steal_pointer (&error);
+  return true;
+}
+
+bool
+gbk_proto_get_answer (const GbkFrame *f, GbkChoice *choice, bool *apply_all)
+{
+  if (f->type != GBK_MSG_ANSWER)
+    return false;
+  Reader r = reader (f);
+  uint8_t c = get_u8 (&r);
+  uint8_t all = get_u8 (&r);
+  if (!done (&r) || c > GBK_CHOICE_CANCEL || all > 1)
+    return false;
+  *choice = (GbkChoice) c;
+  *apply_all = all == 1;
+  return true;
+}
+
+bool
+gbk_proto_get_progress (const GbkFrame *f, uint64_t *done_bytes, uint64_t *total, char **current)
+{
+  *current = nullptr;
+  if (f->type != GBK_MSG_PROGRESS)
+    return false;
+  Reader r = reader (f);
+  uint64_t d = get_u64 (&r);
+  uint64_t t = get_u64 (&r);
+  g_autofree char *c = get_str (&r, PATH_MAX_BYTES);
+  if (!done (&r))
+    return false;
+  *done_bytes = d;
+  *total = t;
+  *current = g_steal_pointer (&c);
   return true;
 }
 

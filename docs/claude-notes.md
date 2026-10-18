@@ -444,10 +444,28 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   fuzzed); fetch.c = Open/Open With remote files (cache, read-only, 7-day cleanup).
   Found: window teardown crash (two tabs, selection, first tab current) - fixed, tested.
   check-source `widening` rule after the 6th implicit-widening finding.
+  Phase 6a: src/peer.{h,c} (serve_lib) = both directions: GbkOutbox (frames from any
+  thread; replaced conn's out buffer and serve's done queue), GbkAsker (calls + a copy's
+  source + gbk_asker_run_job), GbkAnswerer (LIST/LSTAT/READ/REMOVE/GET_INFO tasks in
+  SESSIONS; laptop's is restricted: only its own sessions' roots, openat2
+  RESOLVE_BENEATH|NO_SYMLINKS; tests/test-peer.c), GbkJobRunner (server runs JOBs with
+  gbk_ops_run_from, QUESTION/ANSWER/PROGRESS/CREATED/DONE). Server channels have bit 63.
+  Moves delete originals via GbkSourceOps.remove = REMOVE in a recording session:
+  gbk_ops_remove_unchanged keeps anything not as FIRST listed. job.c plan_transfer picks
+  here / read-from-there / run-there. Cut/Paste/Paste Into now work remotely; drops onto
+  remote stay refused (phase 8) in ask_drop + view.
+- ANALYZER + REFCOUNTS: -fanalyzer can't follow refcounts: a task/job referenced by a
+  table AND its worker gets "use after free" on error paths. Give such things ONE owner
+  (the worker) and let tables borrow them under a lock (peer.c tasks and jobs).
+- SCRIPTED EDITS: Python str.replace replaces EVERY match (hit a second poll loop in
+  conn.c, 2026-10-18; UBSan caught the OOB). Use a match-exactly-once helper (out/edit.py,
+  `once(path, old, new)`: recreate it if out/ was cleaned) or the Edit tool.
 - UI rule (user, 2026-10-18): an action says what it will do before you click it. The Open
   entry names the application ("Open With Mousepad") whenever one app will be used.
 - CHAIN with && : a check run after a failing edit script tests unchanged code (did it
-  2026-10-17). Edits then `./build format && ./build check`.
+  2026-10-17). Edits then `./build format && ./build check`. RECURRED 2026-10-18 (the
+  rule was written down and still skipped), so now Engineer: out/edit.py leaves
+  out/EDIT-FAILED on a failed edit and ./build refuses to run while it exists.
 - FORMAT before CHECK: `./build format` rewrites C with clang-format; run it before every
   `./build check` (check refuses unformatted C; I tripped it twice in one session). Phase 0 there
   (fsync before deleting a moved source; reject "."/".." in entry validation) is a real

@@ -173,24 +173,26 @@ remote_item (const char *path, const char *mime, bool dir)
   return it;
 }
 
-/* On another machine: browsing, opening copies, copying here; nothing that changes or runs
- * anything there. */
+/* On another machine: browsing, opening copies, copying and moving between machines;
+ * nothing else that changes or runs anything there. */
 static void
 test_remote_menus (void)
 {
   assert_menu (items_of (remote_item ("/d/a.zip", "application/zip", false), (GbkItem *) nullptr),
-               ITEMS, "open with | copy copy-path | properties");
+               ITEMS, "open with | cut copy copy-path | properties");
   assert_menu (items_of (remote_item ("/d/sub", "inode/directory", true), (GbkItem *) nullptr),
-               ITEMS, "open open-tab open-window term-here | copy copy-path | properties");
-  assert_menu (items_of (remote_item ("/d", "inode/directory", true), (GbkItem *) nullptr), BG,
-               "copy-path | term-here | sort-name sort-mtime sort-size | hidden | properties");
+               ITEMS,
+               "open open-tab open-window term-here | cut copy paste-into copy-path | properties");
+  assert_menu (
+      items_of (remote_item ("/d", "inode/directory", true), (GbkItem *) nullptr), BG,
+      "paste copy-path | term-here | sort-name sort-mtime sort-size | hidden | properties");
   assert_menu (items_of (remote_item ("/d", "inode/directory", true), (GbkItem *) nullptr), BAR,
-               "open open-tab open-window term-here | copy copy-path | properties");
+               "open open-tab open-window term-here | copy paste-into copy-path | properties");
   /* Every kind is decided (an unknown one is fatal). */
   int works = 0;
   for (int k = GBK_MENU_SEPARATOR; k <= GBK_MENU_SHOW_HIDDEN; k++)
     works += gbk_menu_works_remote ((GbkMenuKind) k) ? 1 : 0;
-  g_assert_cmpint (works, ==, 13);
+  g_assert_cmpint (works, ==, 16);
   g_assert_true (gbk_menu_works_remote (GBK_MENU_OPEN));
   g_assert_false (gbk_menu_works_remote (GBK_MENU_EXECUTE));
   g_assert_false (gbk_menu_works_remote (GBK_MENU_ACTION));

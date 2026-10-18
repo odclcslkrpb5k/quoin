@@ -448,13 +448,6 @@ on_paste_files (GPtrArray *locs, bool cut, void *data)
       gbk_browser_set_message (active (w), "Nothing to paste");
       return;
     }
-  for (guint i = 0; cut && i < locs->len; i++)
-    if (!gbk_loc_is_local (g_ptr_array_index (locs, i)))
-      {
-        gbk_browser_set_message (active (w), "Moving files from another machine comes later; "
-                                             "copy them instead");
-        return;
-      }
   g_autoptr (GbkJob) job = gbk_job_new (cut ? GBK_OP_MOVE : GBK_OP_COPY, locs, dest);
   if (cut)
     g_object_set_data (G_OBJECT (job), "gbk-from-cut", GINT_TO_POINTER (1));
@@ -1022,8 +1015,16 @@ ask_drop (GbkWindow *w, GbkBrowser *b, GPtrArray *locs, GbkLoc *dest, GtkWidget 
       gbk_browser_set_message (b, "Already in this folder");
       return;
     }
-  if (refused_remote (b, GBK_MENU_PASTE))
-    return;
+  /* Drag and drop with other machines comes later (docs/remote-plan.md, phase 8). */
+  bool remote = !gbk_loc_is_local (dest);
+  for (guint i = 0; i < locs->len; i++)
+    remote = remote || !gbk_loc_is_local (g_ptr_array_index (locs, i));
+  if (remote)
+    {
+      gbk_browser_set_message (b, "Drag and drop with another machine isn't possible yet; "
+                                  "use Copy or Cut and Paste");
+      return;
+    }
   GtkWidget *menu = gtk_menu_new ();
   g_object_set_data_full (G_OBJECT (menu), KEY_DROP_LOCS, g_ptr_array_ref (locs),
                           (GDestroyNotify) g_ptr_array_unref);

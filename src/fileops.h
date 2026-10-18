@@ -63,6 +63,10 @@ typedef struct
   /* This machine's file descriptor (for copy_file_range and attributes), or -1. */
   int (*fd) (const GbkSourceFile *f);
   void (*close) (GbkSourceFile *f);
+  /* After a move's copy is safely stored: delete `path` (a source given to the move), but
+   * only what is still as it was when it was listed; anything changed since is kept, and
+   * that fails. nullptr where moving from it isn't possible. */
+  bool (*remove) (GbkSource *s, const char *path, GError **error);
   void (*free) (GbkSource *s);
 } GbkSourceOps;
 
@@ -78,9 +82,21 @@ struct GbkSource
 };
 
 /* `name` relative to `dirfd` (AT_FDCWD: a path), by lstat, with the link's target for a
- * link; named `entry_name` (nullptr: unnamed). nullptr with *error. */
+ * link; named `entry_name` (nullptr: unnamed). nullptr with *error. An empty `name` means
+ * `dirfd` itself (an O_PATH descriptor, which may be a link). */
 [[nodiscard]] GbkStatEntry *gbk_stat_entry_at (int dirfd, const char *name, const char *entry_name,
                                                GError **error);
+
+/* Is this file as it was when it was listed? `path` is the name it was listed under. */
+typedef bool (*GbkUnchangedFn) (const char *path, const struct stat *st, void *data);
+
+/* Delete `name` in folder `dirfd`, listed as `path`, and everything under it, but only
+ * what `unchanged` vouches for: anything else is kept (and so are the folders it is in),
+ * and that fails with G_IO_ERROR_FAILED saying how many were kept. Never follows a
+ * symlink. For a move from another machine (GbkSourceOps.remove), on the machine that
+ * holds the source. */
+[[nodiscard]] bool gbk_ops_remove_unchanged (int dirfd, const char *name, const char *path,
+                                             GbkUnchangedFn unchanged, void *data, GError **error);
 
 [[nodiscard]] GbkSource *gbk_source_local (void);
 void gbk_source_free (GbkSource *s);
@@ -122,8 +138,10 @@ typedef struct
  * dest_dir (char*, owned) so the caller can select them. */
 [[nodiscard]] bool gbk_ops_run (GbkOpKind kind, GPtrArray *sources, const char *dest_dir,
                                 const GbkOpsHooks *hooks, GPtrArray *created, GError **error);
-/* The same, reading the sources from `src` (another machine's paths). Only COPY reads from
- * another machine so far; any other kind there fails with G_IO_ERROR_NOT_SUPPORTED. */
+/* The same, reading the sources from `src` (another machine's paths). From another machine
+ * only COPY and MOVE are possible (others fail with G_IO_ERROR_NOT_SUPPORTED). A MOVE copies
+ * each source, makes the copy durable, then has the source remove it (GbkSourceOps.remove),
+ * only if nothing in it was skipped or failed. */
 [[nodiscard]] bool gbk_ops_run_from (GbkSource *src, GbkOpKind kind, GPtrArray *sources,
                                      const char *dest_dir, const GbkOpsHooks *hooks,
                                      GPtrArray *created, GError **error);

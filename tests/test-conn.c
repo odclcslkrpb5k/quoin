@@ -373,6 +373,8 @@ typedef struct
   int cancel_after;        /* >0: cancelled after this many progress calls */
   bool kill_server;        /* at cancel_after, kill the server instead */
   bool cancelled;
+  const char *edit_at_start; /* changed at the first progress call (after listing) */
+  const char *edit_on_conflict; /* changed when a conflict is asked */
 } Hooks;
 
 static GbkChoice
@@ -381,6 +383,11 @@ h_conflict (const char *src G_GNUC_UNUSED, const char *dst G_GNUC_UNUSED,
 {
   Hooks *h = data;
   h->conflicts++;
+  if (h->edit_on_conflict != nullptr)
+    {
+      g_usleep (20000);                  /* a later mtime, on any filesystem */
+      g_assert_true (g_file_set_contents (h->edit_on_conflict, "edited", -1, nullptr));
+    }
   return h->answer;
 }
 
@@ -399,6 +406,11 @@ h_progress (uint64_t done G_GNUC_UNUSED, uint64_t total G_GNUC_UNUSED,
 {
   Hooks *h = data;
   h->progress_calls++;
+  if (h->progress_calls == 1 && h->edit_at_start != nullptr)
+    {
+      g_usleep (20000);                  /* a later mtime, on any filesystem */
+      g_assert_true (g_file_set_contents (h->edit_at_start, "edited", -1, nullptr));
+    }
   if (h->cancel_after > 0 && h->progress_calls == h->cancel_after)
     {
       if (h->kill_server)
@@ -423,7 +435,7 @@ run_copy (GbkConn *c, const char *src_rel, const char *dst_rel, Hooks *h, GPtrAr
   g_ptr_array_add (srcs, g_build_filename (home, src_rel, nullptr));
   g_autofree char *dst = g_build_filename (home, dst_rel, nullptr);
   g_mkdir_with_parents (dst, 0755);
-  g_autoptr (GbkSource) source = gbk_conn_source (c);
+  g_autoptr (GbkSource) source = gbk_conn_source (c, false);
   return gbk_ops_run_from (source, GBK_OP_COPY, srcs, dst, &hooks, created, error);
 }
 
@@ -532,16 +544,17 @@ test_copy_from_remote (void)
   g_autofree char *d2_big = g_build_filename (home, "dst2", "big", nullptr);
   g_assert_false (g_file_test (d2_big, G_FILE_TEST_EXISTS));
 
-  /* Only copying reads from another machine for now. */
+  /* A source that doesn't record what it listed can't remove anything: no move. */
   GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, &h };
   g_autoptr (GPtrArray) srcs = g_ptr_array_new_with_free_func (g_free);
   g_ptr_array_add (srcs, g_build_filename (home, "tree", "small", nullptr));
   g_autofree char *dst3 = g_build_filename (home, "dst3", nullptr);
-  g_autoptr (GbkSource) source = gbk_conn_source (c);
-  g_autoptr (GError) unsupported = nullptr;
-  g_assert_false (
-      gbk_ops_run_from (source, GBK_OP_MOVE, srcs, dst3, &hooks, nullptr, &unsupported));
-  g_assert_error (unsupported, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+  g_mkdir_with_parents (dst3, 0755);
+  g_autoptr (GbkSource) source = gbk_conn_source (c, false);
+  int errors_before = h.errors;
+  g_autoptr (GError) unrecorded = nullptr;
+  g_assert_true (gbk_ops_run_from (source, GBK_OP_MOVE, srcs, dst3, &hooks, nullptr, &unrecorded));
+  g_assert_cmpint (h.errors, ==, errors_before + 1);  /* "kept the original" */
   g_assert_true (g_file_test (p_small, G_FILE_TEST_EXISTS));
 
   /* The connection dies mid-file: that item fails, nothing half-written stays. */
@@ -553,6 +566,154 @@ test_copy_from_remote (void)
   g_assert_false (temp_left ("dst4"));
   g_autofree char *d4_big = g_build_filename (home, "dst4", "big", nullptr);
   g_assert_false (g_file_test (d4_big, G_FILE_TEST_EXISTS));
+  g_object_unref (c);
+  g_assert_true (wait_until (no_conns, nullptr, 10000));
+}
+
+/* Run a COPY or MOVE of `src_rels` (here) into `dst_rel` there, as a job's worker does:
+ * the other machine runs it and reads the files from here, in a session for just them. */
+[[nodiscard]] static bool
+run_there (GbkConn *c, GbkOpKind kind, const char *const *src_rels, const char *dst_rel, Hooks *h,
+           GPtrArray *created, GError **error)
+{
+  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, h };
+  g_autoptr (GPtrArray) srcs = g_ptr_array_new_with_free_func (g_free);
+  for (size_t i = 0; src_rels[i] != nullptr; i++)
+    g_ptr_array_add (srcs, g_build_filename (home, src_rels[i], nullptr));
+  g_autofree char *dst = g_build_filename (home, dst_rel, nullptr);
+  g_mkdir_with_parents (dst, 0755);
+  g_autoptr (GbkAsker) asker = gbk_conn_asker (c);
+  g_autoptr (GbkAnswerer) answerer = gbk_conn_answerer (c);
+  uint64_t session = gbk_answerer_open (answerer, srcs, kind == GBK_OP_MOVE);
+  GbkJobRequest r = { .kind = kind, .sources_here = true, .session = session, .dest = dst };
+  bool ok = gbk_asker_run_job (asker, &r, srcs, &hooks, created, error);
+  gbk_answerer_close (answerer, session);
+  return ok;
+}
+
+static bool
+exists (const char *rel)
+{
+  g_autofree char *p = g_build_filename (home, rel, nullptr);
+  return g_file_test (p, G_FILE_TEST_EXISTS | G_FILE_TEST_IS_SYMLINK);
+}
+
+/* Copy and move from here to there: the other machine runs the job with the same file
+ * operations as here, asks its questions here, and reads the files from here. */
+static void
+test_copy_to_remote (void)
+{
+  put_big ("up/big", 3u << 20);
+  put ("up/sub/inner", "inner");
+  g_autofree char *p_ln = g_build_filename (home, "up", "ln", nullptr);
+  g_assert_cmpint (symlink ("sub/inner", p_ln), ==, 0);
+  GbkConn *c = connect_to ("ws");
+
+  Hooks h = { .answer = GBK_CHOICE_SKIP };
+  g_autoptr (GPtrArray) created = g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (GError) error = nullptr;
+  const char *const up[] = { "up", nullptr };
+  g_assert_true (run_there (c, GBK_OP_COPY, up, "there", &h, created, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (h.errors, ==, 0);
+  g_assert_cmpint (h.conflicts, ==, 0);
+  g_assert_cmpuint (created->len, ==, 1);
+  g_assert_cmpstr (g_ptr_array_index (created, 0), ==, "up");
+  g_assert_cmpint (h.progress_calls, >, 0);
+  assert_same_file ("up/big", "there/up/big");
+  assert_same_file ("up/sub/inner", "there/up/sub/inner");
+  g_autofree char *d_ln = g_build_filename (home, "there", "up", "ln", nullptr);
+  g_autofree char *target = g_file_read_link (d_ln, nullptr);
+  g_assert_cmpstr (target, ==, "sub/inner");
+
+  /* Again: the conflict is asked here; Keep Both makes "up (1)" there. */
+  Hooks both = { .answer = GBK_CHOICE_KEEP_BOTH };
+  g_autoptr (GPtrArray) created2 = g_ptr_array_new_with_free_func (g_free);
+  g_assert_true (run_there (c, GBK_OP_COPY, up, "there", &both, created2, &error));
+  g_assert_cmpint (both.conflicts, ==, 1);
+  g_assert_cmpstr (g_ptr_array_index (created2, 0), ==, "up (1)");
+  assert_same_file ("up/big", "there/up (1)/big");
+
+  /* Cancelled here: it stops there, leaving no half-written file. */
+  Hooks cancel = { .answer = GBK_CHOICE_SKIP, .cancel_after = 1 };
+  const char *const big[] = { "up/big", nullptr };
+  g_autoptr (GError) cancelled = nullptr;
+  gbk_answerer_set_read_delay_for_test (20);    /* 48 chunks: about a second */
+  g_assert_false (run_there (c, GBK_OP_COPY, big, "there2", &cancel, nullptr, &cancelled));
+  gbk_answerer_set_read_delay_for_test (0);
+  g_assert_error (cancelled, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+  g_assert_false (temp_left ("there2"));
+  g_assert_false (exists ("there2/big"));
+
+  /* Move: the originals go once the copy is safely there, except one that changed after
+   * it was listed: kept here, and the job says so. (The change is made while the job waits
+   * for an answer about "b", which is in the way there, before "a" is copied.) */
+  put ("mv/a/same", "1");
+  put ("mv/a/edited", "2");
+  put ("mv/b", "3");
+  put ("moved/b", "old");
+  g_autofree char *edited = g_build_filename (home, "mv", "a", "edited", nullptr);
+  Hooks mv = { .answer = GBK_CHOICE_REPLACE, .edit_on_conflict = edited };
+  const char *const both_srcs[] = { "mv/b", "mv/a", nullptr };
+  g_autoptr (GError) mv_error = nullptr;
+  g_assert_true (run_there (c, GBK_OP_MOVE, both_srcs, "moved", &mv, nullptr, &mv_error));
+  g_assert_no_error (mv_error);
+  g_assert_cmpint (mv.conflicts, ==, 1);
+  g_assert_cmpint (mv.errors, ==, 1);
+  g_autofree char *moved_b = g_build_filename (home, "moved", "b", nullptr);
+  g_autofree char *b_text = nullptr;
+  g_assert_true (g_file_get_contents (moved_b, &b_text, nullptr, nullptr));
+  g_assert_cmpstr (b_text, ==, "3");                  /* replaced, as answered */
+  g_assert_false (exists ("mv/b"));
+  g_assert_false (exists ("mv/a/same"));
+  g_assert_true (exists ("mv/a/edited"));
+  g_assert_true (exists ("moved/b"));
+  g_assert_true (exists ("moved/a/same"));
+  g_assert_true (exists ("moved/a/edited"));
+  g_object_unref (c);
+  g_assert_true (wait_until (no_conns, nullptr, 10000));
+}
+
+/* Move from there to here: the originals there go once the copy here is safely stored,
+ * except one that changed after it was listed. */
+static void
+test_move_from_remote (void)
+{
+  put ("far/a/same", "1");
+  put ("far/a/edited", "2");
+  GbkConn *c = connect_to ("ws");
+  g_autofree char *edited = g_build_filename (home, "far", "a", "edited", nullptr);
+  Hooks h = { .answer = GBK_CHOICE_SKIP, .edit_at_start = edited };
+  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, &h };
+  g_autoptr (GPtrArray) srcs = g_ptr_array_new_with_free_func (g_free);
+  g_ptr_array_add (srcs, g_build_filename (home, "far", "a", nullptr));
+  g_autofree char *dst = g_build_filename (home, "near", nullptr);
+  g_mkdir_with_parents (dst, 0755);
+  int flushes = gbk_ops_flushes ();
+  g_autoptr (GbkSource) source = gbk_conn_source (c, true);
+  g_autoptr (GError) error = nullptr;
+  g_assert_true (gbk_ops_run_from (source, GBK_OP_MOVE, srcs, dst, &hooks, nullptr, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (gbk_ops_flushes (), ==, flushes + 1);   /* stored safely first */
+  g_assert_cmpint (h.errors, ==, 1);
+  g_assert_false (exists ("far/a/same"));
+  g_assert_true (exists ("far/a/edited"));
+  g_assert_true (exists ("near/a/same"));
+  g_assert_true (exists ("near/a/edited"));
+
+  /* Without the change, everything goes. */
+  put ("far2/x", "x");
+  Hooks h2 = { .answer = GBK_CHOICE_SKIP };
+  GbkOpsHooks hooks2 = { h_conflict, h_error, nullptr, h_progress, h_cancelled, &h2 };
+  g_autoptr (GPtrArray) srcs2 = g_ptr_array_new_with_free_func (g_free);
+  g_ptr_array_add (srcs2, g_build_filename (home, "far2", nullptr));
+  g_autoptr (GbkSource) source2 = gbk_conn_source (c, true);
+  g_assert_true (gbk_ops_run_from (source2, GBK_OP_MOVE, srcs2, dst, &hooks2, nullptr, &error));
+  g_assert_cmpint (h2.errors, ==, 0);
+  g_assert_false (exists ("far2"));
+  g_assert_true (exists ("near/far2/x"));
+  g_clear_pointer (&source, gbk_source_free);
+  g_clear_pointer (&source2, gbk_source_free);
   g_object_unref (c);
   g_assert_true (wait_until (no_conns, nullptr, 10000));
 }
@@ -582,6 +743,8 @@ main (int argc, char **argv)
   g_test_add_func ("/conn/server-frozen", test_server_frozen);
   g_test_add_func ("/conn/owner-gone", test_owner_gone);
   g_test_add_func ("/conn/copy-from-remote", test_copy_from_remote);
+  g_test_add_func ("/conn/copy-to-remote", test_copy_to_remote);
+  g_test_add_func ("/conn/move-from-remote", test_move_from_remote);
   int status = g_test_run ();
   gbk_type_table_unref (types);
   if (gbk_lifetime_live () != 0)
