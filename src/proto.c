@@ -376,11 +376,31 @@ gbk_proto_put_data (GByteArray *out, uint64_t channel, const void *data, size_t 
   end_frame (out, f);
 }
 
+static void
+put_token (GByteArray *out, const GbkFileToken *t)
+{
+  put_u64 (out, t->dev);
+  put_u64 (out, t->ino);
+  put_u64 (out, t->size);
+  put_u64 (out, t->nlink);
+  put_i64 (out, t->mtime_ns);
+  put_i64 (out, t->ctime_ns);
+}
+
 void
-gbk_proto_put_end (GByteArray *out, uint64_t channel, bool changed)
+gbk_proto_put_end (GByteArray *out, uint64_t channel, bool changed, const GbkFileToken *as_read)
 {
   size_t f = begin_frame (out, GBK_MSG_END, channel);
   put_u8 (out, changed ? 1 : 0);
+  put_token (out, as_read);
+  end_frame (out, f);
+}
+
+void
+gbk_proto_put_uploaded (GByteArray *out, uint64_t channel, const GbkFileToken *t)
+{
+  size_t f = begin_frame (out, GBK_MSG_UPLOADED, channel);
+  put_token (out, t);
   end_frame (out, f);
 }
 
@@ -443,6 +463,7 @@ gbk_proto_put_job (GByteArray *out, uint64_t channel, const GbkJobRequest *r,
   put_u8 (out, r->sources_here ? 1 : 0);
   put_u64 (out, r->session);
   put_str16 (out, r->dest != nullptr ? r->dest : "", PATH_MAX_BYTES);
+  put_token (out, &r->base);
   end_frame (out, f);
 }
 
@@ -452,7 +473,7 @@ gbk_proto_put_question (GByteArray *out, uint64_t channel, GbkAskKind kind, cons
 {
   size_t f = begin_frame (out, GBK_MSG_QUESTION, channel);
   put_u8 (out, (uint8_t) kind);
-  put_u8 (out, kind == GBK_ASK_CONFLICT && other_is_dir ? 1 : 0);
+  put_u8 (out, (kind == GBK_ASK_CONFLICT || kind == GBK_ASK_UPLOAD) && other_is_dir ? 1 : 0);
   put_str16 (out, path, PATH_MAX_BYTES);
   switch (kind)
     {
@@ -461,7 +482,8 @@ gbk_proto_put_question (GByteArray *out, uint64_t channel, GbkAskKind kind, cons
       put_u32 (out, io_code (error));
       put_message (out, error->message);
       break;
-    case GBK_ASK_UNTRASHABLE: break;
+    case GBK_ASK_UNTRASHABLE:
+    case GBK_ASK_UPLOAD: break;
     default: gbk_fatal ("protocol: question kind %d", (int) kind);
     }
   end_frame (out, f);
@@ -545,7 +567,10 @@ known_type (uint8_t t)
     case GBK_MSG_FORGET:
     case GBK_MSG_SOURCES:
     case GBK_MSG_JOB:
-    case GBK_MSG_ANSWER: return true;
+    case GBK_MSG_ANSWER:
+    case GBK_MSG_RESOLVE:
+    case GBK_MSG_RESOLVED:
+    case GBK_MSG_UPLOADED: return true;
     default: return false;
     }
 }
@@ -743,7 +768,8 @@ gbk_proto_get_hello (const GbkFrame *f, GbkHello *h)
 char *
 gbk_proto_get_path (const GbkFrame *f)
 {
-  if (f->type != GBK_MSG_WATCH && f->type != GBK_MSG_GET_INFO)
+  if (f->type != GBK_MSG_WATCH && f->type != GBK_MSG_GET_INFO && f->type != GBK_MSG_RESOLVE
+      && f->type != GBK_MSG_RESOLVED)
     return nullptr;
   Reader r = reader (f);
   g_autofree char *path = get_str (&r, PATH_MAX_BYTES);
@@ -1005,16 +1031,44 @@ gbk_proto_get_data (const GbkFrame *f, const uint8_t **data, size_t *len)
   return true;
 }
 
+static GbkFileToken
+get_token (Reader *r)
+{
+  GbkFileToken t;
+  t.dev = get_u64 (r);
+  t.ino = get_u64 (r);
+  t.size = get_u64 (r);
+  t.nlink = get_u64 (r);
+  t.mtime_ns = get_i64 (r);
+  t.ctime_ns = get_i64 (r);
+  return t;
+}
+
 bool
-gbk_proto_get_end (const GbkFrame *f, bool *changed)
+gbk_proto_get_end (const GbkFrame *f, bool *changed, GbkFileToken *as_read)
 {
   if (f->type != GBK_MSG_END)
     return false;
   Reader r = reader (f);
   uint8_t c = get_u8 (&r);
+  GbkFileToken t = get_token (&r);
   if (!done (&r) || c > 1)
     return false;
   *changed = c == 1;
+  *as_read = t;
+  return true;
+}
+
+bool
+gbk_proto_get_uploaded (const GbkFrame *f, GbkFileToken *t)
+{
+  if (f->type != GBK_MSG_UPLOADED)
+    return false;
+  Reader r = reader (f);
+  GbkFileToken got = get_token (&r);
+  if (!done (&r))
+    return false;
+  *t = got;
   return true;
 }
 
@@ -1132,15 +1186,17 @@ gbk_proto_get_job (const GbkFrame *f, GbkJobRequest *r)
   uint8_t here = get_u8 (&rd);
   uint64_t session = get_u64 (&rd);
   g_autofree char *dest = get_str (&rd, PATH_MAX_BYTES);
-  if (!done (&rd) || kind > GBK_OP_DELETE || here > 1)
+  GbkFileToken base = get_token (&rd);
+  if (!done (&rd) || kind > GBK_OP_UPLOAD || here > 1)
     return false;
-  bool needs_dest = kind == GBK_OP_COPY || kind == GBK_OP_MOVE;
+  bool needs_dest = kind == GBK_OP_COPY || kind == GBK_OP_MOVE || kind == GBK_OP_UPLOAD;
   if (needs_dest ? !absolute (dest) : dest[0] != '\0')
     return false;
   r->kind = (GbkOpKind) kind;
   r->sources_here = here == 1;
   r->session = session;
   r->dest = needs_dest ? g_steal_pointer (&dest) : nullptr;
+  r->base = base;
   return true;
 }
 
@@ -1162,8 +1218,8 @@ gbk_proto_get_question (const GbkFrame *f, GbkAsk *a)
   uint8_t kind = get_u8 (&r);
   uint8_t dir = get_u8 (&r);
   g_autofree char *path = get_str (&r, PATH_MAX_BYTES);
-  if (!r.ok || kind > GBK_ASK_UNTRASHABLE || dir > (kind == GBK_ASK_CONFLICT ? 1 : 0)
-      || !absolute (path))
+  bool flagged = kind == GBK_ASK_CONFLICT || kind == GBK_ASK_UPLOAD;
+  if (!r.ok || kind > GBK_ASK_UPLOAD || dir > (flagged ? 1 : 0) || !absolute (path))
     return false;
   g_autofree char *other = nullptr;
   g_autoptr (GError) error = nullptr;

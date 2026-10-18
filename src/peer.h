@@ -74,9 +74,11 @@ int64_t gbk_asker_unused_since (GbkAsker *a);
 
 /* Run `r` on the other machine, from a worker thread, which it blocks: questions go to
  * `hooks` and their answers back, progress to hooks->progress, and the names made in the
- * destination into `created` (may be nullptr). Cancelling (hooks->cancelled) stops it there too. */
+ * destination into `created` (may be nullptr). Cancelling (hooks->cancelled) stops it there
+ * too. UPLOAD: *uploaded (may be nullptr) gets the new file's state, when one was written. */
 [[nodiscard]] bool gbk_asker_run_job (GbkAsker *a, const GbkJobRequest *r, const GPtrArray *sources,
-                                      const GbkOpsHooks *hooks, GPtrArray *created, GError **error);
+                                      const GbkOpsHooks *hooks, GPtrArray *created,
+                                      GbkFileToken *uploaded, GError **error);
 
 /* ---- answering ---- */
 

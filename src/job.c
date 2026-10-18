@@ -20,6 +20,9 @@ typedef struct
   GError *error;
   GPtrArray *created;
   GbkFileInfo *info;
+  GPtrArray *fetched;      /* FETCH: GbkFetched* */
+  bool uploaded;           /* UPLOAD: one was written, its state in `token` */
+  GbkFileToken token;
 } Msg;
 
 /* Shared between the main thread and the worker. */
@@ -45,6 +48,8 @@ typedef struct
   GbkAnswerer *answerer;
   GPtrArray *sources;      /* paths on the machine that has them */
   char *dest;              /* a path on the machine that has it */
+  GPtrArray *dirs;         /* FETCH: a folder here for each source */
+  GbkFileToken base;       /* UPLOAD: the file there as it was opened */
   char *name;              /* rename: the new name; create: the name to create */
   uint32_t rwx;            /* permissions */
   int64_t last_progress;   /* worker only */
@@ -62,6 +67,9 @@ struct _GbkJob
   char *current;
   GPtrArray *created;
   GbkFileInfo *info;
+  GPtrArray *fetched;
+  bool uploaded;
+  GbkFileToken token;
 };
 
 G_DEFINE_FINAL_TYPE (GbkJob, gbk_job, G_TYPE_OBJECT)
@@ -91,7 +99,18 @@ msg_free (Msg *m)
   g_clear_error (&m->error);
   g_clear_pointer (&m->created, g_ptr_array_unref);
   g_clear_pointer (&m->info, gbk_file_info_free);
+  g_clear_pointer (&m->fetched, g_ptr_array_unref);
   g_free (m);
+}
+
+void
+gbk_fetched_free (GbkFetched *f)
+{
+  if (f == nullptr)
+    return;
+  g_free (f->name);
+  g_free (f->remote);
+  g_free (f);
 }
 
 static void
@@ -105,6 +124,7 @@ shared_unref (Shared *s)
   g_cond_clear (&s->cond);
   g_ptr_array_unref (s->sources);
   g_free (s->dest);
+  g_clear_pointer (&s->dirs, g_ptr_array_unref);
   g_clear_error (&s->refused);
   gbk_source_free (s->source);
   gbk_asker_unref (s->asker);
@@ -167,6 +187,12 @@ static GbkChoice
 hook_error (const char *path, const GError *error, void *data)
 {
   return ask (data, GBK_QUESTION_ERROR, path, error->message, false, nullptr);
+}
+
+static GbkChoice
+hook_upload_conflict (const char *target, bool linked, void *data)
+{
+  return ask (data, GBK_QUESTION_UPLOAD, target, nullptr, linked, nullptr);
 }
 
 static bool
@@ -233,9 +259,157 @@ run_transfer (Shared *s, GbkOpKind kind, const GbkOpsHooks *hooks, GPtrArray *cr
   bool here = s->answerer != nullptr;
   uint64_t session = here ? gbk_answerer_open (s->answerer, s->sources, kind == GBK_OP_MOVE) : 0;
   GbkJobRequest req = { .kind = kind, .sources_here = here, .session = session, .dest = s->dest };
-  bool ok = gbk_asker_run_job (s->asker, &req, s->sources, hooks, created, error);
+  bool ok = gbk_asker_run_job (s->asker, &req, s->sources, hooks, created, nullptr, error);
   if (here)
     gbk_answerer_close (s->answerer, session);
+  return ok;
+}
+
+/* One file from the other machine into `dir` here as `name`: the file there as read in
+ * *token. The copy is made only if it all came unchanged. */
+[[nodiscard]] static bool
+fetch_one (Shared *s, const GbkOpsHooks *hooks, const char *remote, const char *dir,
+           const char *name, uint64_t *done, uint64_t total, GbkFileToken *token, GError **error)
+{
+  GbkSourceFile *f = s->source->ops->open (s->source, remote, error);
+  if (f == nullptr)
+    return false;
+  g_autofree char *local = g_build_filename (dir, name, nullptr);
+  int out = open (local, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+  if (out < 0)
+    {
+      g_set_error (error, G_IO_ERROR, (int) g_io_error_from_errno (errno), "%s",
+                   g_strerror (errno));
+      s->source->ops->close (f);
+      return false;
+    }
+  g_autofree char *buf = g_malloc (GBK_PROTO_DATA_MAX);
+  bool ok = true;
+  for (;;)
+    {
+      ssize_t n = s->source->ops->read (f, buf, GBK_PROTO_DATA_MAX, error);
+      if (n <= 0)
+        {
+          ok = n == 0;
+          break;
+        }
+      for (ssize_t off = 0; ok && off < n;)
+        {
+          ssize_t w = write (out, buf + off, (size_t) (n - off));
+          if (w < 0 && errno == EINTR)
+            continue;
+          if (w < 0)
+            {
+              g_set_error (error, G_IO_ERROR, (int) g_io_error_from_errno (errno), "%s",
+                           g_strerror (errno));
+              ok = false;
+            }
+          else
+            off += w;
+        }
+      if (!ok)
+        break;
+      *done += (uint64_t) n;
+      hooks->progress (*done, total, remote, hooks->data);
+    }
+  if (ok && !s->source->ops->state (f, token))
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, "It changed while it was copied");
+      ok = false;
+    }
+  s->source->ops->close (f);
+  if (ok && fsync (out) != 0)
+    {
+      g_set_error (error, G_IO_ERROR, (int) g_io_error_from_errno (errno), "%s",
+                   g_strerror (errno));
+      ok = false;
+    }
+  close (out);
+  if (!ok)
+    unlink (local);
+  return ok;
+}
+
+static void
+free_error (void *e)
+{
+  if (e != nullptr)
+    g_error_free (e);
+}
+
+/* Every source, followed through links there, into its own folder here. A file that can't
+ * come is asked about (Skip / Cancel). */
+static void
+run_fetch (Shared *s, const GbkOpsHooks *hooks, GPtrArray *fetched, GError **error)
+{
+  s->source->cancelled = hooks->cancelled;
+  s->source->cancel_data = hooks->data;
+  g_autoptr (GPtrArray) real = g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (GPtrArray) why = g_ptr_array_new_with_free_func (free_error);   /* or nullptr */
+  uint64_t total = 0, done = 0;
+  for (guint i = 0; i < s->sources->len; i++)
+    {
+      const char *path = g_ptr_array_index (s->sources, i);
+      GError *e = nullptr;
+      char *r = s->source->ops->resolve (s->source, path, &e);
+      g_autoptr (GbkStatEntry) st
+          = r != nullptr ? s->source->ops->lstat (s->source, r, &e) : nullptr;
+      if (st != nullptr && !S_ISREG (st->mode))
+        e = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_REGULAR_FILE, "Not a file");
+      else if (st != nullptr)
+        total += st->size;
+      g_ptr_array_add (real, e == nullptr ? r : nullptr);
+      if (e != nullptr)
+        g_free (r);
+      g_ptr_array_add (why, e);
+    }
+  for (guint i = 0; i < s->sources->len && !is_cancelled (s); i++)
+    {
+      const char *path = g_ptr_array_index (s->sources, i);
+      const char *remote = g_ptr_array_index (real, i);
+      g_autoptr (GError) e
+          = remote == nullptr ? g_error_copy (g_ptr_array_index (why, i)) : nullptr;
+      g_autofree char *name = g_path_get_basename (path);
+      GbkFileToken token = { 0 };
+      if (e == nullptr
+          && fetch_one (s, hooks, remote, g_ptr_array_index (s->dirs, i), name, &done, total,
+                        &token, &e))
+        {
+          GbkFetched *f = g_new0 (GbkFetched, 1);
+          f->index = i;
+          f->name = g_steal_pointer (&name);
+          f->remote = g_strdup (remote);
+          f->token = token;
+          g_ptr_array_add (fetched, f);
+          continue;
+        }
+      if (is_cancelled (s) || g_error_matches (e, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+        break;
+      g_autofree char *shown = g_filename_display_basename (path);
+      g_autoptr (GError) told
+          = g_error_new (e->domain, e->code, "Can't open %s: %s", shown, e->message);
+      if (hook_error (path, told, s) == GBK_CHOICE_CANCEL)
+        break;
+    }
+  if (is_cancelled (s))
+    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Cancelled");
+}
+
+/* The edited copy over the file there, if that is still as it was. */
+static bool
+run_upload (Shared *s, const GbkOpsHooks *hooks, Msg *done)
+{
+  uint64_t session = gbk_answerer_open (s->answerer, s->sources, false);
+  GbkJobRequest req = { .kind = GBK_OP_UPLOAD,
+                        .sources_here = true,
+                        .session = session,
+                        .dest = s->dest,
+                        .base = s->base };
+  done->token = (GbkFileToken) { 0 };
+  bool ok = gbk_asker_run_job (s->asker, &req, s->sources, hooks, done->created, &done->token,
+                               &done->error);
+  gbk_answerer_close (s->answerer, session);
+  done->uploaded = ok && done->created->len > 0;
   return ok;
 }
 
@@ -253,8 +427,8 @@ static void *
 worker (void *data)
 {
   Shared *s = data;
-  GbkOpsHooks hooks
-      = { hook_conflict, hook_error, hook_untrashable, hook_progress, hook_cancelled, s };
+  GbkOpsHooks hooks = { hook_conflict,  hook_error, hook_untrashable,    hook_progress,
+                        hook_cancelled, s,          hook_upload_conflict };
   Msg *done = g_new0 (Msg, 1);
   done->type = MSG_FINISHED;
   done->created = g_ptr_array_new_with_free_func (g_free);
@@ -292,6 +466,14 @@ worker (void *data)
       agree (ok, done->error);
       break;
     case GBK_JOB_INFO: done->info = gbk_ops_info (first, &done->error); break;
+    case GBK_JOB_FETCH:
+      done->fetched = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_fetched_free);
+      run_fetch (s, &hooks, done->fetched, &done->error);
+      break;
+    case GBK_JOB_UPLOAD:
+      ok = run_upload (s, &hooks, done);
+      agree (ok, done->error);
+      break;
     default: gbk_fatal ("bad job kind %d", (int) s->kind);
     }
   post_msg (s, done);
@@ -310,6 +492,10 @@ finish (GbkJob *job, Msg *m)
   job->created = g_steal_pointer (&m->created);
   g_clear_pointer (&job->info, gbk_file_info_free);
   job->info = g_steal_pointer (&m->info);
+  g_clear_pointer (&job->fetched, g_ptr_array_unref);
+  job->fetched = g_steal_pointer (&m->fetched);
+  job->uploaded = m->uploaded;
+  job->token = m->token;
   gbk_source_cancel (&job->watch);
   g_signal_emit (job, signals[SIGNAL_FINISHED], 0, m->error);
   g_atomic_int_dec_and_test (&live_jobs);
@@ -415,6 +601,7 @@ gbk_job_finalize (GObject *o)
   g_free (job->current);
   g_clear_pointer (&job->created, g_ptr_array_unref);
   g_clear_pointer (&job->info, gbk_file_info_free);
+  g_clear_pointer (&job->fetched, g_ptr_array_unref);
   G_OBJECT_CLASS (gbk_job_parent_class)->finalize (o);
 }
 
@@ -555,6 +742,7 @@ gbk_job_new (GbkOpKind kind, const GPtrArray *sources, GbkLoc *dest_dir)
       k = GBK_JOB_DELETE;
       dest_dir = nullptr;
       break;
+    case GBK_OP_UPLOAD: /* gbk_job_new_upload */
     default: gbk_fatal ("bad operation %d", (int) kind);
     }
   return job_new (k, sources, dest_dir);
@@ -606,6 +794,77 @@ GbkJob *
 gbk_job_new_info (GbkLoc *loc)
 {
   return job_new_one (GBK_JOB_INFO, loc, nullptr);
+}
+
+/* A job on one other machine's files, through its connection: nullptr with s->refused. */
+static GbkConn *
+remote_conn (Shared *s, const GbkLoc *loc)
+{
+  if (gbk_loc_is_local (loc))
+    {
+      s->refused
+          = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "That is on this machine");
+      return nullptr;
+    }
+  return conn_for (s, gbk_loc_host (loc));
+}
+
+GbkJob *
+gbk_job_new_fetch (const GPtrArray *locs, const GPtrArray *dirs)
+{
+  g_autoptr (GPtrArray) none = gbk_loc_array_new ();
+  GbkJob *job = job_new (GBK_JOB_FETCH, none, nullptr);
+  Shared *s = job->s;
+  const char *host = one_machine (locs);
+  if (locs->len == 0 || locs->len != dirs->len || host == nullptr || host[0] == '\0')
+    {
+      s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                        "Open files from one other machine at a time");
+      return job;
+    }
+  g_autoptr (GbkConn) c = remote_conn (s, g_ptr_array_index (locs, 0));
+  if (c == nullptr)
+    return job;
+  s->source = gbk_conn_source (c, false);
+  g_ptr_array_unref (s->sources);
+  s->sources = paths_of (locs);
+  s->dirs = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; i < dirs->len; i++)
+    g_ptr_array_add (s->dirs, g_strdup (g_ptr_array_index (dirs, i)));
+  return job;
+}
+
+GbkJob *
+gbk_job_new_upload (const char *local, const GbkLoc *target, const GbkFileToken *base)
+{
+  g_autoptr (GPtrArray) none = gbk_loc_array_new ();
+  g_autoptr (GbkLoc) dir = gbk_loc_parent (target);
+  GbkJob *job = job_new (GBK_JOB_UPLOAD, none, nullptr);
+  job->dest_loc = gbk_loc_ref (dir);
+  Shared *s = job->s;
+  g_autoptr (GbkConn) c = remote_conn (s, target);
+  if (c == nullptr)
+    return job;
+  s->asker = gbk_conn_asker (c);
+  s->answerer = gbk_conn_answerer (c);
+  g_ptr_array_add (s->sources, g_strdup (local));
+  s->dest = g_strdup (gbk_loc_path (target));
+  s->base = *base;
+  return job;
+}
+
+const GPtrArray *
+gbk_job_fetched (const GbkJob *job)
+{
+  return job->fetched;
+}
+
+bool
+gbk_job_uploaded (const GbkJob *job, GbkFileToken *token)
+{
+  if (job->uploaded)
+    *token = job->token;
+  return job->uploaded;
 }
 
 bool

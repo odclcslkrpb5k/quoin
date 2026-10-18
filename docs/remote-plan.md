@@ -236,6 +236,30 @@ As built in phase 6 (2026-10-18), copying and moving across machines:
 - Drag and drop with another machine stays off until phase 8 (a message says to use
   Copy/Cut and Paste).
 
+As built in phase 6 (2026-10-18), editing (src/edits.c, edit-store.c, fetch.c):
+- Each opened file gets a cache folder of its own: `<id>/<name>` (0700, the copy 0600),
+  `<id>.ini` (host, machine-id and uid that answered, the file there with links resolved,
+  the app, the state there and here at the last download or upload) and `<id>.lock`
+  (flock'ed while a Quoin watches it). Dirty = the copy differs from the recorded state,
+  which also catches saves made after Quoin ended.
+- The download (a FETCH job) resolves links there (RESOLVE) and reads with the file's
+  state reported at the end of the read; the upload is an UPLOAD job run there:
+  gbk_ops_upload writes the new contents beside the target, fsyncs, then replaces it only
+  if it still matches the recorded state (checked again just before the rename), keeping
+  its mode, owner where allowed and xattrs. A change there, or other hard links, asks:
+  Replace / Keep Both (later saves then go to the kept copy) / Don't Upload. Gone there:
+  made again.
+- Watching polls the copy every second (no inotify: every way of saving looks the same)
+  and uploads once it changed and then held still for a poll. Not connected: retried with
+  backoff and no dialogs; a failed upload isn't retried until the next save. A machine
+  answering with another machine-id or uid gets nothing (and the person is told).
+- How long: while the app runs, judged every 5 s from the launched pid and from processes
+  named like the app's executable (launchers and shells don't count), after a 60 s grace.
+  An app never seen: while a Quoin window is open, then 10 minutes. Each watch holds the
+  GApplication; the last window closing shows the notice listing "name (App) from host".
+- At start a scan (thread) offers unsent copies (Upload / Show / Discard, locks held while
+  asked) and removes finished records older than 7 days, and old folders without a record.
+
 ## 9. Testing
 
 - `QUOIN_SSH` replaces the ssh command; tests point it at a script running quoin-serve

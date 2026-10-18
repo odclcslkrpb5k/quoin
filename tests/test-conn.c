@@ -375,6 +375,9 @@ typedef struct
   bool cancelled;
   const char *edit_at_start; /* changed at the first progress call (after listing) */
   const char *edit_on_conflict; /* changed when a conflict is asked */
+  int uploads_asked;       /* upload_conflict questions */
+  bool asked_linked;       /* the last one was about hard links */
+  GbkChoice upload_answer;
 } Hooks;
 
 static GbkChoice
@@ -420,6 +423,15 @@ h_progress (uint64_t done G_GNUC_UNUSED, uint64_t total G_GNUC_UNUSED,
     }
 }
 
+static GbkChoice
+h_upload (const char *target G_GNUC_UNUSED, bool linked, void *data)
+{
+  Hooks *h = data;
+  h->uploads_asked++;
+  h->asked_linked = linked;
+  return h->upload_answer;
+}
+
 static bool
 h_cancelled (void *data)
 {
@@ -430,7 +442,7 @@ h_cancelled (void *data)
 run_copy (GbkConn *c, const char *src_rel, const char *dst_rel, Hooks *h, GPtrArray *created,
           GError **error)
 {
-  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, h };
+  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, h, h_upload };
   g_autoptr (GPtrArray) srcs = g_ptr_array_new_with_free_func (g_free);
   g_ptr_array_add (srcs, g_build_filename (home, src_rel, nullptr));
   g_autofree char *dst = g_build_filename (home, dst_rel, nullptr);
@@ -545,7 +557,7 @@ test_copy_from_remote (void)
   g_assert_false (g_file_test (d2_big, G_FILE_TEST_EXISTS));
 
   /* A source that doesn't record what it listed can't remove anything: no move. */
-  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, &h };
+  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, &h, h_upload };
   g_autoptr (GPtrArray) srcs = g_ptr_array_new_with_free_func (g_free);
   g_ptr_array_add (srcs, g_build_filename (home, "tree", "small", nullptr));
   g_autofree char *dst3 = g_build_filename (home, "dst3", nullptr);
@@ -576,7 +588,7 @@ test_copy_from_remote (void)
 run_there (GbkConn *c, GbkOpKind kind, const char *const *src_rels, const char *dst_rel, Hooks *h,
            GPtrArray *created, GError **error)
 {
-  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, h };
+  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, h, h_upload };
   g_autoptr (GPtrArray) srcs = g_ptr_array_new_with_free_func (g_free);
   for (size_t i = 0; src_rels[i] != nullptr; i++)
     g_ptr_array_add (srcs, g_build_filename (home, src_rels[i], nullptr));
@@ -586,7 +598,7 @@ run_there (GbkConn *c, GbkOpKind kind, const char *const *src_rels, const char *
   g_autoptr (GbkAnswerer) answerer = gbk_conn_answerer (c);
   uint64_t session = gbk_answerer_open (answerer, srcs, kind == GBK_OP_MOVE);
   GbkJobRequest r = { .kind = kind, .sources_here = true, .session = session, .dest = dst };
-  bool ok = gbk_asker_run_job (asker, &r, srcs, &hooks, created, error);
+  bool ok = gbk_asker_run_job (asker, &r, srcs, &hooks, created, nullptr, error);
   gbk_answerer_close (answerer, session);
   return ok;
 }
@@ -684,7 +696,7 @@ test_move_from_remote (void)
   GbkConn *c = connect_to ("ws");
   g_autofree char *edited = g_build_filename (home, "far", "a", "edited", nullptr);
   Hooks h = { .answer = GBK_CHOICE_SKIP, .edit_at_start = edited };
-  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, &h };
+  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, &h, h_upload };
   g_autoptr (GPtrArray) srcs = g_ptr_array_new_with_free_func (g_free);
   g_ptr_array_add (srcs, g_build_filename (home, "far", "a", nullptr));
   g_autofree char *dst = g_build_filename (home, "near", nullptr);
@@ -704,7 +716,7 @@ test_move_from_remote (void)
   /* Without the change, everything goes. */
   put ("far2/x", "x");
   Hooks h2 = { .answer = GBK_CHOICE_SKIP };
-  GbkOpsHooks hooks2 = { h_conflict, h_error, nullptr, h_progress, h_cancelled, &h2 };
+  GbkOpsHooks hooks2 = { h_conflict, h_error, nullptr, h_progress, h_cancelled, &h2, h_upload };
   g_autoptr (GPtrArray) srcs2 = g_ptr_array_new_with_free_func (g_free);
   g_ptr_array_add (srcs2, g_build_filename (home, "far2", nullptr));
   g_autoptr (GbkSource) source2 = gbk_conn_source (c, true);
@@ -714,6 +726,82 @@ test_move_from_remote (void)
   g_assert_true (exists ("near/far2/x"));
   g_clear_pointer (&source, gbk_source_free);
   g_clear_pointer (&source2, gbk_source_free);
+  g_object_unref (c);
+  g_assert_true (wait_until (no_conns, nullptr, 10000));
+}
+
+/* Opening to edit and saving back, as the fetch and upload jobs do it: the file is followed
+ * through a link there, read with its state, and the upload replaces the file the link
+ * points to only while it is as it was read; a change there is asked about. */
+static void
+test_edit_round_trip (void)
+{
+  put ("ed/real.txt", "v1");
+  g_autofree char *link_path = g_build_filename (home, "ed", "link.txt", nullptr);
+  g_assert_cmpint (symlink ("real.txt", link_path), ==, 0);
+  g_autofree char *real = g_build_filename (home, "ed", "real.txt", nullptr);
+  GbkConn *c = connect_to ("ws");
+
+  g_autoptr (GbkSource) source = gbk_conn_source (c, false);
+  Hooks h = { .answer = GBK_CHOICE_SKIP, .upload_answer = GBK_CHOICE_KEEP_BOTH };
+  GbkOpsHooks hooks = { h_conflict, h_error, nullptr, h_progress, h_cancelled, &h, h_upload };
+  source->cancelled = hooks.cancelled;
+  source->cancel_data = &h;
+  g_autoptr (GError) error = nullptr;
+  g_autofree char *resolved = source->ops->resolve (source, link_path, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (resolved, ==, real);
+  GbkSourceFile *f = source->ops->open (source, resolved, &error);
+  g_assert_nonnull (f);
+  char buf[16];
+  g_assert_cmpint (source->ops->read (f, buf, sizeof buf, &error), ==, 2);
+  g_assert_cmpint (source->ops->read (f, buf, sizeof buf, &error), ==, 0);
+  GbkFileToken base;
+  g_assert_true (source->ops->state (f, &base));
+  source->ops->close (f);
+  struct stat st;
+  g_assert_cmpint (stat (real, &st), ==, 0);
+  GbkFileToken now = gbk_file_token_of (&st);
+  g_assert_true (gbk_file_token_same (&base, &now));
+
+  /* Saved here, uploaded there: through the link to the real file. */
+  put ("copy/link.txt", "v2");
+  g_autoptr (GPtrArray) local = g_ptr_array_new_with_free_func (g_free);
+  g_ptr_array_add (local, g_build_filename (home, "copy", "link.txt", nullptr));
+  g_autoptr (GbkAsker) asker = gbk_conn_asker (c);
+  g_autoptr (GbkAnswerer) answerer = gbk_conn_answerer (c);
+  uint64_t session = gbk_answerer_open (answerer, local, false);
+  GbkJobRequest r = {
+    .kind = GBK_OP_UPLOAD, .sources_here = true, .session = session, .dest = real, .base = base
+  };
+  g_autoptr (GPtrArray) created = g_ptr_array_new_with_free_func (g_free);
+  GbkFileToken uploaded = { 0 };
+  g_assert_true (gbk_asker_run_job (asker, &r, local, &hooks, created, &uploaded, &error));
+  g_assert_no_error (error);
+  g_assert_cmpstr (g_ptr_array_index (created, 0), ==, "real.txt");
+  g_autofree char *v2 = nullptr;
+  g_assert_true (g_file_get_contents (real, &v2, nullptr, nullptr));
+  g_assert_cmpstr (v2, ==, "v2");
+  g_assert_true (g_file_test (link_path, G_FILE_TEST_IS_SYMLINK));   /* still a link */
+  g_assert_cmpint (stat (real, &st), ==, 0);
+  now = gbk_file_token_of (&st);
+  g_assert_true (gbk_file_token_same (&uploaded, &now));
+  g_assert_cmpint (h.uploads_asked, ==, 0);
+
+  /* Changed there meanwhile: asked; Keep Both puts ours beside it. */
+  g_usleep (20000);
+  put ("ed/real.txt", "theirs");
+  put ("copy/link.txt", "v3");
+  r.base = uploaded;
+  g_autoptr (GPtrArray) created2 = g_ptr_array_new_with_free_func (g_free);
+  g_assert_true (gbk_asker_run_job (asker, &r, local, &hooks, created2, &uploaded, &error));
+  g_assert_cmpint (h.uploads_asked, ==, 1);
+  g_assert_cmpstr (g_ptr_array_index (created2, 0), ==, "real (1).txt");
+  g_autofree char *theirs = nullptr;
+  g_assert_true (g_file_get_contents (real, &theirs, nullptr, nullptr));
+  g_assert_cmpstr (theirs, ==, "theirs");
+  gbk_answerer_close (answerer, session);
+  g_clear_pointer (&source, gbk_source_free);
   g_object_unref (c);
   g_assert_true (wait_until (no_conns, nullptr, 10000));
 }
@@ -745,6 +833,7 @@ main (int argc, char **argv)
   g_test_add_func ("/conn/copy-from-remote", test_copy_from_remote);
   g_test_add_func ("/conn/copy-to-remote", test_copy_to_remote);
   g_test_add_func ("/conn/move-from-remote", test_move_from_remote);
+  g_test_add_func ("/conn/edit-round-trip", test_edit_round_trip);
   int status = g_test_run ();
   gbk_type_table_unref (types);
   if (gbk_lifetime_live () != 0)

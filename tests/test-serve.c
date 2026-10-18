@@ -440,7 +440,8 @@ test_read_credit_and_change (void)
       GbkFrame f = next (s, &k);
       if (!gbk_proto_get_data (&f, &d, &n))
         {
-          g_assert_true (gbk_proto_get_end (&f, &changed));
+          GbkFileToken as_read;
+          g_assert_true (gbk_proto_get_end (&f, &changed, &as_read));
           ended = true;
         }
     }
@@ -449,13 +450,18 @@ test_read_credit_and_change (void)
   /* An unchanged file ends unchanged; CANCEL stops one waiting for credit. */
   Req again = { 21, path, 1000 };
   send_frame (s, put_read, &again);
+  GbkFileToken as_read = { 0 };
   for (bool done = false; !done;)
     {
       g_autoptr (GByteArray) k = nullptr;
       GbkFrame f = next (s, &k);
-      done = gbk_proto_get_end (&f, &changed);
+      done = gbk_proto_get_end (&f, &changed, &as_read);
     }
   g_assert_false (changed);
+  struct stat st;                        /* the end says how the file was, as read */
+  g_assert_cmpint (stat (path, &st), ==, 0);
+  GbkFileToken now = gbk_file_token_of (&st);
+  g_assert_true (gbk_file_token_same (&as_read, &now));
   Req stalled = { 22, path, 0 };
   send_frame (s, put_read, &stalled);
   send_frame (s, put_cancel, &stalled);

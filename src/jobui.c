@@ -36,6 +36,8 @@ verb (GbkJob *job)
     case GBK_JOB_CLEAR_EXECUTABLE:
     case GBK_JOB_PERMISSIONS: return "Changing Permissions";
     case GBK_JOB_INFO: return "Reading Details";
+    case GBK_JOB_FETCH: return "Downloading";
+    case GBK_JOB_UPLOAD: return "Uploading";
     default: return "Working";
     }
 }
@@ -105,13 +107,10 @@ on_finished (GbkJob *job G_GNUC_UNUSED, GError *error, Ui *ui)
 
 /* ---- questions ---- */
 
-enum
-{
-  RESP_REPLACE = 1,
-  RESP_SKIP,
-  RESP_KEEP_BOTH,
-  RESP_DELETE
-};
+#define RESP_REPLACE GBK_JOBUI_REPLACE
+#define RESP_SKIP GBK_JOBUI_SKIP
+#define RESP_KEEP_BOTH GBK_JOBUI_KEEP_BOTH
+#define RESP_DELETE GBK_JOBUI_DELETE
 
 static void
 on_question_response (GtkDialog *d, int response, GbkJob *job)
@@ -176,6 +175,24 @@ on_question (GbkJob *job, GbkQuestion *q, Ui *ui)
       gtk_dialog_add_buttons (GTK_DIALOG (d), "_Cancel", GTK_RESPONSE_CANCEL, "_Skip", RESP_SKIP,
                               "_Delete Permanently", RESP_DELETE, nullptr);
       gtk_dialog_set_default_response (GTK_DIALOG (d), RESP_SKIP);
+      break;
+    case GBK_QUESTION_UPLOAD:
+      /* Nothing is lost whatever the answer: "Don't Upload" keeps the copy here. */
+      d = gtk_message_dialog_new (GTK_WINDOW (ui->window), GTK_DIALOG_DESTROY_WITH_PARENT,
+                                  GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
+                                  q->other_is_dir
+                                      ? "“%s” has other names (hard links) on the other machine"
+                                      : "“%s” changed on the other machine since you opened it",
+                                  name);
+      gtk_message_dialog_format_secondary_text (
+          GTK_MESSAGE_DIALOG (d), "%s",
+          q->other_is_dir ? "Replacing it with your version separates it from them. Keep Both "
+                            "saves yours beside it instead."
+                          : "Replace it with your version, or Keep Both: yours is saved beside "
+                            "it under a new name.");
+      gtk_dialog_add_buttons (GTK_DIALOG (d), "Do_n't Upload", RESP_SKIP, "_Keep Both",
+                              RESP_KEEP_BOTH, "_Replace", RESP_REPLACE, nullptr);
+      gtk_dialog_set_default_response (GTK_DIALOG (d), RESP_KEEP_BOTH);
       break;
     default: gbk_fatal ("bad question kind %d", (int) q->kind);
     }

@@ -1,4 +1,4 @@
-#include "fetch.h"
+#include "edits.h"
 #include "lifetime.h"
 #include "window.h"
 
@@ -17,7 +17,7 @@ on_activate (GtkApplication *gtk_app, App *app)
 {
   gtk_window_set_default_icon_name (APP_ID);
   gbk_window_install_accels (gtk_app);
-  gbk_fetch_cleanup_start (GBK_FETCH_KEEP_DAYS);   /* old copies of other machines' files */
+  gbk_edits_init (gtk_app, app->ctx);   /* saves back to other machines; unsent ones offered */
 
   GbkWindow *w = gbk_window_new (gtk_app, app->ctx, app->start);
   gtk_widget_show_all (GTK_WIDGET (w));
@@ -62,6 +62,7 @@ main (int argc, char **argv)
   gbk_connect (G_OBJECT (gtk_app), gtk_app, "activate", G_CALLBACK (on_activate), &app);
   char *no_args[] = { argv[0], nullptr };
   int status = g_application_run (G_APPLICATION (gtk_app), 1, no_args);
+  gbk_edits_shutdown ();
   g_object_unref (gtk_app);
   gbk_context_unref (app.ctx);
   gbk_loc_unref (app.start);

@@ -32,6 +32,19 @@ typedef struct
   char *target;           /* links: what the link says (bytes); otherwise nullptr */
 } GbkStatEntry;
 
+/* A file's state, to tell later whether it changed: the same file (device, inode), with
+ * the same size, modified and changed at the same times. (Every write changes the ctime,
+ * even one that keeps the size and sets the mtime back.) */
+typedef struct
+{
+  uint64_t dev, ino, size, nlink;
+  int64_t mtime_ns, ctime_ns;
+} GbkFileToken;
+
+GbkFileToken gbk_file_token_of (const struct stat *st);
+/* The same file in the same state (nlink aside: other names come and go). */
+bool gbk_file_token_same (const GbkFileToken *a, const GbkFileToken *b);
+
 void gbk_stat_entry_free (GbkStatEntry *e);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (GbkStatEntry, gbk_stat_entry_free)
 /* From a struct stat (and the link's target, for a link). Owned copies. */
@@ -67,6 +80,10 @@ typedef struct
    * only what is still as it was when it was listed; anything changed since is kept, and
    * that fails. nullptr where moving from it isn't possible. */
   bool (*remove) (GbkSource *s, const char *path, GError **error);
+  /* `path` with every symlink resolved (a file opened to edit is saved back there). */
+  char *(*resolve) (GbkSource *s, const char *path, GError **error);
+  /* Once read returned 0: the file as it was read (it didn't change meanwhile). */
+  bool (*state) (const GbkSourceFile *f, GbkFileToken *token);
   void (*free) (GbkSource *s);
 } GbkSourceOps;
 
@@ -108,6 +125,7 @@ typedef enum
   GBK_OP_MOVE,
   GBK_OP_TRASH,
   GBK_OP_DELETE,       /* permanent */
+  GBK_OP_UPLOAD,       /* jobs on another machine only: gbk_ops_upload, never gbk_ops_run */
 } GbkOpKind;
 
 typedef enum
@@ -130,6 +148,10 @@ typedef struct
   void (*progress) (uint64_t bytes_done, uint64_t bytes_total, const char *current, void *data);
   bool (*cancelled) (void *data);
   void *data;
+  /* Uploading (gbk_ops_upload): the file there changed since it was opened, or (`linked`)
+   * it has other hard links, which replacing it would separate. GBK_CHOICE_REPLACE, KEEP_BOTH
+   * (beside it, under a free name), SKIP (don't upload) or CANCEL. */
+  GbkChoice (*upload_conflict) (const char *target, bool linked, void *data);
 } GbkOpsHooks;
 
 /* Run `kind` on `sources` (absolute paths). `dest_dir` is used by COPY and MOVE.
@@ -145,6 +167,18 @@ typedef struct
 [[nodiscard]] bool gbk_ops_run_from (GbkSource *src, GbkOpKind kind, GPtrArray *sources,
                                      const char *dest_dir, const GbkOpsHooks *hooks,
                                      GPtrArray *created, GError **error);
+
+/* Save `src_path` (read from `src`) over `target`, an edited file going back where it came
+ * from: compare-and-replace. The new contents are written beside it and made durable, then
+ * replace it only if it is still as `base` says, so a change made there meanwhile is never
+ * silently lost (hooks->upload_conflict decides; so it does for a file with other hard
+ * links). The new file keeps the old one's permissions, owner (where allowed) and extended
+ * attributes. If the target is gone, it is made again. *written: the name written in the
+ * target's folder (nullptr: skipped); *token: the new file's state, the base of the next
+ * upload. False on failure or cancellation. */
+[[nodiscard]] bool gbk_ops_upload (GbkSource *src, const char *src_path, const char *target,
+                                   const GbkFileToken *base, const GbkOpsHooks *hooks,
+                                   char **written, GbkFileToken *token, GError **error);
 
 /* Rename `path` to `new_name` in the same directory. Fails (G_IO_ERROR_EXISTS) rather than
  * replace an existing file. */

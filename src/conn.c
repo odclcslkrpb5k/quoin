@@ -703,7 +703,9 @@ on_frame (Live *l, const GbkFrame *f)
     case GBK_MSG_QUESTION:
     case GBK_MSG_PROGRESS:
     case GBK_MSG_CREATED:
-    case GBK_MSG_DONE: event_free (e); return true;
+    case GBK_MSG_DONE:
+    case GBK_MSG_RESOLVED:
+    case GBK_MSG_UPLOADED: event_free (e); return true;
     case GBK_MSG_LIST:
     case GBK_MSG_LSTAT:
     case GBK_MSG_READ:
@@ -715,6 +717,7 @@ on_frame (Live *l, const GbkFrame *f)
     case GBK_MSG_SOURCES:
     case GBK_MSG_JOB:
     case GBK_MSG_ANSWER:
+    case GBK_MSG_RESOLVE:
     case GBK_MSG_HELLO:
     case GBK_MSG_WATCH:
     case GBK_MSG_UNWATCH:

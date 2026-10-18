@@ -41,6 +41,8 @@ typedef enum : uint8_t
   GBK_MSG_PROGRESS = 12,  /* a JOB's progress */
   GBK_MSG_CREATED = 13,   /* names a JOB made in its destination (one or more frames) */
   GBK_MSG_DONE = 14,      /* a JOB finished (its failure is a FAILED instead) */
+  GBK_MSG_RESOLVED = 15,  /* answer to RESOLVE: the path, links resolved */
+  GBK_MSG_UPLOADED = 16,  /* an UPLOAD job's new file: its state (before DONE) */
   /* client -> server */
   GBK_MSG_WATCH = 64,     /* start watching a folder (path) on this channel */
   GBK_MSG_UNWATCH = 65,   /* stop it */
@@ -58,6 +60,7 @@ typedef enum : uint8_t
   GBK_MSG_SOURCES = 76,   /* a JOB's sources, before the JOB (one or more frames) */
   GBK_MSG_JOB = 77,       /* run a file operation there (GbkJobRequest) */
   GBK_MSG_ANSWER = 78,    /* the answer to a JOB's QUESTION */
+  GBK_MSG_RESOLVE = 79,   /* a path with its links resolved (path) */
 } GbkMsgType;
 
 /* Both directions carry LIST, LSTAT, READ, CREDIT, CANCEL and REMOVE, and their answers:
@@ -94,7 +97,8 @@ typedef struct
   GbkOpKind kind;
   bool sources_here;      /* the sources are on the asking machine: read them from it */
   uint64_t session;       /* sources_here: the asking machine's session for those reads */
-  char *dest;             /* COPY, MOVE: absolute; otherwise nullptr */
+  char *dest;             /* COPY, MOVE, UPLOAD (the file replaced): absolute; else nullptr */
+  GbkFileToken base;      /* UPLOAD: the file there as it was opened */
 } GbkJobRequest;
 
 void gbk_job_request_clear (GbkJobRequest *r);
@@ -104,6 +108,8 @@ typedef enum : uint8_t
   GBK_ASK_CONFLICT,       /* `path` (source) is in the way of `other` (existing destination) */
   GBK_ASK_ERROR,          /* `path` failed: `error` */
   GBK_ASK_UNTRASHABLE,    /* `path` can't go to the trash: delete it instead? */
+  GBK_ASK_UPLOAD,         /* `path` changed there since it was opened (or, `other_is_dir`,
+                   * it has other hard links): replace it, keep both, or skip? */
 } GbkAskKind;
 
 /* A job's question. */
@@ -112,7 +118,7 @@ typedef struct
   GbkAskKind kind;
   char *path;
   char *other;            /* CONFLICT only */
-  bool other_is_dir;      /* CONFLICT only */
+  bool other_is_dir;      /* CONFLICT; UPLOAD: unchanged, but other hard links */
   GError *error;          /* ERROR only */
 } GbkAsk;
 
@@ -134,7 +140,7 @@ int gbk_proto_next_frame (const uint8_t *data, size_t len, GbkFrame *frame, size
 /* ---- writers: each appends whole frames to `out` ---- */
 
 void gbk_proto_put_hello (GByteArray *out, const GbkHello *h);
-/* WATCH, GET_INFO: a path. */
+/* WATCH, GET_INFO, RESOLVE, RESOLVED: a path. */
 void gbk_proto_put_path (GByteArray *out, GbkMsgType type, uint64_t channel, const char *path);
 /* UNWATCH, PING, PONG, CANCEL, REMOVED, FORGET, DONE. */
 void gbk_proto_put_empty (GByteArray *out, GbkMsgType type, uint64_t channel);
@@ -149,7 +155,10 @@ void gbk_proto_put_scan (GByteArray *out, uint64_t channel, const GbkScanMsg *m)
 void gbk_proto_put_listing (GByteArray *out, uint64_t channel, const GPtrArray *entries, bool last);
 void gbk_proto_put_stated (GByteArray *out, uint64_t channel, const GbkStatEntry *e);
 void gbk_proto_put_data (GByteArray *out, uint64_t channel, const void *data, size_t len);
-void gbk_proto_put_end (GByteArray *out, uint64_t channel, bool changed);
+/* `as_read`: the file as it was read (meaningful when unchanged). */
+void gbk_proto_put_end (GByteArray *out, uint64_t channel, bool changed,
+                        const GbkFileToken *as_read);
+void gbk_proto_put_uploaded (GByteArray *out, uint64_t channel, const GbkFileToken *t);
 /* LIST, LSTAT, REMOVE: a path in a session. */
 void gbk_proto_put_request (GByteArray *out, GbkMsgType type, uint64_t channel, uint64_t session,
                             const char *path);
@@ -160,7 +169,8 @@ void gbk_proto_put_session (GByteArray *out, uint64_t session, bool record);
 /* SOURCES (as many frames as needed), then the JOB. */
 void gbk_proto_put_job (GByteArray *out, uint64_t channel, const GbkJobRequest *r,
                         const GPtrArray *sources);
-/* `other` and `other_is_dir` for CONFLICT, `error` for ERROR (otherwise ignored). */
+/* `other` and `other_is_dir` for CONFLICT, `error` for ERROR, `other_is_dir` (linked) for
+ * UPLOAD (otherwise ignored). */
 void gbk_proto_put_question (GByteArray *out, uint64_t channel, GbkAskKind kind, const char *path,
                              const char *other, bool other_is_dir, const GError *error);
 void gbk_proto_put_answer (GByteArray *out, uint64_t channel, GbkChoice choice, bool apply_all);
@@ -178,7 +188,8 @@ void gbk_proto_put_credit (GByteArray *out, uint64_t channel, uint32_t bytes);
 [[nodiscard]] GbkStatEntry *gbk_proto_get_stated (const GbkFrame *f);
 /* DATA: the bytes, borrowed from the frame. */
 [[nodiscard]] bool gbk_proto_get_data (const GbkFrame *f, const uint8_t **data, size_t *len);
-[[nodiscard]] bool gbk_proto_get_end (const GbkFrame *f, bool *changed);
+[[nodiscard]] bool gbk_proto_get_end (const GbkFrame *f, bool *changed, GbkFileToken *as_read);
+[[nodiscard]] bool gbk_proto_get_uploaded (const GbkFrame *f, GbkFileToken *t);
 /* READ: its session, path (g_free) and starting credit. */
 [[nodiscard]] bool gbk_proto_get_read (const GbkFrame *f, uint64_t *session, char **path,
                                        uint32_t *credit);
@@ -196,7 +207,8 @@ void gbk_proto_put_credit (GByteArray *out, uint64_t channel, uint32_t bytes);
 /* CREATED: valid filenames (char*, owned), appended to `names`. */
 [[nodiscard]] bool gbk_proto_get_created (const GbkFrame *f, GPtrArray *names);
 [[nodiscard]] bool gbk_proto_get_credit (const GbkFrame *f, uint32_t *bytes);
-/* An absolute path without NUL bytes, or nullptr. g_free. */
+/* WATCH, GET_INFO, RESOLVE, RESOLVED: an absolute path without NUL bytes, or nullptr.
+ * g_free. */
 [[nodiscard]] char *gbk_proto_get_path (const GbkFrame *f);
 [[nodiscard]] bool gbk_proto_get_empty (const GbkFrame *f);
 /* The failure as a G_IO_ERROR in *error (its message made valid UTF-8). */

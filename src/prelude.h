@@ -25,6 +25,7 @@
 #include <pwd.h>
 #include <signal.h>
 #include <sys/eventfd.h>
+#include <sys/file.h>
 #include <sys/inotify.h>
 #include <sys/socket.h>
 #include <netinet/in.h>

@@ -132,6 +132,9 @@ handle (Server *sv, const GbkFrame *f)
     case GBK_MSG_SOURCES:
     case GBK_MSG_JOB:
     case GBK_MSG_ANSWER:
+    case GBK_MSG_RESOLVE:
+    case GBK_MSG_RESOLVED:
+    case GBK_MSG_UPLOADED:
     default: protocol_error ("a message only the server sends");
     }
 }

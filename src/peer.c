@@ -209,7 +209,10 @@ gbk_asker_answer_type (GbkMsgType type)
     case GBK_MSG_QUESTION:
     case GBK_MSG_PROGRESS:
     case GBK_MSG_CREATED:
-    case GBK_MSG_DONE: return true;
+    case GBK_MSG_DONE:
+    case GBK_MSG_RESOLVED:
+    case GBK_MSG_UPLOADED: return true;
+    case GBK_MSG_RESOLVE:
     case GBK_MSG_HELLO:
     case GBK_MSG_SCAN:
     case GBK_MSG_INFO:
@@ -393,6 +396,8 @@ typedef struct
   size_t off;
   uint32_t unacked;       /* bytes copied out since the last CREDIT */
   bool ended;
+  bool whole;             /* ended, unchanged while read: `as_read` says how it was */
+  GbkFileToken as_read;
 } AskFile;
 
 static const AskSource *
@@ -536,9 +541,10 @@ ask_read (GbkSourceFile *file, void *buf, size_t len, GError **error)
           f->chunk = g_bytes_ref (r->payload);
           f->off = 0;
         }
-      else if (gbk_proto_get_end (&frame, &changed))
+      else if (gbk_proto_get_end (&frame, &changed, &f->as_read))
         {
           f->ended = true;
+          f->whole = !changed;
           if (changed)
             {
               g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
@@ -574,6 +580,39 @@ static int
 ask_fd (const GbkSourceFile *f G_GNUC_UNUSED)
 {
   return -1;
+}
+
+static bool
+ask_state (const GbkSourceFile *file, GbkFileToken *token)
+{
+  const AskFile *f = (const AskFile *) (const void *) file;
+  if (f->whole)
+    *token = f->as_read;
+  return f->whole;
+}
+
+[[nodiscard]] static char *
+ask_resolve (GbkSource *src, const char *path, GError **error)
+{
+  const AskSource *s = ask_source (src);
+  Call *call = call_start (s->a, error);
+  if (call == nullptr)
+    return nullptr;
+  g_autoptr (GByteArray) req = g_byte_array_new ();
+  gbk_proto_put_path (req, GBK_MSG_RESOLVE, call->channel, path);
+  call_send (call, req);
+  char *resolved = nullptr;
+  Reply *r = call_wait (call, src, error);
+  if (r != nullptr)
+    {
+      GbkFrame f = reply_frame (r, call->channel);
+      resolved = f.type == GBK_MSG_RESOLVED ? gbk_proto_get_path (&f) : nullptr;
+      if (resolved == nullptr)
+        unexpected (r, call->channel, error);
+      reply_free (r);
+    }
+  call_end (call);
+  return resolved;
 }
 
 static void
@@ -614,6 +653,8 @@ static const GbkSourceOps ask_ops = {
   .fd = ask_fd,
   .close = ask_close,
   .remove = ask_remove,
+  .resolve = ask_resolve,
+  .state = ask_state,
   .free = ask_free,
 };
 
@@ -663,14 +704,24 @@ answer_question (const GbkAsk *q, const GbkOpsHooks *h, bool *all)
       return h->delete_untrashable != nullptr && h->delete_untrashable (q->path, h->data)
                  ? GBK_CHOICE_REPLACE
                  : GBK_CHOICE_SKIP;
+    case GBK_ASK_UPLOAD:
+      return h->upload_conflict != nullptr ? h->upload_conflict (q->path, q->other_is_dir, h->data)
+                                           : GBK_CHOICE_SKIP;
     default: gbk_fatal ("bad question %d", (int) q->kind);
     }
 }
 
-/* One frame of a running job. True when it has finished (*ok and *error say how). */
+/* What a job on the other machine made. */
+typedef struct
+{
+  GPtrArray *created;     /* nullable */
+  GbkFileToken *uploaded; /* nullable */
+  bool ok;
+} Outcome;
+
+/* One frame of a running job. True when it has finished (out->ok and *error say how). */
 [[nodiscard]] static bool
-job_frame (const Call *call, const GbkFrame *f, const GbkOpsHooks *h, GPtrArray *created, bool *ok,
-           GError **error)
+job_frame (const Call *call, const GbkFrame *f, const GbkOpsHooks *h, Outcome *out, GError **error)
 {
   switch (f->type)
     {
@@ -702,14 +753,23 @@ job_frame (const Call *call, const GbkFrame *f, const GbkOpsHooks *h, GPtrArray 
         g_autoptr (GPtrArray) names = g_ptr_array_new_with_free_func (g_free);
         if (!gbk_proto_get_created (f, names))
           break;
-        for (guint i = 0; created != nullptr && i < names->len; i++)
-          g_ptr_array_add (created, g_steal_pointer (&names->pdata[i]));
+        for (guint i = 0; out->created != nullptr && i < names->len; i++)
+          g_ptr_array_add (out->created, g_steal_pointer (&names->pdata[i]));
+        return false;
+      }
+    case GBK_MSG_UPLOADED:
+      {
+        GbkFileToken t;
+        if (!gbk_proto_get_uploaded (f, &t))
+          break;
+        if (out->uploaded != nullptr)
+          *out->uploaded = t;
         return false;
       }
     case GBK_MSG_DONE:
       if (!gbk_proto_get_empty (f))
         break;
-      *ok = true;
+      out->ok = true;
       return true;
     case GBK_MSG_FAILED:
       if (!gbk_proto_get_failed (f, error))
@@ -739,6 +799,8 @@ job_frame (const Call *call, const GbkFrame *f, const GbkOpsHooks *h, GPtrArray 
     case GBK_MSG_SOURCES:
     case GBK_MSG_JOB:
     case GBK_MSG_ANSWER:
+    case GBK_MSG_RESOLVE:
+    case GBK_MSG_RESOLVED:
     default: break;
     }
   g_propagate_error (error, not_understood ());
@@ -747,7 +809,8 @@ job_frame (const Call *call, const GbkFrame *f, const GbkOpsHooks *h, GPtrArray 
 
 bool
 gbk_asker_run_job (GbkAsker *a, const GbkJobRequest *r, const GPtrArray *sources,
-                   const GbkOpsHooks *hooks, GPtrArray *created, GError **error)
+                   const GbkOpsHooks *hooks, GPtrArray *created, GbkFileToken *uploaded,
+                   GError **error)
 {
   Call *call = call_start (a, error);
   if (call == nullptr)
@@ -756,7 +819,8 @@ gbk_asker_run_job (GbkAsker *a, const GbkJobRequest *r, const GPtrArray *sources
   g_autoptr (GByteArray) req = g_byte_array_new ();
   gbk_proto_put_job (req, call->channel, r, sources);
   call_send (call, req);
-  bool ok = false, finished = false, cancel_sent = false;
+  Outcome outcome = { .created = created, .uploaded = uploaded };
+  bool finished = false, cancel_sent = false;
   while (!finished)
     {
       Reply *reply = g_async_queue_timeout_pop (call->q, WAIT_STEP_US);
@@ -780,11 +844,11 @@ gbk_asker_run_job (GbkAsker *a, const GbkJobRequest *r, const GPtrArray *sources
       else
         {
           GbkFrame f = reply_frame (reply, call->channel);
-          finished = job_frame (call, &f, hooks, created, &ok, error);
+          finished = job_frame (call, &f, hooks, &outcome, error);
         }
       reply_free (reply);
     }
-  if (!ok && !cancel_sent)
+  if (!outcome.ok && !cancel_sent)
     {
       /* A broken answer: make sure it stops there (a finished job ignores this). */
       g_autoptr (GByteArray) cancel = g_byte_array_new ();
@@ -793,7 +857,7 @@ gbk_asker_run_job (GbkAsker *a, const GbkJobRequest *r, const GPtrArray *sources
     }
   use_end (a);
   call_end (call);
-  return ok;
+  return outcome.ok;
 }
 
 /* ---- answering ---- */
@@ -833,6 +897,7 @@ typedef enum
   TASK_LSTAT,
   TASK_READ,
   TASK_REMOVE,
+  TASK_RESOLVE,
 } TaskKind;
 
 typedef struct
@@ -926,7 +991,10 @@ gbk_answerer_takes (GbkMsgType type)
     case GBK_MSG_REMOVE:
     case GBK_MSG_SESSION:
     case GBK_MSG_FORGET:
-    case GBK_MSG_GET_INFO: return true;
+    case GBK_MSG_GET_INFO:
+    case GBK_MSG_RESOLVE: return true;
+    case GBK_MSG_RESOLVED:
+    case GBK_MSG_UPLOADED:
     case GBK_MSG_HELLO:
     case GBK_MSG_SCAN:
     case GBK_MSG_INFO:
@@ -1222,8 +1290,9 @@ run_read (Task *t)
   struct stat after;
   bool changed = fstat (fd, &after) != 0 || !same_file_state (&before, &after);
   close (fd);
+  GbkFileToken as_read = gbk_file_token_of (&before);
   g_autoptr (GByteArray) b = g_byte_array_new ();
-  gbk_proto_put_end (b, t->channel, changed);
+  gbk_proto_put_end (b, t->channel, changed, &as_read);
   task_finish (t, b);
 }
 
@@ -1250,6 +1319,20 @@ unchanged (const char *path, const struct stat *st, void *data)
            && (k->ctime_ns == ns (st->st_ctim) || k->nlink > 1);
   g_mutex_unlock (&t->a->lock);
   return same;
+}
+
+static void
+run_resolve (Task *t)
+{
+  g_autofree char *real = realpath (t->path, nullptr);
+  if (real == nullptr)
+    {
+      finish_errno (t, errno);
+      return;
+    }
+  g_autoptr (GByteArray) b = g_byte_array_new ();
+  gbk_proto_put_path (b, GBK_MSG_RESOLVED, t->channel, real);
+  task_finish (t, b);
 }
 
 static void
@@ -1289,6 +1372,7 @@ task_worker (void *data)
     case TASK_LSTAT: run_lstat (t); break;
     case TASK_READ: run_read (t); break;
     case TASK_REMOVE: run_remove (t); break;
+    case TASK_RESOLVE: run_resolve (t); break;
     default: gbk_fatal ("bad task %d", (int) t->kind);
     }
   task_free (t);
@@ -1366,7 +1450,8 @@ start (GbkAnswerer *a, TaskKind kind, uint64_t channel, uint64_t session, char *
       g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_BUSY, "Too many requests at once");
       ok = false;
     }
-  else if (!a->restricted && kind != TASK_INFO && !g_hash_table_contains (a->sessions, &session))
+  else if (!a->restricted && kind != TASK_INFO && kind != TASK_RESOLVE
+           && !g_hash_table_contains (a->sessions, &session))
     {
       g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_FAILED, "Not a session of this machine");
       ok = false;
@@ -1474,13 +1559,14 @@ gbk_answerer_handle (GbkAnswerer *a, const GbkFrame *f)
         return true;
       }
     case GBK_MSG_GET_INFO:
+    case GBK_MSG_RESOLVE:
       {
         if (a->restricted)
-          return false;                  /* the server never asks the laptop that */
+          return false;                  /* the server never asks the laptop these */
         char *path = gbk_proto_get_path (f);
         if (path == nullptr)
           return false;
-        start (a, TASK_INFO, f->channel, 0, path, 0);
+        start (a, f->type == GBK_MSG_GET_INFO ? TASK_INFO : TASK_RESOLVE, f->channel, 0, path, 0);
         return true;
       }
     case GBK_MSG_CREDIT:
@@ -1537,6 +1623,8 @@ gbk_answerer_handle (GbkAnswerer *a, const GbkFrame *f)
     case GBK_MSG_SOURCES:
     case GBK_MSG_JOB:
     case GBK_MSG_ANSWER:
+    case GBK_MSG_RESOLVED:
+    case GBK_MSG_UPLOADED:
     default: return false;
     }
 }
@@ -1726,6 +1814,12 @@ job_error (const char *path, const GError *error, void *data)
   return job_ask (data, GBK_ASK_ERROR, path, nullptr, false, error, nullptr);
 }
 
+static GbkChoice
+job_upload_conflict (const char *target, bool linked, void *data)
+{
+  return job_ask (data, GBK_ASK_UPLOAD, target, nullptr, linked, nullptr, nullptr);
+}
+
 static bool
 job_untrashable (const char *path, void *data)
 {
@@ -1750,14 +1844,33 @@ static void *
 job_worker (void *data)
 {
   Job *j = data;
-  GbkOpsHooks hooks = { job_conflict, job_error, job_untrashable, job_progress, job_cancelled, j };
+  GbkOpsHooks hooks = { job_conflict,  job_error, job_untrashable,    job_progress,
+                        job_cancelled, j,         job_upload_conflict };
   g_autoptr (GbkSource) src = j->req.sources_here
                                   ? gbk_asker_source_in (j->r->asker, j->req.session)
                                   : gbk_source_local ();
   g_autoptr (GPtrArray) created = g_ptr_array_new_with_free_func (g_free);
   g_autoptr (GError) error = nullptr;
-  bool ok = gbk_ops_run_from (src, j->req.kind, j->sources, j->req.dest, &hooks, created, &error);
   g_autoptr (GByteArray) b = g_byte_array_new ();
+  bool ok;
+  if (j->req.kind == GBK_OP_UPLOAD)
+    {
+      /* One file (the edited copy, from the laptop) over one here. */
+      g_autofree char *written = nullptr;
+      GbkFileToken token = { 0 };
+      ok = j->sources->len == 1
+           && gbk_ops_upload (src, g_ptr_array_index (j->sources, 0), j->req.dest, &j->req.base,
+                              &hooks, &written, &token, &error);
+      if (j->sources->len != 1)
+        error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "Upload one file");
+      if (ok && written != nullptr)
+        {
+          g_ptr_array_add (created, g_steal_pointer (&written));
+          gbk_proto_put_uploaded (b, j->channel, &token);
+        }
+    }
+  else
+    ok = gbk_ops_run_from (src, j->req.kind, j->sources, j->req.dest, &hooks, created, &error);
   gbk_proto_put_created (b, j->channel, created);
   if (ok)
     gbk_proto_put_empty (b, GBK_MSG_DONE, j->channel);
@@ -1930,6 +2043,9 @@ gbk_job_runner_handle (GbkJobRunner *r, const GbkFrame *f)
     case GBK_MSG_REMOVE:
     case GBK_MSG_SESSION:
     case GBK_MSG_FORGET:
+    case GBK_MSG_RESOLVE:
+    case GBK_MSG_RESOLVED:
+    case GBK_MSG_UPLOADED:
     default: return false;
     }
 }

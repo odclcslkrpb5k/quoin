@@ -100,7 +100,8 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
         case GBK_MSG_END:
           {
             bool changed;
-            g_assert (!gbk_proto_get_end (&f, &changed) || f.len == 1);
+            GbkFileToken t;
+            g_assert (!gbk_proto_get_end (&f, &changed, &t) || f.len == 49);
             break;
           }
         case GBK_MSG_READ:
@@ -190,8 +191,16 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
             g_assert (!gbk_proto_get_credit (&f, &bytes) || f.len == 4);
             break;
           }
+        case GBK_MSG_UPLOADED:
+          {
+            GbkFileToken t;
+            g_assert (!gbk_proto_get_uploaded (&f, &t) || f.len == 48);
+            break;
+          }
         case GBK_MSG_WATCH:
         case GBK_MSG_GET_INFO:
+        case GBK_MSG_RESOLVE:
+        case GBK_MSG_RESOLVED:
           {
             g_autofree char *path = gbk_proto_get_path (&f);
             g_assert (path == nullptr || path[0] == '/');

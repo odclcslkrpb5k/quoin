@@ -12,5 +12,14 @@ void gbk_jobui_start (GbkJob *job, GtkWindow *parent);
 /* Show a modeless error message (also used by the window for its own errors). */
 void gbk_jobui_error (GtkWindow *parent, const char *title, const char *message);
 
+/* The answers of a job's question dialogs (tests answer them with gtk_dialog_response). */
+enum
+{
+  GBK_JOBUI_REPLACE = 1,
+  GBK_JOBUI_SKIP,
+  GBK_JOBUI_KEEP_BOTH,
+  GBK_JOBUI_DELETE
+};
+
 /* How long a job runs before its progress window appears. */
 #define GBK_JOBUI_DELAY_MS 500

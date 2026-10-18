@@ -13,6 +13,10 @@ typedef struct
   bool delete_untrashable;
   int cancel_after_progress;   /* >0: report cancelled after this many progress calls */
   int progress_calls;
+  GbkChoice upload_answer;
+  int uploads_asked;
+  bool asked_linked;           /* the last upload question was about hard links */
+  const char *touch_when_asked; /* changed at the first upload question */
 } Script;
 
 static GbkChoice
@@ -47,6 +51,20 @@ on_progress (uint64_t done G_GNUC_UNUSED, uint64_t total G_GNUC_UNUSED,
   ((Script *) data)->progress_calls++;
 }
 
+static GbkChoice
+on_upload (const char *target G_GNUC_UNUSED, bool linked, void *data)
+{
+  Script *s = data;
+  s->uploads_asked++;
+  s->asked_linked = linked;
+  if (s->uploads_asked == 1 && s->touch_when_asked != nullptr)
+    {
+      g_usleep (20000);
+      g_assert_true (g_file_set_contents (s->touch_when_asked, "while asked", -1, nullptr));
+    }
+  return s->upload_answer;
+}
+
 static bool
 is_cancelled (void *data)
 {
@@ -57,7 +75,8 @@ is_cancelled (void *data)
 static GbkOpsHooks
 hooks (Script *s)
 {
-  return (GbkOpsHooks) { on_conflict, on_error, on_untrashable, on_progress, is_cancelled, s };
+  return (GbkOpsHooks) { on_conflict,  on_error, on_untrashable, on_progress,
+                         is_cancelled, s,        on_upload };
 }
 
 /* ---- fixture helpers ---- */
@@ -621,6 +640,133 @@ test_info (void)
   g_assert_error (e, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
 }
 
+/* Upload `edit_rel` over `target_rel` given what it was (`base`); the name written, or "". */
+[[nodiscard]] static char *
+upload (const char *edit_rel, const char *target_rel, const GbkFileToken *base, Script *s,
+        GbkFileToken *token, GError **error)
+{
+  g_autofree char *edit = P (edit_rel);
+  g_autofree char *target = P (target_rel);
+  g_autoptr (GbkSource) here = gbk_source_local ();
+  GbkOpsHooks h = hooks (s);
+  g_autofree char *written = nullptr;
+  if (!gbk_ops_upload (here, edit, target, base, &h, &written, token, error))
+    return nullptr;
+  return written != nullptr ? g_steal_pointer (&written) : g_strdup ("");
+}
+
+static GbkFileToken
+token_of (const char *rel)
+{
+  g_autofree char *p = P (rel);
+  struct stat st;
+  g_assert_cmpint (lstat (p, &st), ==, 0);
+  return gbk_file_token_of (&st);
+}
+
+static bool
+temp_left (const char *dir_rel)
+{
+  g_autofree char *dir = P (dir_rel);
+  g_autoptr (GDir) d = g_dir_open (dir, 0, nullptr);
+  const char *name;
+  while (d != nullptr && (name = g_dir_read_name (d)) != nullptr)
+    if (g_str_has_prefix (name, ".gbk-tmp-"))
+      return true;
+  return false;
+}
+
+/* An edited file goes back over the one it came from only if that is still as it was;
+ * otherwise (or with other hard links) it asks, and every answer keeps both versions safe. */
+static void
+test_upload (void)
+{
+  mk ("up/t.txt", "old");
+  mk ("edit/t.txt", "new");
+  g_autofree char *target = P ("up/t.txt");
+  g_assert_cmpint (chmod (target, 0640), ==, 0);
+  GbkFileToken base = token_of ("up/t.txt");
+  Script s = { .upload_answer = GBK_CHOICE_SKIP };
+  GbkFileToken token;
+  g_autoptr (GError) error = nullptr;
+
+  /* Unchanged there: replaced, keeping its permissions; the new state comes back. */
+  g_autofree char *w1 = upload ("edit/t.txt", "up/t.txt", &base, &s, &token, &error);
+  g_assert_no_error (error);
+  g_assert_cmpstr (w1, ==, "t.txt");
+  g_assert_cmpint (s.uploads_asked, ==, 0);
+  g_autofree char *c1 = slurp ("up/t.txt");
+  g_assert_cmpstr (c1, ==, "new");
+  GbkFileToken now = token_of ("up/t.txt");
+  g_assert_true (gbk_file_token_same (&token, &now));
+  struct stat st;
+  g_assert_cmpint (stat (target, &st), ==, 0);
+  g_assert_cmpint (st.st_mode & 07777, ==, 0640);
+  g_assert_false (temp_left ("up"));
+
+  /* Changed there since: asked. Don't Upload leaves theirs; Keep Both puts ours beside it;
+   * Replace replaces it. */
+  base = token;
+  g_usleep (20000);
+  mk ("up/t.txt", "theirs");
+  g_autofree char *w2 = upload ("edit/t.txt", "up/t.txt", &base, &s, &token, &error);
+  g_assert_cmpstr (w2, ==, "");
+  g_assert_cmpint (s.uploads_asked, ==, 1);
+  g_assert_false (s.asked_linked);
+  g_autofree char *c2 = slurp ("up/t.txt");
+  g_assert_cmpstr (c2, ==, "theirs");
+  g_assert_false (temp_left ("up"));
+  s.upload_answer = GBK_CHOICE_KEEP_BOTH;
+  g_autofree char *w3 = upload ("edit/t.txt", "up/t.txt", &base, &s, &token, &error);
+  g_assert_cmpstr (w3, ==, "t (1).txt");
+  g_autofree char *c3 = slurp ("up/t (1).txt");
+  g_assert_cmpstr (c3, ==, "new");
+  g_autofree char *c3b = slurp ("up/t.txt");
+  g_assert_cmpstr (c3b, ==, "theirs");
+  s.upload_answer = GBK_CHOICE_REPLACE;
+  g_autofree char *w4 = upload ("edit/t.txt", "up/t.txt", &base, &s, &token, &error);
+  g_assert_cmpstr (w4, ==, "t.txt");
+  g_autofree char *c4 = slurp ("up/t.txt");
+  g_assert_cmpstr (c4, ==, "new");
+
+  /* Other hard links: asked even though unchanged; Replace separates them. */
+  g_autofree char *other = P ("up/other-name");
+  g_assert_cmpint (link (target, other), ==, 0);
+  base = token_of ("up/t.txt");
+  mk ("edit/t.txt", "newer");
+  s.uploads_asked = 0;
+  g_autofree char *w5 = upload ("edit/t.txt", "up/t.txt", &base, &s, &token, &error);
+  g_assert_cmpstr (w5, ==, "t.txt");
+  g_assert_cmpint (s.uploads_asked, ==, 1);
+  g_assert_true (s.asked_linked);
+  g_autofree char *c5 = slurp ("up/other-name");
+  g_assert_cmpstr (c5, ==, "new");
+
+  /* Changed again while the question was up: asked again, never overwritten unseen. */
+  base = token_of ("up/t.txt");
+  g_usleep (20000);
+  mk ("up/t.txt", "changed before");
+  s.uploads_asked = 0;
+  s.touch_when_asked = target;
+  g_autofree char *w6 = upload ("edit/t.txt", "up/t.txt", &base, &s, &token, &error);
+  g_assert_cmpstr (w6, ==, "t.txt");
+  g_assert_cmpint (s.uploads_asked, ==, 2);
+  s.touch_when_asked = nullptr;
+
+  /* Gone there: made again. No longer a file: refused. */
+  g_assert_cmpint (unlink (target), ==, 0);
+  g_autofree char *w7 = upload ("edit/t.txt", "up/t.txt", &base, &s, &token, &error);
+  g_assert_cmpstr (w7, ==, "t.txt");
+  g_autofree char *c7 = slurp ("up/t.txt");
+  g_assert_cmpstr (c7, ==, "newer");
+  g_assert_cmpint (unlink (target), ==, 0);
+  mk ("up/t.txt/", nullptr);
+  g_autofree char *w8 = upload ("edit/t.txt", "up/t.txt", &base, &s, &token, &error);
+  g_assert_null (w8);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_REGULAR_FILE);
+  g_assert_false (temp_left ("up"));
+}
+
 static void
 fresh_root (void)
 {
@@ -656,6 +802,7 @@ WRAP (test_numbered_name)
 WRAP (test_create)
 WRAP (test_permissions)
 WRAP (test_info)
+WRAP (test_upload)
 
 int
 main (int argc, char **argv)
@@ -684,6 +831,7 @@ main (int argc, char **argv)
   ADD ("/fileops/errors-and-cancel", test_errors_and_cancel);
   ADD ("/fileops/rename", test_rename);
   ADD ("/fileops/free-name", test_free_name);
+  ADD ("/fileops/upload", test_upload);
   int status = g_test_run ();
   g_free (root);
   return status;

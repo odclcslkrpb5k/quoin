@@ -454,6 +454,15 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   gbk_ops_remove_unchanged keeps anything not as FIRST listed. job.c plan_transfer picks
   here / read-from-there / run-there. Cut/Paste/Paste Into now work remotely; drops onto
   remote stay refused (phase 8) in ask_drop + view.
+  Phase 6b (editing): see remote-plan.md "As built in phase 6 ... editing". New: GbkFileToken
+  (fileops), GbkSourceOps.resolve/.state, gbk_ops_upload (+ hooks.upload_conflict, LAST
+  field so positional hook initializers still work), GBK_OP_UPLOAD (jobs only), job kinds
+  FETCH/UPLOAD, proto RESOLVE/RESOLVED/UPLOADED + END carries the state as read,
+  edit-store.c (core: records/locks), edits.c (gui: watcher singleton, gbk_edits_init in
+  main, gbk_edits_shutdown at exit; callbacks owned by a private E.owner object, since the
+  GtkApplication may outlive the watcher in tests). Tests: test-fileops /upload, test-conn
+  /edit-round-trip, test-remotewin /edit-upload /unsent-offered /cache-cleanup (stand-in app
+  stays open while ~/hold-app exists; GBK_JOBUI_* answers are public for tests).
 - ANALYZER + REFCOUNTS: -fanalyzer can't follow refcounts: a task/job referenced by a
   table AND its worker gets "use after free" on error paths. Give such things ONE owner
   (the worker) and let tables borrow them under a lock (peer.c tasks and jobs).

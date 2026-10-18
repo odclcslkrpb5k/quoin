@@ -2,7 +2,8 @@
  * machine" is this one, under a private home). Phase 4 of docs/remote-plan.md: look, never
  * change; survive the connection dying. */
 #include "browser.h"
-#include "fetch.h"
+#include "edits.h"
+#include "jobui.h"
 #include "conn.h"
 #include "job.h"
 #include "lifetime.h"
@@ -284,44 +285,249 @@ test_paste_there (void)
   gtk_widget_destroy (GTK_WIDGET (w));
 }
 
-/* Opening a file there opens a read-only copy here, in the cache. */
-static void
-test_open_copy (void)
+/* The copy here of `name` that the stand-in app was asked to open ("<file>.opened" appears
+ * beside it). g_free. */
+static char *
+opened_copy (const char *name)
 {
-  put ("data/notes.txt", "notes");
-  GbkWindow *w = window_on_remote_data ();
-  GbkDirModel *m = model_of (w);
-  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (m, "notes.txt"));
-  g_signal_emit_by_name (gbk_window_view (w), "activate");
-  /* The stand-in default application leaves "<file>.opened" beside what it opened. */
   g_autofree char *cache = g_build_filename (home, ".cache", "quoin", "remote", nullptr);
-  g_autofree char *opened = nullptr;
+  g_autofree char *marker_name = g_strconcat (name, ".opened", nullptr);
   int64_t deadline = g_get_monotonic_time () + INT64_C (20) * G_USEC_PER_SEC;
-  while (opened == nullptr && g_get_monotonic_time () < deadline)
+  while (g_get_monotonic_time () < deadline)
     {
       while (gtk_events_pending ())
         gtk_main_iteration ();
       g_autoptr (GDir) d = g_dir_open (cache, 0, nullptr);
-      const char *name;
-      while (d != nullptr && (name = g_dir_read_name (d)) != nullptr)
+      const char *entry;
+      while (d != nullptr && (entry = g_dir_read_name (d)) != nullptr)
         {
-          g_autofree char *marker = g_build_filename (cache, name, "notes.txt.opened", nullptr);
+          g_autofree char *marker = g_build_filename (cache, entry, marker_name, nullptr);
           if (g_file_test (marker, G_FILE_TEST_EXISTS))
-            opened = g_build_filename (cache, name, "notes.txt", nullptr);
+            {
+              unlink (marker);
+              return g_build_filename (cache, entry, name, nullptr);
+            }
         }
       g_usleep (5000);
     }
-  g_assert_nonnull (opened);
+  return nullptr;
+}
+
+/* Message dialogs on screen now (borrowed). */
+static GPtrArray *
+message_dialogs (void)
+{
+  GPtrArray *out = g_ptr_array_new ();
+  GList *tops = gtk_window_list_toplevels ();
+  for (GList *l = tops; l != nullptr; l = l->next)
+    if (GTK_IS_MESSAGE_DIALOG (l->data) && gtk_widget_get_visible (l->data))
+      g_ptr_array_add (out, l->data);
+  g_list_free (tops);
+  return out;
+}
+
+typedef struct
+{
+  const char *starts;     /* the start of its main text */
+  GtkMessageDialog *found;
+} Wanted;
+
+static bool
+dialog_shown (void *data)
+{
+  Wanted *want = data;
+  g_autoptr (GPtrArray) all = message_dialogs ();
+  for (guint i = 0; i < all->len; i++)
+    {
+      g_autofree char *text = nullptr;
+      g_object_get (g_ptr_array_index (all, i), "text", &text, nullptr);
+      if (text != nullptr && g_str_has_prefix (text, want->starts))
+        {
+          want->found = g_ptr_array_index (all, i);
+          return true;
+        }
+    }
+  return false;
+}
+
+static bool
+no_edits (void *data G_GNUC_UNUSED)
+{
+  return gbk_edits_count () == 0;
+}
+
+typedef struct
+{
+  const char *rel;
+  const char *content;
+} Content;
+
+static bool
+has_content (void *data)
+{
+  const Content *c = data;
+  g_autofree char *p = g_build_filename (home, c->rel, nullptr);
+  g_autofree char *text = nullptr;
+  return g_file_get_contents (p, &text, nullptr, nullptr) && g_str_equal (text, c->content);
+}
+
+static void
+save_copy (const char *copy, const char *content)
+{
+  g_usleep (20000);                      /* a later mtime, on any filesystem */
+  g_assert_true (g_file_set_contents (copy, content, -1, nullptr));
+}
+
+/* Opening a file there opens a private, writable copy here; its saves go back there. A
+ * change made there meanwhile is asked about (Keep Both here), and later saves go to the
+ * kept copy. When the last window closes, a notice names the file and its app, and Quoin
+ * keeps watching until that app has closed. */
+static void
+test_edit_upload (void)
+{
+  put ("data/notes.txt", "notes");
+  g_autofree char *hold = g_build_filename (home, "hold-app", nullptr);
+  g_assert_true (g_file_set_contents (hold, "", -1, nullptr));   /* the app stays open */
+  GbkWindow *w = window_on_remote_data ();
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "notes.txt"));
+  g_signal_emit_by_name (gbk_window_view (w), "activate");
+  g_autofree char *copy = opened_copy ("notes.txt");
+  g_assert_nonnull (copy);
   g_autofree char *content = nullptr;
-  g_assert_true (g_file_get_contents (opened, &content, nullptr, nullptr));
+  g_assert_true (g_file_get_contents (copy, &content, nullptr, nullptr));
   g_assert_cmpstr (content, ==, "notes");
   struct stat st;
-  g_assert_cmpint (stat (opened, &st), ==, 0);
-  g_assert_cmpint (st.st_mode & 0222, ==, 0);      /* read-only: saves can't go anywhere yet */
-  g_autofree char *dir = g_path_get_dirname (opened);
+  g_assert_cmpint (stat (copy, &st), ==, 0);
+  g_assert_cmpint (st.st_mode & 0777, ==, 0600);   /* the app can save it; nobody else */
+  g_autofree char *dir = g_path_get_dirname (copy);
   g_assert_cmpint (stat (dir, &st), ==, 0);
-  g_assert_cmpint (st.st_mode & 0777, ==, 0700);   /* private */
+  g_assert_cmpint (st.st_mode & 0777, ==, 0700);
+  g_assert_cmpuint (gbk_edits_count (), ==, 1);
+
+  save_copy (copy, "edited");
+  Content edited = { "data/notes.txt", "edited" };
+  g_assert_true (wait_until (has_content, &edited));
+
+  /* Opened again: the same copy, no second download. */
+  g_signal_emit_by_name (gbk_window_view (w), "activate");
+  g_autofree char *again = opened_copy ("notes.txt");
+  g_assert_cmpstr (again, ==, copy);
+  g_assert_cmpuint (gbk_edits_count (), ==, 1);
+
+  g_assert_true (wait_until (no_jobs, nullptr));
+  g_usleep (20000);
+  put ("data/notes.txt", "theirs");
+  save_copy (copy, "mine");
+  Wanted asked = { .starts = "“notes.txt” changed on the other machine" };
+  g_assert_true (wait_until (dialog_shown, &asked));
+  gtk_dialog_response (GTK_DIALOG (asked.found), GBK_JOBUI_KEEP_BOTH);
+  Content kept = { "data/notes (1).txt", "mine" };
+  g_assert_true (wait_until (has_content, &kept));
+  g_assert_true (wait_until (no_jobs, nullptr));
+  Content theirs = { "data/notes.txt", "theirs" };
+  g_assert_true (has_content (&theirs));
+  save_copy (copy, "third");
+  Content third = { "data/notes (1).txt", "third" };
+  g_assert_true (wait_until (has_content, &third));
+
   gtk_widget_destroy (GTK_WIDGET (w));
+  Wanted notice = { .starts = "Quoin keeps running to upload your saves" };
+  g_assert_true (wait_until (dialog_shown, &notice));
+  g_autofree char *list = nullptr;
+  g_object_get (notice.found, "secondary-text", &list, nullptr);
+  g_assert_nonnull (strstr (list, "notes.txt (Opener) from ws"));
+  gtk_widget_destroy (GTK_WIDGET (notice.found));
+  g_assert_cmpuint (gbk_edits_count (), ==, 1);    /* the app is still open */
+
+  unlink (hold);                                   /* the app closes: watching ends */
+  g_assert_true (wait_until (no_edits, nullptr));
+}
+
+static guint unsent_offered;
+static GbkEditsAnswer unsent_reply;
+
+static GbkEditsAnswer
+answer_unsent (guint n)
+{
+  unsent_offered += n;
+  return unsent_reply;
+}
+
+/* A copy as an earlier Quoin would have left it: downloaded from data/`name`, then changed
+ * here (`edited`) and never uploaded. `machine_id` as that machine answered then. */
+static void
+leave_unsent (const char *id, const char *name, const char *machine_id, const char *edited)
+{
+  g_autofree char *cache = gbk_edits_cache ();
+  g_autofree char *remote = g_build_filename (home, "data", name, nullptr);
+  g_autofree char *dir = g_build_filename (cache, id, nullptr);
+  g_autofree char *copy = g_build_filename (dir, name, nullptr);
+  g_mkdir_with_parents (dir, 0700);
+  struct stat st;
+  g_assert_cmpint (stat (remote, &st), ==, 0);
+  g_autoptr (GbkEditRecord) rec = g_new0 (GbkEditRecord, 1);
+  rec->id = g_strdup (id);
+  rec->name = g_strdup (name);
+  rec->host = g_strdup ("ws");
+  rec->machine_id = g_strdup (machine_id);
+  rec->uid = (uint32_t) getuid ();
+  rec->remote = g_strdup (remote);
+  rec->app = g_strdup ("Opener");
+  rec->base = gbk_file_token_of (&st);
+  g_assert_true (g_file_set_contents (copy, "as downloaded", -1, nullptr));
+  g_assert_cmpint (stat (copy, &st), ==, 0);
+  rec->synced = gbk_file_token_of (&st);
+  g_autoptr (GError) error = nullptr;
+  g_assert_true (gbk_edit_record_save (cache, rec, &error));
+  save_copy (copy, edited);
+}
+
+static bool
+offered (void *want)
+{
+  return unsent_offered >= GPOINTER_TO_UINT (want);
+}
+
+/* Copies an earlier Quoin left changed and unsent are offered at the next start: Upload
+ * sends them (once), Discard settles them; and one that came from a machine that now
+ * answers differently is never sent there. */
+static void
+test_unsent_offered (void)
+{
+  g_autofree char *mine = gbk_conn_local_machine_id ();
+  gbk_edits_set_unsent_answer_for_test (answer_unsent);
+  unsent_offered = 0;
+
+  put ("data/left.txt", "there");
+  leave_unsent ("unsentA", "left.txt", mine, "changed offline");
+  unsent_reply = GBK_EDITS_UPLOAD;
+  gbk_edits_scan ();
+  Content sent = { "data/left.txt", "changed offline" };
+  g_assert_true (wait_until (has_content, &sent));
+  g_assert_true (wait_until (no_edits, nullptr));
+  g_assert_cmpuint (unsent_offered, ==, 1);
+
+  put ("data/other.txt", "there");
+  leave_unsent ("unsentB", "other.txt", mine, "never mind");
+  unsent_reply = GBK_EDITS_DISCARD;
+  gbk_edits_scan ();
+  g_assert_true (wait_until (offered, GUINT_TO_POINTER (2)));
+  Content untouched = { "data/other.txt", "there" };
+  g_assert_true (has_content (&untouched));
+  gbk_edits_scan ();                     /* settled now: neither is offered again */
+  put ("data/elsewhere.txt", "there");
+  leave_unsent ("unsentC", "elsewhere.txt", "0123456789abcdef", "for another machine");
+  unsent_reply = GBK_EDITS_UPLOAD;
+  gbk_edits_scan ();
+  g_assert_true (wait_until (offered, GUINT_TO_POINTER (3)));
+  Wanted refused = { .starts = "Not uploaded" };
+  g_assert_true (wait_until (dialog_shown, &refused));
+  gtk_widget_destroy (GTK_WIDGET (refused.found));
+  g_assert_true (wait_until (no_edits, nullptr));
+  Content kept_there = { "data/elsewhere.txt", "there" };
+  g_assert_true (has_content (&kept_there));
+  g_assert_cmpuint (unsent_offered, ==, 3);
+  gbk_edits_set_unsent_answer_for_test (nullptr);
 }
 
 static bool
@@ -330,11 +536,12 @@ gone (void *path)
   return !g_file_test (path, G_FILE_TEST_EXISTS);
 }
 
-/* Cache folders older than the limit go (read-only files in them too); newer ones stay. */
+/* Old copies go: folders without a record (read-only copies from before records), and
+ * finished records with their copies; newer ones stay. */
 static void
 test_cache_cleanup (void)
 {
-  g_autofree char *cache = gbk_fetch_cache_dir ();
+  g_autofree char *cache = gbk_edits_cache ();
   g_autofree char *old = g_build_filename (cache, "oldone", nullptr);
   g_autofree char *young = g_build_filename (cache, "young", nullptr);
   g_autofree char *old_file = g_build_filename (old, "f.txt", nullptr);
@@ -345,8 +552,25 @@ test_cache_cleanup (void)
   const time_t then = time (nullptr) - (time_t) 10 * 24 * 3600;
   const struct timespec ten_days_ago[2] = { { then, 0 }, { then, 0 } };
   g_assert_cmpint (utimensat (AT_FDCWD, old, ten_days_ago, 0), ==, 0);
-  gbk_fetch_cleanup_start (GBK_FETCH_KEEP_DAYS);
+
+  put ("data/done.txt", "x");
+  leave_unsent ("finished", "done.txt", "", "x");
+  g_autoptr (GError) error = nullptr;
+  g_autoptr (GbkEditRecord) rec = gbk_edit_record_load (cache, "finished", &error);
+  g_assert_no_error (error);
+  g_autofree char *copy = gbk_edit_record_copy (cache, rec);
+  struct stat st;
+  g_assert_cmpint (stat (copy, &st), ==, 0);
+  rec->synced = gbk_file_token_of (&st);         /* uploaded: settled */
+  g_assert_true (gbk_edit_record_save (cache, rec, &error));
+  g_autofree char *ini = g_build_filename (cache, "finished.ini", nullptr);
+  g_assert_cmpint (utimensat (AT_FDCWD, ini, ten_days_ago, 0), ==, 0);
+  g_autofree char *finished_dir = g_build_filename (cache, "finished", nullptr);
+
+  gbk_edits_scan ();
   g_assert_true (wait_until (gone, old));
+  g_assert_true (wait_until (gone, ini));
+  g_assert_true (wait_until (gone, finished_dir));
   g_assert_true (g_file_test (young, G_FILE_TEST_IS_DIR));
 }
 
@@ -526,8 +750,12 @@ main (int argc, char **argv)
   g_mkdir_with_parents (apps, 0755);
   g_mkdir_with_parents (config_home, 0755);
   g_autofree char *opener = g_build_filename (home, "opener", nullptr);
-  g_assert_true (g_file_set_contents (opener, "#!/bin/sh\nfor f; do touch \"$f.opened\"; done\n",
-                                      -1, nullptr));
+  /* It stays open while ~/hold-app exists (at most 30 s). */
+  g_assert_true (g_file_set_contents (
+      opener,
+      "#!/bin/sh\nfor f; do touch \"$f.opened\"; done\nn=0\n"
+      "while [ -e \"$HOME/hold-app\" ] && [ $n -lt 300 ]; do sleep 0.1; n=$((n+1)); done\n",
+      -1, nullptr));
   g_assert_cmpint (chmod (opener, 0755), ==, 0);
   g_autofree char *desktop = g_strdup_printf (
       "[Desktop Entry]\nType=Application\nName=Opener\nExec=%s %%F\nMimeType=text/plain;\n",
@@ -550,6 +778,8 @@ main (int argc, char **argv)
   if (!g_application_register (G_APPLICATION (app), nullptr, &error))
     gbk_fatal ("register: %s", error->message);
 
+  gbk_edits_set_timing_for_test (50, 400, 400);
+  gbk_edits_init (app, ctx);
   g_test_add_func ("/remotewin/browse", test_browse);
   g_test_add_func ("/remotewin/refusals", test_refusals);
   g_test_add_func ("/remotewin/properties", test_properties);
@@ -557,13 +787,15 @@ main (int argc, char **argv)
   g_test_add_func ("/remotewin/network-action", test_network_action);
   g_test_add_func ("/remotewin/copy-paste-here", test_copy_paste_here);
   g_test_add_func ("/remotewin/paste-there", test_paste_there);
-  g_test_add_func ("/remotewin/open-copy", test_open_copy);
+  g_test_add_func ("/remotewin/edit-upload", test_edit_upload);
+  g_test_add_func ("/remotewin/unsent-offered", test_unsent_offered);
   g_test_add_func ("/remotewin/cache-cleanup", test_cache_cleanup);
   g_test_add_func ("/remotewin/open-names-app", test_open_names_app);
   int status = g_test_run ();
 
   while (gtk_events_pending ())
     gtk_main_iteration ();
+  gbk_edits_shutdown ();
   g_object_unref (app);
   gbk_context_unref (ctx);
   wait_until (no_conns, nullptr);

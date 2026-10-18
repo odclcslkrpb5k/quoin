@@ -16,6 +16,30 @@ typedef struct
   GbkSource *src;         /* where sources are read */
 } Ctx;
 
+static int64_t
+timespec_ns (struct timespec ts)
+{
+  return (int64_t) ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+GbkFileToken
+gbk_file_token_of (const struct stat *st)
+{
+  return (GbkFileToken) { .dev = st->st_dev,
+                          .ino = st->st_ino,
+                          .size = (uint64_t) st->st_size,
+                          .nlink = st->st_nlink,
+                          .mtime_ns = timespec_ns (st->st_mtim),
+                          .ctime_ns = timespec_ns (st->st_ctim) };
+}
+
+bool
+gbk_file_token_same (const GbkFileToken *a, const GbkFileToken *b)
+{
+  return a->dev == b->dev && a->ino == b->ino && a->size == b->size && a->mtime_ns == b->mtime_ns
+         && a->ctime_ns == b->ctime_ns;
+}
+
 void
 gbk_stat_entry_free (GbkStatEntry *e)
 {
@@ -76,6 +100,7 @@ typedef struct
 {
   GbkSourceFile base;
   int fd;
+  struct stat opened;     /* when opened: to tell whether it changed while being read */
 } LocalFile;
 
 GbkStatEntry *
@@ -164,6 +189,8 @@ local_open (GbkSource *s, const char *path, GError **error)
   LocalFile *f = g_new0 (LocalFile, 1);
   f->base.source = s;
   f->fd = fd;
+  if (fstat (fd, &f->opened) != 0)
+    f->opened = (struct stat) { 0 };
   return &f->base;
 }
 
@@ -198,6 +225,28 @@ local_close (GbkSourceFile *f)
   g_free (lf);
 }
 
+[[nodiscard]] static char *
+local_resolve (GbkSource *s G_GNUC_UNUSED, const char *path, GError **error)
+{
+  char *real = realpath (path, nullptr);
+  if (real == nullptr)
+    set_errno_gerror (error, errno);
+  return real;
+}
+
+/* As read: unchanged since it was opened (else nothing can be said). */
+static bool
+local_state (const GbkSourceFile *f, GbkFileToken *token)
+{
+  const LocalFile *lf = (const LocalFile *) (const void *) f;
+  struct stat now;
+  if (fstat (lf->fd, &now) != 0)
+    return false;
+  GbkFileToken then = gbk_file_token_of (&lf->opened);
+  *token = gbk_file_token_of (&now);
+  return gbk_file_token_same (&then, token);
+}
+
 static void
 local_free (GbkSource *s)
 {
@@ -212,6 +261,8 @@ static const GbkSourceOps local_ops = {
   .fd = local_fd,
   .close = local_close,
   .remove = nullptr,          /* a move here renames, or copies and deletes (move_into) */
+  .resolve = local_resolve,
+  .state = local_state,
   .free = local_free,
 };
 
@@ -1163,6 +1214,11 @@ bool
 gbk_ops_run_from (GbkSource *src, GbkOpKind kind, GPtrArray *sources, const char *dest_dir,
                   const GbkOpsHooks *hooks, GPtrArray *created, GError **error)
 {
+  if (kind == GBK_OP_UPLOAD)
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "Not a tree operation");
+      return false;
+    }
   if (!src->local && !(kind == GBK_OP_COPY || (kind == GBK_OP_MOVE && src->ops->remove != nullptr)))
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
@@ -1218,6 +1274,7 @@ gbk_ops_run_from (GbkSource *src, GbkOpKind kind, GPtrArray *sources, const char
           break;
         case GBK_OP_TRASH: trash_path (&c, path); break;
         case GBK_OP_DELETE: delete_path (&c, path); break;
+        case GBK_OP_UPLOAD:
         default: gbk_fatal ("bad op %d", (int) kind);
         }
     }
@@ -1228,6 +1285,196 @@ gbk_ops_run_from (GbkSource *src, GbkOpKind kind, GPtrArray *sources, const char
       return false;
     }
   return true;
+}
+
+/* ---- uploading an edited file ---- */
+
+/* The new contents of an upload, read from the source into a durable temp file in `dir`
+ * (fd in *out, name in *tmp). 0, ECANCELED, a write's errno, or -1 with *read_error. */
+[[nodiscard]] static int
+upload_write (Ctx *c, const char *src_path, const char *dir, char **tmp, int *out,
+              GError **read_error)
+{
+  GbkSourceFile *f = c->src->ops->open (c->src, src_path, read_error);
+  if (f == nullptr)
+    return -1;
+  *tmp = g_build_filename (dir, TMP_PREFIX "XXXXXX", nullptr);
+  *out = g_mkstemp_full (*tmp, O_WRONLY | O_CLOEXEC, 0600);
+  if (*out < 0)
+    {
+      int err = errno;
+      c->src->ops->close (f);
+      g_clear_pointer (tmp, g_free);
+      return err;
+    }
+  g_autofree char *shown = g_filename_display_basename (src_path);
+  int in = c->src->ops->fd (f);
+  int err = in >= 0 ? copy_data (c, in, *out, shown) : copy_stream (c, f, *out, shown, read_error);
+  GbkFileToken read_state;
+  if (err == 0 && !c->src->ops->state (f, &read_state))
+    {
+      err = -1;
+      g_set_error_literal (read_error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "It changed while it was being sent; try again");
+    }
+  c->src->ops->close (f);
+  if (err == 0 && fsync (*out) != 0)
+    err = errno;
+  return err;
+}
+
+/* What to do about the target being as it is (`st`, or gone): REPLACE when it's still as
+ * `base` says and has no other names. */
+static GbkChoice
+upload_decide (Ctx *c, const char *target, const struct stat *st, bool exists,
+               const GbkFileToken *base)
+{
+  if (!exists)
+    return GBK_CHOICE_REPLACE; /* gone there: made again */
+  GbkFileToken now = gbk_file_token_of (st);
+  bool changed = !gbk_file_token_same (&now, base);
+  if (!changed && st->st_nlink <= 1)
+    return GBK_CHOICE_REPLACE;
+  return c->h->upload_conflict != nullptr ? c->h->upload_conflict (target, !changed, c->h->data)
+                                          : GBK_CHOICE_SKIP;
+}
+
+/* The old file's owner (where allowed) and attributes, then its permissions, onto the new
+ * one: 0, or the errno of failing to set the permissions (a file shouldn't change who may
+ * read it by being saved). */
+static int
+upload_keep (int dirfd, const char *name, const struct stat *st, int out)
+{
+  if (st->st_uid != getuid () || st->st_gid != getgid ())
+    keep_owner_fd (out, st);
+  int old = openat (dirfd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+  if (old >= 0)
+    {
+      keep_xattrs (old, out, nullptr, nullptr);
+      close (old);
+    }
+  return fchmod (out, st->st_mode & 07777) == 0 ? 0 : errno; /* after chown (clears setuid) */
+}
+
+/* Is `name` in `dirfd` still what `st` described (or still absent)? */
+static bool
+still (int dirfd, const char *name, const struct stat *st, bool existed)
+{
+  struct stat now;
+  bool exists = fstatat (dirfd, name, &now, AT_SYMLINK_NOFOLLOW) == 0;
+  if (!existed)
+    return !exists;
+  return exists && same_inode (&now, st) && timespec_ns (now.st_ctim) == timespec_ns (st->st_ctim);
+}
+
+/* Put the written temp file in place: over the target, beside it, or where it was. The
+ * name used in *final; 0 or an errno; EAGAIN: it changed meanwhile, decide again. */
+static int
+upload_place (int dirfd, const char *dir, const char *name, const char *tmp, const struct stat *st,
+              bool exists, bool beside, char **final)
+{
+  g_autofree char *tmp_name = g_path_get_basename (tmp);
+  g_autofree char *to = beside ? gbk_ops_free_name (dir, name) : g_strdup (name);
+  if (!beside && !still (dirfd, name, st, exists))
+    return EAGAIN;
+  int r = exists && !beside ? renameat (dirfd, tmp_name, dirfd, to)
+                            : renameat2 (dirfd, tmp_name, dirfd, to, RENAME_NOREPLACE);
+  if (r != 0)
+    return errno == EEXIST ? EAGAIN : errno;
+  *final = g_steal_pointer (&to);
+  return 0;
+}
+
+bool
+gbk_ops_upload (GbkSource *src, const char *src_path, const char *target, const GbkFileToken *base,
+                const GbkOpsHooks *hooks, char **written, GbkFileToken *token, GError **error)
+{
+  *written = nullptr;
+  src->cancelled = hooks->cancelled;
+  src->cancel_data = hooks->data;
+  Ctx c = { .h = hooks, .src = src };
+  g_autoptr (GbkStatEntry) size = src->ops->lstat (src, src_path, nullptr);
+  c.total = size != nullptr ? size->size : 0;
+  g_autofree char *dir = g_path_get_dirname (target);
+  g_autofree char *name = g_path_get_basename (target);
+  int dirfd = open (dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dirfd < 0)
+    {
+      set_errno_gerror (error, errno);
+      return false;
+    }
+  g_autofree char *tmp = nullptr;
+  int out = -1;
+  g_autoptr (GError) read_error = nullptr;
+  g_autoptr (GError) why = nullptr;
+  int err = upload_write (&c, src_path, dir, &tmp, &out, &read_error);
+  bool skipped = false;
+  g_autofree char *final = nullptr;
+  /* Decide on what's there; then, just before replacing it, make sure it's still that: a
+   * save there in between is asked about again, never lost. */
+  for (int round = 0; err == 0 && out >= 0 && final == nullptr && !skipped; round++)
+    {
+      if (round == 3)
+        {
+          why = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_BUSY,
+                                     "It keeps changing there; try again later");
+          break;
+        }
+      struct stat st;
+      bool exists = fstatat (dirfd, name, &st, AT_SYMLINK_NOFOLLOW) == 0;
+      if (!exists && errno != ENOENT)
+        {
+          err = errno;
+          break;
+        }
+      if (exists && !S_ISREG (st.st_mode))
+        {
+          why = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_REGULAR_FILE,
+                                     "It is no longer a file there");
+          break;
+        }
+      GbkChoice ch = upload_decide (&c, target, &st, exists, base);
+      if (ch == GBK_CHOICE_CANCEL || cancelled (&c))
+        err = ECANCELED;
+      else if (ch == GBK_CHOICE_SKIP)
+        skipped = true;
+      else
+        {
+          bool beside = ch == GBK_CHOICE_KEEP_BOTH;
+          if (exists && !beside)
+            err = upload_keep (dirfd, name, &st, out);
+          else if (fchmod (out, 0644) != 0)
+            err = errno;
+          if (err == 0)
+            err = upload_place (dirfd, dir, name, tmp, &st, exists, beside, &final);
+          if (err == EAGAIN)
+            err = 0; /* changed meanwhile: decide again */
+        }
+    }
+  struct stat done_st;
+  if (final != nullptr && (fsync (dirfd) != 0 || fstat (out, &done_st) != 0))
+    err = errno;
+  if (out >= 0)
+    close (out);
+  if (tmp != nullptr && final == nullptr)
+    unlink (tmp);
+  close (dirfd);
+  if (err == 0 && why == nullptr && (final != nullptr || skipped))
+    {
+      if (final != nullptr)
+        *token = gbk_file_token_of (&done_st);
+      *written = g_steal_pointer (&final);
+      return true;
+    }
+  if (why != nullptr)
+    g_propagate_error (error, g_steal_pointer (&why));
+  else if (err == ECANCELED)
+    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Cancelled");
+  else if (err < 0)
+    g_propagate_error (error, g_steal_pointer (&read_error));
+  else
+    set_errno_gerror (error, err);
+  return false;
 }
 
 bool

@@ -74,10 +74,15 @@ program that won't start. On anything else, [build from source](#building).
   to `~/.cache/quoin/serve/` on that machine; nothing needs installing there. Logins use
   your ssh keys and agent; when ssh needs a passphrase or a host key accepted, **Log in
   in a terminal** does it once. You can look around, see Properties, open a terminal
-  there (F4), copy a path (`ws1:/srv/x`, as scp takes it), **open** files (a read-only
-  copy is fetched into `~/.cache/quoin/remote/` and opened from there), and **copy**
-  files and folders to this machine (Copy there, Paste here). Editing files in place,
-  copying the other way and changing anything there come next (see
+  there (F4), copy a path (`ws1:/srv/x`, as scp takes it), and **copy or move** files
+  and folders either way, or within that machine (Copy or Cut, then Paste). A move deletes
+  an original only once the copy is safely stored, and only if it hasn't changed since.
+  **Open** a file there and it is fetched into `~/.cache/quoin/remote/` and opened from
+  there; each save is uploaded back, but only over the file as it was when you opened it
+  (if someone changed it meanwhile, you choose: Replace, Keep Both, or Don't Upload).
+  Quoin keeps running after its last window closes until that app has closed, and says
+  so; a save it couldn't upload is offered the next time Quoin starts. Renaming, deleting
+  and the like there, and drag and drop with other machines, come next (see
   [docs/remote-plan.md](docs/remote-plan.md)).
 - **Properties** (right-click menu or Alt+Enter): dates (modified, accessed, changed,
   created), size, owner, group, link target, and read / write / execute permissions you can
