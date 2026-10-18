@@ -16,6 +16,7 @@ test_env.set('XDG_CONFIG_HOME', '/nonexistent/config')
 test_env.set('XDG_DATA_HOME', '/nonexistent/data')
 test_env.set('GBK_SOURCE_ROOT', meson.project_source_root())
 test_env.set('GBK_ARTIFACTS', meson.project_source_root() / 'out' / 'artifacts')
+test_env.set('QUOIN_SERVE', serve_exe.full_path())
 
 test_libs = [core_lib, lifetime_lib]
 gui_test_libs = [gui_lib, core_lib, lifetime_lib]
@@ -24,8 +25,8 @@ gui_tests = ['view', 'window', 'devices']
 gui_test_deps = deps + [dependency('x11'), dependency('xtst')]
 test_inc = [config_inc, core_inc]
 
-unit_tests = ['lifetime', 'filetype', 'natsort', 'loc', 'dirmodel', 'scanner', 'command', 'config', 'menu', 'open', 'fileops', 'clip', 'job']
-fuzz_targets = ['filetype', 'natsort', 'inotify', 'entry', 'command', 'config', 'clip']
+unit_tests = ['lifetime', 'filetype', 'natsort', 'loc', 'dirmodel', 'scanner', 'command', 'config', 'menu', 'open', 'fileops', 'clip', 'job', 'proto', 'serve']
+fuzz_targets = ['filetype', 'natsort', 'inotify', 'entry', 'command', 'config', 'clip', 'proto']
 
 if not get_option('fuzzing')
   foreach name : unit_tests

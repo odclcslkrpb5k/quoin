@@ -3,8 +3,8 @@
 
 #define NAME_MAX_BYTES 255
 
-static bool
-valid_name (const char *name, size_t len)
+bool
+gbk_entry_name_valid (const char *name, size_t len)
 {
   if (len == 0 || len > NAME_MAX_BYTES)
     return false;
@@ -21,7 +21,7 @@ GbkEntry *
 gbk_entry_new (const char *name, size_t name_len, const GbkEntryInfo *info,
                const GbkTypeTable *types)
 {
-  if (!valid_name (name, name_len))
+  if (!gbk_entry_name_valid (name, name_len))
     return nullptr;
 
   /* name is not NUL-terminated by contract; make a terminated copy for the GLib calls. */

@@ -61,8 +61,11 @@ typedef struct
   uint64_t size;
 } GbkEntryInfo;
 
-/* Pure constructor. `name` must be a valid filename component: 1..255 bytes, no '/' or NUL,
- * not "." or "..". Returns nullptr for an invalid name. */
+/* A valid filename component: 1..255 bytes, no '/' or NUL, not "." or "..". */
+bool gbk_entry_name_valid (const char *name, size_t len);
+
+/* Pure constructor. `name` must be valid (gbk_entry_name_valid). Returns nullptr for an
+ * invalid name. */
 [[nodiscard]] GbkEntry *gbk_entry_new (const char *name, size_t name_len, const GbkEntryInfo *info,
                                        const GbkTypeTable *types);
 

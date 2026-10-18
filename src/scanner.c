@@ -99,8 +99,8 @@ gbk_scan_msg_free (GbkScanMsg *m)
   g_free (m);
 }
 
-static GbkScanMsg *
-msg_new (GbkScanMsgType type)
+GbkScanMsg *
+gbk_scan_msg_new (GbkScanMsgType type)
 {
   GbkScanMsg *m = g_new0 (GbkScanMsg, 1);
   m->type = type;
@@ -153,7 +153,7 @@ push (GbkScanner *s, GbkScanMsg *m)
 static void
 push_error (GbkScanner *s, GbkScanMsgType type, int error)
 {
-  GbkScanMsg *m = msg_new (type);
+  GbkScanMsg *m = gbk_scan_msg_new (type);
   m->error = error;
   push (s, m);
 }
@@ -192,7 +192,7 @@ full_scan (GbkScanner *s, int dirfd, bool live)
       return false;
     }
 
-  GbkScanMsg *chunk = msg_new (GBK_SCAN_CHUNK);
+  GbkScanMsg *chunk = gbk_scan_msg_new (GBK_SCAN_CHUNK);
   chunk->first = true;
   chunk->live = live;
   size_t limit = GBK_SCAN_FIRST_CHUNK;
@@ -228,7 +228,7 @@ full_scan (GbkScanner *s, int dirfd, bool live)
       if (chunk->upserts->len >= limit)
         {
           push (s, chunk);
-          chunk = msg_new (GBK_SCAN_CHUNK);
+          chunk = gbk_scan_msg_new (GBK_SCAN_CHUNK);
           chunk->live = live;
           limit = GBK_SCAN_CHUNK_MAX;
         }
@@ -302,7 +302,7 @@ drain_inotify (GbkInotifySub *sub, Pending *p)
 static void
 send_delta (GbkScanner *s, int dirfd, Pending *p)
 {
-  GbkScanMsg *m = msg_new (GBK_SCAN_DELTA);
+  GbkScanMsg *m = gbk_scan_msg_new (GBK_SCAN_DELTA);
   GHashTableIter it;
   void *key;
   g_hash_table_iter_init (&it, p->names);

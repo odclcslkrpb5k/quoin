@@ -180,6 +180,7 @@ config_inc = include_directories('.')
 glib_dep = dependency('glib-2.0', version : '>= 2.88')
 gobject_dep = dependency('gobject-2.0', version : '>= 2.88')
 gtk_dep = dependency('gtk+-3.0', version : '>= 3.24.52')
+gio_dep = dependency('gio-2.0', version : '>= 2.88')
 
 # Prove the bans in prelude.h actually bite. A ban that silently stopped working (prelude
 # no longer force-included, macro not #undef'd, ...) fails the configure step here.

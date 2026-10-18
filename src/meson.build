@@ -1,4 +1,9 @@
 deps = [glib_dep, gobject_dep, gtk_dep, cc.find_library('m')]
+# What quoin-serve may link: GLib/GIO and libc, never GTK (it runs on machines without a
+# display; tools/check-binary.sh proves it). GTK's headers are still compiled in, because
+# prelude.h includes them; nothing from them is linked.
+serve_deps = [glib_dep, gobject_dep, gio_dep, cc.find_library('m'),
+              gtk_dep.partial_dependency(compile_args : true, includes : true)]
 
 # lifetime.c is the only file allowed to use the raw signal/source APIs (see prelude.h).
 lifetime_lib = static_library('gbk-lifetime', 'lifetime.c',
@@ -7,27 +12,34 @@ lifetime_lib = static_library('gbk-lifetime', 'lifetime.c',
   dependencies : deps,
 )
 
-# Non-GUI core: everything testable without a display.
-core_lib = static_library('gbk-core',
+# Shared with quoin-serve: files, folders and the wire protocol, no main loop, no GTK.
+serve_lib = static_library('gbk-serve-core',
   'filetype.c',
   'natsort.c',
-  'loc.c',
   'entry.c',
   'inotify-parse.c',
   'inotify-hub.c',
   'scanner.c',
+  'fileops.c',
+  'proto.c',
+  include_directories : config_inc,
+  dependencies : serve_deps,
+)
+
+# Non-GUI core: everything testable without a display.
+core_lib = static_library('gbk-core',
+  'loc.c',
   'dirmodel.c',
   'command.c',
   'config.c',
   'launch.c',
   'open.c',
   'menu.c',
-  'fileops.c',
   'cliptext.c',
   'job.c',
   'devices.c',
   include_directories : config_inc,
-  link_with : lifetime_lib,
+  link_with : [serve_lib, lifetime_lib],
   dependencies : deps,
 )
 
@@ -48,6 +60,12 @@ gui_lib = static_library('gbk-gui',
 )
 
 core_inc = include_directories('.')
+
+serve_exe = executable('quoin-serve', 'serve.c',
+  include_directories : config_inc,
+  link_with : serve_lib,
+  dependencies : serve_deps,
+)
 
 executable('quoin', 'main.c',
   include_directories : config_inc,

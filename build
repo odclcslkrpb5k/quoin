@@ -41,7 +41,8 @@ staged_release() {
     echo "$cmd: working tree is dirty; commit first so the hash means something." >&2
     exit 1
   fi
-  local hash bin=$root/out/release/src/quoin stamp=$root/out/release/released
+  local hash bin=$root/out/release/src/quoin serve=$root/out/release/src/quoin-serve
+  local stamp=$root/out/release/released
   hash=$(git -C "$root" rev-parse --short=12 HEAD)
   if [[ ! -f $stamp || $(<"$stamp") != "$hash" ]]; then
     echo "$cmd: no passing release for $hash yet; running ./build release" >&2
@@ -52,11 +53,15 @@ staged_release() {
     echo "$cmd: $bin reports '$("$bin" --version)', expected 'quoin $hash'" >&2
     exit 1
   fi
+  if [[ $("$serve" --version) != "quoin-serve $hash "* ]]; then
+    echo "$cmd: $serve reports '$("$serve" --version)', expected quoin-serve $hash" >&2
+    exit 1
+  fi
   local dist=$root/out/dist/$hash
   rm -rf "$dist"
   mkdir -p "$dist"
-  cp "$bin" "$root/data/quoin.desktop.in" "$root/data/icons/$icon" "$dist/"
-  (cd "$dist" && sha256sum quoin quoin.desktop.in "$icon" > SHA256SUMS)
+  cp "$bin" "$serve" "$root/data/quoin.desktop.in" "$root/data/icons/$icon" "$dist/"
+  (cd "$dist" && sha256sum quoin quoin-serve quoin.desktop.in "$icon" > SHA256SUMS)
   echo "$dist"
 }
 
@@ -86,7 +91,7 @@ publish_release() {
     --notes "Built from $full on Ubuntu 26.04 (x86_64), hardened release build; the full release gate (sanitizer tests, analyzer, fuzzing, hardened tests) passed.
 
 Install or update: \`curl -fsSL https://raw.githubusercontent.com/odclcslkrpb5k/quoin/main/install.sh | bash\`" \
-    "$dist/quoin" "$dist/quoin.desktop.in" "$dist/$icon" "$dist/SHA256SUMS"
+    "$dist/quoin" "$dist/quoin-serve" "$dist/quoin.desktop.in" "$dist/$icon" "$dist/SHA256SUMS"
 }
 
 case "$cmd" in

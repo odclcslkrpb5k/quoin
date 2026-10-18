@@ -7,9 +7,13 @@
 # themselves are in the debug info: GCC records each compilation unit's options in
 # DW_AT_producer (-grecord-gcc-switches, on by default), so every unit must carry each one.
 #
-#   tools/check-binary.sh <elf>
+#   tools/check-binary.sh <elf> [needed]
+#
+# `needed`, if given, is an extended regex every NEEDED library must match: the libraries
+# the binary may load, and no others (quoin-serve: GLib and libc, never GTK).
 set -uo pipefail
-bin=${1:?usage: check-binary.sh <elf>}
+bin=${1:?usage: check-binary.sh <elf> [needed]}
+allowed=${2:-}
 fail=0
 check() {  # check <what> <command...>: the command must succeed
   local what=$1; shift
@@ -38,6 +42,11 @@ check "read-only relocations (-z relro)" \
   grep -qE '^ *GNU_RELRO ' <<<"$segments"
 check "stack not executable (-z noexecstack)" \
   grep -qE '^ *GNU_STACK .* RW +0x' <<<"$segments"
+if [[ -n $allowed ]]; then
+  needed=$(sed -n 's/.*(NEEDED) *Shared library: \[\(.*\)\]/\1/p' <<<"$dynamic")
+  check "loads only $allowed ($(wc -w <<<"$needed") libraries)" \
+    bash -c '[[ -n $1 ]] && ! grep -vqE "$2" <<<"$1"' _ "$needed" "$allowed"
+fi
 check "no text relocations" \
   bash -c '! grep -q TEXTREL <<<"$1"' _ "$dynamic"
 check "stack protector (-fstack-protector-strong)" \

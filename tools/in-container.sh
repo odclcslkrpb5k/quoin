@@ -111,6 +111,8 @@ check() {
   setup out/release -Dbuildtype=debugoptimized -Db_ndebug=false -Dhardening=true
   meson compile -C out/release
   tools/check-binary.sh out/release/src/quoin
+  tools/check-binary.sh out/release/src/quoin-serve \
+    '^(libglib-2\.0|libgobject-2\.0|libgio-2\.0|libc|libm|libgcc_s)\.so\.[0-9]+$'
   meson test -C out/release --print-errorlogs
   # The GUI suites again, several times: a test that reads state before the main loop has
   # delivered it passes or fails by timing, and the fast release build is where it shows.

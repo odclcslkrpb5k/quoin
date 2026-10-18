@@ -37,6 +37,9 @@ Rules:
               x: the order the arguments are evaluated in is unspecified, so x may be read
               before the nested call has written it. No compiler warning or analyzer here
               catches it (GCC -Wsequence-point, Clang -Wunsequenced, clang-tidy, cppcheck).
+              Likewise two calls to a stream reader (a function whose first parameter is a
+              `Reader *`, which advances it) in one initializer or one argument list: their
+              order is unspecified too, so fields come out swapped (proto.c, 2026-10-17).
 
 The matching is textual (comments removed, then regular expressions), so it is written to
 fail closed: a declaration it can't read is not silently passed, it is simply not seen.
@@ -115,7 +118,30 @@ def unsequenced(path, text):
                         line = code.count("\n", 0, m.start()) + 1
                         problems.append(f"{path}:{line}: {out} is written through &{out} in one "
                                         "argument and read in another; call first, then read")
+    problems += reader_order(path, code)
     return sorted(set(problems))
+
+
+READER_FN = re.compile(r"\b([a-z_][a-z_0-9]*)\s*\(\s*(?:const\s+)?Reader\s*\*")
+LIST_START = re.compile(r"=\s*\{|\(\s*(?:const\s+)?[A-Z][A-Za-z_0-9]*\s*\)\s*\{|\b[A-Za-z_][A-Za-z_0-9]*\s*\(")
+
+
+def reader_order(path, code):
+    readers = set(READER_FN.findall(code))
+    if not readers:
+        return []
+    call = re.compile(r"\b(" + "|".join(sorted(readers)) + r")\s*\(")
+    problems = []
+    for m in LIST_START.finditer(code):
+        parsed = top_level_args(code, m.end() - 1)
+        if parsed is None:
+            continue
+        with_reader = [i for i, el in enumerate(parsed[0]) if call.search(el)]
+        if len(with_reader) > 1:
+            line = code.count("\n", 0, m.start()) + 1
+            problems.append(f"{path}:{line}: two stream reads in one initializer or argument "
+                            "list: their order is unspecified; read into variables first")
+    return problems
 
 
 CALL = re.compile(r"\b([A-Za-z_][A-Za-z_0-9]*)\s*\(")
@@ -321,6 +347,12 @@ EXAMPLES = [
     (unsequenced, "x.c", "if (!f (a, &error))\n  show (error->message);", 0),
     (unsequenced, "x.c", "g (f (&e), e2);", 0),
     (unsequenced, "x.c", "g (f (&d->e), d->error);", 0),
+    (unsequenced, "x.c", "static int get_u8 (Reader *r);\nT t = { .a = get_u8 (r), .b = get_u8 (r) };", 1),
+    (unsequenced, "x.c", "static int get_u8 (Reader *r);\nT t = (T) { get_u8 (r), 0, get_u8 (r) };", 1),
+    (unsequenced, "x.c", "static int get_u8 (Reader *r);\nshow (get_u8 (r), get_u8 (r));", 1),
+    (unsequenced, "x.c", "static int get_u8 (Reader *r);\nint a = get_u8 (r);\nint b = get_u8 (r);\nT t = { .a = a, .b = b };", 0),
+    (unsequenced, "x.c", "static int get_u8 (Reader *r);\nT t = { .a = get_u8 (r), .b = 2 };", 0),
+    (unsequenced, "x.c", "int get_u8 (int *r);\nshow (get_u8 (r), get_u8 (r));", 0),
     (unsequenced, "x.c", "g (&e, f (e));", 0),
     (unsequenced, "x.c", "g (f (\"&e\"), e);", 0),
     (unsequenced, "x.c", "check (read (fd, &v, sizeof v), sizeof v);", 0),

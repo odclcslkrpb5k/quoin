@@ -416,6 +416,11 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   Done: phase 0 (18aa15c), phase 1 GbkLoc (src/loc.{h,c}): every UI path is a GbkLoc; file
   code gets paths only via gbk_loc_as_local (remote -> NOT_SUPPORTED / EREMOTE, tested with
   gbk_loc_new_remote_for_test). check-source rule `locpath` limits gbk_loc_path() callers.
+  Phase 2: src/proto.{h,c} (codec, fuzzed: fuzz-proto), src/serve.c = quoin-serve (poll
+  loop, non-blocking stdio, scanner watches, info on threads, --shell-at HEX). serve_lib =
+  the GTK-free part of core (filetype natsort entry inotify scanner fileops proto);
+  check-binary.sh allowlists quoin-serve's NEEDED libs. Shipped in releases + install.sh
+  next to quoin. Fuzzing found a real OOB read (type byte before length check) in 20 s.
 - FORMAT before CHECK: `./build format` rewrites C with clang-format; run it before every
   `./build check` (check refuses unformatted C; I tripped it twice in one session). Phase 0 there
   (fsync before deleting a moved source; reject "."/".." in entry validation) is a real

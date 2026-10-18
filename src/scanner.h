@@ -34,6 +34,8 @@ typedef struct
   GPtrArray *removes;  /* char* raw names, owned; never nullptr */
 } GbkScanMsg;
 
+/* An empty message of `type` (no entries, no names). */
+[[nodiscard]] GbkScanMsg *gbk_scan_msg_new (GbkScanMsgType type);
 void gbk_scan_msg_free (GbkScanMsg *m);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (GbkScanMsg, gbk_scan_msg_free)
 

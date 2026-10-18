@@ -23,12 +23,14 @@
 #include <poll.h>
 #include <pthread.h>
 #include <pwd.h>
+#include <signal.h>
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
