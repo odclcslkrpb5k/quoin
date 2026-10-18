@@ -444,6 +444,8 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   fuzzed); fetch.c = Open/Open With remote files (cache, read-only, 7-day cleanup).
   Found: window teardown crash (two tabs, selection, first tab current) - fixed, tested.
   check-source `widening` rule after the 6th implicit-widening finding.
+- UI rule (user, 2026-10-18): an action says what it will do before you click it. The Open
+  entry names the application ("Open With Mousepad") whenever one app will be used.
 - CHAIN with && : a check run after a failing edit script tests unchanged code (did it
   2026-10-17). Edits then `./build format && ./build check`.
 - FORMAT before CHECK: `./build format` rewrites C with clang-format; run it before every
