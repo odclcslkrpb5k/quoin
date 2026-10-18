@@ -25,7 +25,7 @@ gui_tests = ['view', 'window', 'devices']
 gui_test_deps = deps + [dependency('x11'), dependency('xtst')]
 test_inc = [config_inc, core_inc]
 
-unit_tests = ['lifetime', 'filetype', 'natsort', 'loc', 'dirmodel', 'scanner', 'command', 'config', 'menu', 'open', 'fileops', 'clip', 'job', 'proto', 'serve']
+unit_tests = ['lifetime', 'filetype', 'natsort', 'loc', 'dirmodel', 'scanner', 'command', 'config', 'menu', 'open', 'fileops', 'clip', 'job', 'proto', 'serve', 'conn', 'remote', 'sshd']
 fuzz_targets = ['filetype', 'natsort', 'inotify', 'entry', 'command', 'config', 'clip', 'proto']
 
 if not get_option('fuzzing')

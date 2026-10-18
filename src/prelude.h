@@ -26,6 +26,9 @@
 #include <signal.h>
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -114,4 +117,5 @@
 #pragma GCC poison gdk_threads_add_idle gdk_threads_add_idle_full
 #pragma GCC poison gdk_threads_add_timeout gdk_threads_add_timeout_full
 #pragma GCC poison gdk_threads_add_timeout_seconds gdk_threads_add_timeout_seconds_full
+#pragma GCC poison g_dbus_connection_signal_subscribe
 #endif

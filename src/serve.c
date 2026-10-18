@@ -12,7 +12,12 @@
  * One thread runs a poll loop over stdin, stdout and the scanners' wake descriptors, with
  * non-blocking I/O both ways: it never blocks on a slow laptop, so it can't deadlock with
  * it. Scanners and file-detail reads run on their own threads, so a hung filesystem here
- * holds up only its own request. */
+ * holds up only its own request.
+ *
+ * The laptop pings every few seconds. Silence for IDLE_MS means it is gone without closing
+ * the connection (asleep, or its network changed: TCP may not notice for hours), so this
+ * process exits rather than hold its watches open (each holds inotify watches and folders
+ * open on this machine). GBK_SERVE_IDLE_MS shortens it, for tests. */
 #include "proto.h"
 
 #define READ_CHUNK (64u * 1024u)
@@ -21,6 +26,8 @@
 #define OUT_HIGH (4u * 1024u * 1024u)
 #define SCAN_MSGS_PER_ROUND 64
 #define INFO_MAX 16                      /* file-detail reads in flight */
+#define IDLE_MS 30000
+#define IDLE_MIN_MS 100
 
 typedef struct
 {
@@ -187,7 +194,7 @@ handle (Server *sv, const GbkFrame *f)
 
 /* Returns false at end of input. */
 static bool
-read_input (Server *sv)
+read_input (Server *sv, int64_t *last_input)
 {
   uint8_t buf[READ_CHUNK];
   ssize_t n = read (STDIN_FILENO, buf, sizeof buf);
@@ -195,6 +202,7 @@ read_input (Server *sv)
     return errno == EAGAIN || errno == EINTR;
   if (n == 0)
     return false;
+  *last_input = g_get_monotonic_time ();
   g_byte_array_append (sv->in, buf, (guint) n);
   size_t at = 0;
   for (;;)
@@ -269,9 +277,22 @@ machine_id (void)
   return strlen (raw) <= 64 ? g_steal_pointer (&raw) : g_strdup ("");
 }
 
+static int64_t
+idle_limit_us (void)
+{
+  const char *v = g_getenv ("GBK_SERVE_IDLE_MS");
+  int64_t ms = IDLE_MS;
+  if (v != nullptr && !g_ascii_string_to_signed (v, 10, IDLE_MIN_MS, IDLE_MS, &ms, nullptr))
+    ms = IDLE_MS;
+  return ms * 1000;
+}
+
 static int
 serve (void)
 {
+  const int64_t idle_us = idle_limit_us ();
+  int64_t last_input = g_get_monotonic_time ();
+  int status = 0;
   signal (SIGPIPE, SIG_IGN);               /* a closed pipe is EPIPE, handled above */
   g_setenv ("GIO_USE_VFS", "local", true); /* no gvfs: there's no session bus here */
   set_nonblocking (STDIN_FILENO);
@@ -327,7 +348,15 @@ serve (void)
               g_array_append_val (polled, ((Watch *) w)->channel);
             }
         }
-      if (poll ((struct pollfd *) (void *) fds->data, fds->len, -1) < 0)
+      int64_t left_us = last_input + idle_us - g_get_monotonic_time ();
+      if (left_us <= 0)
+        {
+          fprintf (stderr, "quoin-serve: nothing from the other end for a while; stopping\n");
+          status = 4;
+          break;
+        }
+      int wait_ms = (int) MIN ((left_us + 999) / 1000, (int64_t) INT_MAX);
+      if (poll ((struct pollfd *) (void *) fds->data, fds->len, wait_ms) < 0)
         {
           if (errno == EINTR)
             continue;
@@ -335,7 +364,7 @@ serve (void)
           return 1;
         }
       const struct pollfd *p = (const struct pollfd *) (const void *) fds->data;
-      if ((p[0].revents & (POLLIN | POLLHUP | POLLERR)) && !read_input (&sv))
+      if ((p[0].revents & (POLLIN | POLLHUP | POLLERR)) && !read_input (&sv, &last_input))
         break;                           /* stdin closed: the laptop is done */
       if (p[1].revents & (POLLERR | POLLHUP))
         break;
@@ -363,7 +392,7 @@ serve (void)
   gbk_type_table_unref (sv.types);
   g_byte_array_unref (sv.in);
   g_byte_array_unref (sv.out);
-  return 0;
+  return status;
 }
 
 /* ---- --shell-at ---- */

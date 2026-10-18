@@ -104,7 +104,7 @@ shared_unref (Shared *s)
 }
 
 static void
-send (Shared *s, Msg *m)
+post_msg (Shared *s, Msg *m)
 {
   g_async_queue_push (s->queue, m);
   uint64_t one = 1;
@@ -135,7 +135,7 @@ ask (Shared *s, GbkQuestionKind kind, const char *path, const char *other, bool 
   m->q.path = g_strdup (path);
   m->q.other = g_strdup (other);
   m->q.other_is_dir = other_is_dir;
-  send (s, m);
+  post_msg (s, m);
 
   g_mutex_lock (&s->lock);
   while (!s->answered && !is_cancelled (s))
@@ -178,7 +178,7 @@ hook_progress (uint64_t done, uint64_t total, const char *current, void *data)
   m->done = done;
   m->total = total;
   m->current = g_filename_display_basename (current);
-  send (s, m);
+  post_msg (s, m);
 }
 
 static bool
@@ -266,7 +266,7 @@ worker (void *data)
     case GBK_JOB_INFO: done->info = gbk_ops_info (first, &done->error); break;
     default: gbk_fatal ("bad job kind %d", (int) s->kind);
     }
-  send (s, done);
+  post_msg (s, done);
   shared_unref (s);
   return nullptr;
 }
@@ -373,7 +373,7 @@ gbk_job_start (GbkJob *job)
       m->type = MSG_FINISHED;
       m->error = g_steal_pointer (&error);
       m->created = g_ptr_array_new_with_free_func (g_free);
-      send (job->s, m); /* delivered via the normal path */
+      post_msg (job->s, m); /* delivered via the normal path */
       return;
     }
   g_thread_unref (t);

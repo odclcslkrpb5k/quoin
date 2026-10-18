@@ -421,6 +421,15 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   the GTK-free part of core (filetype natsort entry inotify scanner fileops proto);
   check-binary.sh allowlists quoin-serve's NEEDED libs. Shipped in releases + install.sh
   next to quoin. Fuzzing found a real OOB read (type byte before length check) in 20 s.
+  Phase 3: src/conn.{h,c} GbkConn (I/O thread, socketpair + MSG_NOSIGNAL, forced ssh
+  options, push-install via `exec sh` script, magic/HELLO/build check, ping/dead timers),
+  src/remote.{h,c} GbkRemote registry (one conn per host, PrepareForSleep closes all,
+  NM StateChanged -> "network-up", idle close), lifetime gbk_dbus_signal (raw
+  g_dbus_connection_signal_subscribe poisoned elsewhere). Tests: tests/fake-ssh (modes via
+  a file), test-conn, test-remote (GTestDBus), test-sshd (real sshd as non-root +
+  nss_wrapper; image has openssh-client/server, libnss-wrapper).
+- CHAIN with && : a check run after a failing edit script tests unchanged code (did it
+  2026-10-17). Edits then `./build format && ./build check`.
 - FORMAT before CHECK: `./build format` rewrites C with clang-format; run it before every
   `./build check` (check refuses unformatted C; I tripped it twice in one session). Phase 0 there
   (fsync before deleting a moved source; reject "."/".." in entry validation) is a real

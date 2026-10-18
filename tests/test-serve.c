@@ -317,6 +317,30 @@ test_protocol_errors (void)
 }
 
 /* Run quoin-serve with `args` (nullptr-terminated) and the environment `envp`. */
+/* Silence ends it (status 4); anything at all, a ping included, keeps it going. */
+static void
+test_idle (void)
+{
+  g_setenv ("GBK_SERVE_IDLE_MS", "300", true);
+  Server *s = server_start ();
+  g_unsetenv ("GBK_SERVE_IDLE_MS");
+  expect_hello (s);
+  for (int i = 0; i < 6; i++)          /* 0.6 s of pings, every 0.1 s: still there */
+    {
+      g_autoptr (GByteArray) b = g_byte_array_new ();
+      gbk_proto_put_empty (b, GBK_MSG_PING, (uint64_t) i + 1);
+      send_bytes (s, b);
+      g_autoptr (GByteArray) keep = nullptr;
+      GbkFrame f = next (s, &keep);
+      g_assert_cmpint (f.type, ==, GBK_MSG_PONG);
+      g_usleep (G_USEC_PER_SEC / 10);
+    }
+  int64_t start = g_get_monotonic_time ();
+  g_assert_cmpint (server_wait (s), ==, 4);
+  g_assert_cmpint (g_get_monotonic_time () - start, <, INT64_C (2) * G_USEC_PER_SEC);
+  server_free (s);
+}
+
 static int
 run_sync (const char *const *args, char **envp, char **out)
 {
@@ -403,6 +427,7 @@ main (int argc, char **argv)
   g_test_add_func ("/serve/info-and-ping", test_info_and_ping);
   g_test_add_func ("/serve/protocol-errors", test_protocol_errors);
   g_test_add_func ("/serve/shell-at", test_shell_at);
+  g_test_add_func ("/serve/idle", test_idle);
   int status = g_test_run ();
   gbk_type_table_unref (types);
   g_free (root);

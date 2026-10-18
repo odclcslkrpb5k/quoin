@@ -274,6 +274,105 @@ gbk_clipboard_request_named (GObject *owner, GtkClipboard *clipboard, GdkAtom ta
   gtk_clipboard_request_contents (clipboard, target, clipboard_received, r);
 }
 
+/* ---- D-Bus signals ----
+ * GDBus may still deliver an emission after unsubscribing (one already queued), so the
+ * record lives until GDBus calls its free function; `owner` (cleared when the owner is
+ * disposed) says whether `fn` may run. The bus itself arrives asynchronously: if the owner
+ * goes first, the request is cancelled and the record freed when it completes. */
+
+typedef struct
+{
+  GObject *owner;          /* weak: nullptr once disposed */
+  GCancellable *cancel;    /* while the bus is being fetched */
+  GDBusConnection *bus;
+  guint sub;
+  char *sender, *iface, *member, *path;
+  GbkDBusSignalFunc fn;
+  void *data;
+  const char *name;
+} DBusRec;
+
+static void
+dbus_rec_free (void *p)
+{
+  DBusRec *r = p;
+  g_clear_object (&r->cancel);
+  g_clear_object (&r->bus);
+  g_free (r->sender);
+  g_free (r->iface);
+  g_free (r->member);
+  g_free (r->path);
+  g_free (r);
+  g_atomic_int_dec_and_test (&live_count);
+}
+
+static void
+dbus_emitted (GDBusConnection *bus G_GNUC_UNUSED, const char *sender G_GNUC_UNUSED,
+              const char *path G_GNUC_UNUSED, const char *iface G_GNUC_UNUSED,
+              const char *member G_GNUC_UNUSED, GVariant *params, void *p)
+{
+  const DBusRec *r = p;
+  if (r->owner == nullptr)
+    return;
+  g_object_ref (r->owner);
+  gint64 start = stall_start ();
+  r->fn (params, r->data);
+  stall_check (start, "D-Bus signal", r->name, "");
+  g_object_unref (r->owner);
+}
+
+static void
+dbus_owner_disposed (void *p, GObject *gone G_GNUC_UNUSED)
+{
+  DBusRec *r = p;
+  r->owner = nullptr;
+  if (r->cancel != nullptr)
+    g_cancellable_cancel (r->cancel);    /* dbus_got_bus frees it */
+  else if (r->sub != 0)
+    g_dbus_connection_signal_unsubscribe (r->bus, r->sub);   /* GDBus frees it */
+  else
+    dbus_rec_free (r);                   /* no bus: nothing else holds it */
+}
+
+static void
+dbus_got_bus (GObject *source G_GNUC_UNUSED, GAsyncResult *res, void *p)
+{
+  DBusRec *r = p;
+  g_clear_object (&r->cancel);
+  r->bus = g_bus_get_finish (res, nullptr);
+  if (r->owner == nullptr)
+    {
+      dbus_rec_free (r);                 /* the owner went while we waited */
+      return;
+    }
+  if (r->bus == nullptr)
+    return;                              /* no such bus here: nothing will arrive */
+  r->sub = g_dbus_connection_signal_subscribe (r->bus, r->sender, r->iface, r->member, r->path,
+                                               nullptr, G_DBUS_SIGNAL_FLAGS_NONE, dbus_emitted, r,
+                                               dbus_rec_free);
+}
+
+void
+gbk_dbus_signal_named (GObject *owner, GBusType bus, const char *sender, const char *iface,
+                       const char *member, const char *path, GbkDBusSignalFunc fn, void *data,
+                       const char *name)
+{
+  g_assert (G_IS_OBJECT (owner) && fn != nullptr);
+  DBusRec *r = g_new0 (DBusRec, 1);
+  r->owner = owner;
+  r->cancel = g_cancellable_new ();
+  r->sender = g_strdup (sender);
+  r->iface = g_strdup (iface);
+  r->member = g_strdup (member);
+  r->path = g_strdup (path);
+  r->fn = fn;
+  r->data = data;
+  r->name = name;
+  g_atomic_int_inc (&live_count);
+  g_object_weak_ref (owner, dbus_owner_disposed, r);
+  g_bus_get (bus, r->cancel, dbus_got_bus, r);
+}
+
 void
 gbk_source_cancel (guint *id)
 {

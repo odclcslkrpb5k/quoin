@@ -1,0 +1,31 @@
+#!/bin/sh
+# Stands in for ssh in tests (QUOIN_SSH): skips the options, then runs the remote command
+# with sh -c in $HOME, as sshd does. The command is exec'd, so the process Quoin started
+# becomes quoin-serve itself: killing or stopping it is a dead or frozen link.
+#   FAKE_SSH_LOG      append "<host> <command>" per run
+#   FAKE_SSH_PIDFILE  write the process id
+#   FAKE_SSH_MODE     a file holding the mode, if any (a file: tests can't change the
+#                     environment once threads run): deny: fail like a refused key;
+#                     hang: never answer; noisy: print a banner first, like a chatty .bashrc
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+host=$1
+shift
+[ -n "${FAKE_SSH_LOG:-}" ] && printf '%s %s\n' "$host" "$*" >> "$FAKE_SSH_LOG"
+[ -n "${FAKE_SSH_PIDFILE:-}" ] && echo $$ > "$FAKE_SSH_PIDFILE"
+mode=
+[ -n "${FAKE_SSH_MODE:-}" ] && [ -f "$FAKE_SSH_MODE" ] && mode=$(cat "$FAKE_SSH_MODE")
+case "$mode" in
+  deny) echo "gbk@$host: Permission denied (publickey)." >&2; exit 255 ;;
+  hang) exec sleep 1000 ;;
+  noisy) echo "Welcome to $host!" ;;
+esac
+cd "$HOME" || exit 1
+case "$*" in
+  "exec "*) exec sh -c "$*" ;;
+  *) exec sh -c "exec $*" ;;
+esac

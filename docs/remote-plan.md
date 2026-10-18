@@ -75,10 +75,13 @@ valid local path: deleting `/home/gbk/x` "on the workstation" would delete the l
 - **Channels** carry each directory watch, job and transfer. Ids come from a 64-bit counter
   and are never reused; every job remembers its connection's generation, so an answer
   clicked after a reconnect can never reach a different job.
-- **Flow control**: separate reader and writer threads on both ends (readers never write),
-  per-channel credit windows, data in 64 KiB frames interleaved across channels. When a
-  watch's backlog passes a cap the server drops its deltas and sends a fresh snapshot (the
-  scanner's existing overflow-rescan behaviour).
+- **Flow control**: on both ends one thread polls the socket with non-blocking reads and
+  writes (built that way in phases 2 and 3: nothing ever blocks on a write, so the two ends
+  can't deadlock, which is what separate reader and writer threads were for). The server
+  stops draining its scanners while 4 MiB wait for the laptop. Still to come with
+  transfers (phase 5): per-channel credit windows, data in 64 KiB frames interleaved
+  across channels, and a cap after which a watch's deltas are dropped for a fresh snapshot
+  (the scanner's existing overflow-rescan behaviour).
 - **Directory watches** send raw fields (name, kind, flags, size, mtime, mode, free space).
   The laptop decoder rejects empty names, `.`, `..`, names with `/`, duplicate names in a
   snapshot, and invalid names in removals, then builds GbkEntry with its own type table, on

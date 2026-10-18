@@ -56,6 +56,16 @@ void gbk_clipboard_request_named (GObject *owner, GtkClipboard *clipboard, GdkAt
                                   GbkClipboardFunc fn, void *data, GDestroyNotify destroy,
                                   const char *name);
 
+/* Follow a D-Bus signal: `fn` gets each emission's parameters while `owner` lives. Getting
+ * the bus is asynchronous; with no bus (or none of that type) nothing ever arrives. The
+ * subscription ends when the owner is disposed. `sender`, `path` may be nullptr (any). */
+typedef void (*GbkDBusSignalFunc) (GVariant *params, void *data);
+#define gbk_dbus_signal(owner, bus, sender, iface, member, path, fn, data) \
+  gbk_dbus_signal_named (owner, bus, sender, iface, member, path, fn, data, #fn)
+void gbk_dbus_signal_named (GObject *owner, GBusType bus, const char *sender, const char *iface,
+                            const char *member, const char *path, GbkDBusSignalFunc fn, void *data,
+                            const char *name);
+
 /* The stall watch. While one of the callbacks registered here runs, the main loop can't
  * repaint or take input: a frozen window. With GBK_STALL_MS set (the tests set it), a
  * callback that runs longer than that many milliseconds aborts, naming itself. Every

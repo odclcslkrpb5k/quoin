@@ -22,6 +22,7 @@ RUN apt-get update --error-on=any \
       desktop-file-utils \
       libgtk-3-dev \
       xvfb xauth libxtst-dev dbus-daemon \
+      openssh-client openssh-server libnss-wrapper \
       fonts-dejavu-core adwaita-icon-theme librsvg2-common \
  && rm -rf /var/lib/apt/lists/*
 

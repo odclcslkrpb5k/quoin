@@ -220,6 +220,7 @@ banned = {
   'g_unix_fd_add'    : 'g_unix_fd_add(0, G_IO_IN, nullptr, nullptr);',
   'g_io_add_watch'   : 'g_io_add_watch(nullptr, G_IO_IN, nullptr, nullptr);',
   'g_child_watch_add' : 'g_child_watch_add(0, nullptr, nullptr);',
+  'g_dbus_connection_signal_subscribe' : 'g_dbus_connection_signal_subscribe(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr);',
 }
 foreach what, code : banned
   if cc.compiles('void f(void); void f(void) { ' + code + ' }',
