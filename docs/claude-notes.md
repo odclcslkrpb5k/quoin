@@ -411,7 +411,7 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   after it, so the task's exit code is the check's.
 - Not built yet (proposed 2026-10-11): New Folder/New File, rubber-band selection, drag and
   drop (ask user if they use it), remember window size, parallel statx.
-- REMOTE BROWSING (2026-10-17): plan in docs/remote-plan.md, red-teamed, awaiting user
-  review of its section 11 decisions. Do not start before the user approves. Phase 0 there
+- REMOTE BROWSING (2026-10-17): plan in docs/remote-plan.md, red-teamed, APPROVED by
+  the user with the decisions in its section 11. Execute phase by phase, in order. Phase 0 there
   (fsync before deleting a moved source; reject "."/".." in entry validation) is a real
   defect fix independent of remote work.

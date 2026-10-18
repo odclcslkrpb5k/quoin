@@ -1,4 +1,4 @@
-# Remote browsing: plan (after red team, for review)
+# Remote browsing: plan (approved 2026-10-17)
 
 Goal: browse, open, edit and manage files on another machine over SSH, without mounting
 anything, in the spirit of Konqueror's fish:// (KDE 3). It must survive the laptop sleeping:
@@ -166,7 +166,9 @@ Phase 6 adds editing:
    machine-id and uid must match the manifest, so a different machine answering on a hotel
    network never receives the upload.
 7. **Nothing is lost by closing Quoin.** While any copy is being watched, the process stays
-   alive after its last window closes (and says so on close). Each live watcher holds a
+   alive after its last window closes, and closing always shows a notice (not optional, no
+   "don't show again") naming each file and the app it was opened in: "notes.txt (Mousepad)
+   from ws1: Quoin keeps running to upload your saves". Each live watcher holds a
    lock on its cache directory. Cleanup deletes only unlocked directories marked clean and
    older than 7 days. At startup Quoin lists dirty ones: "N edited remote files were never
    uploaded", with Upload / Show / Discard.
@@ -225,25 +227,25 @@ Each phase ships on its own and passes `./build check`.
 5. **Open read-only and copy remote → laptop**; the fileops source-reader refactor.
 6. **Edit with upload, copy laptop → remote, cross-machine moves.**
 7. **Operations on the remote**: rename, create, trash, delete, permissions, copy/move within.
-8. Later: custom actions run on the remote (argv hex-encoded, no shell), long remote jobs
-   that survive the laptop sleeping, remote A → remote B.
+8. **Drag and drop** (soon after v1, user's request): remote ↔ local drops inside Quoin,
+   between windows of Quoin, and remote items dragged to other apps as a downloaded local
+   copy (Konqueror's behaviour), never as sftp://.
+9. Later: custom actions run on the remote (argv hex-encoded, no shell), remote A → remote B.
 
 Rough size: 5–6k new lines, the most of it in phases 3, 5 and 6. Biggest risk: the fileops
 refactor in phase 5.
 
-## 11. Decisions for the user
+## 11. Decisions (user, 2026-10-17)
 
-1. **Push quoin-serve automatically** (as above), or require installing Quoin on each
-   workstation? Recommend: push.
-2. **"Log in in a terminal"** for keys and host keys, or require keys already in the agent?
-   Recommend: the button.
-3. **Long jobs running entirely on the workstation** when the laptop sleeps: v1 cancels them
-   (and says so). Recommend: yes for v1; surviving sleep is phase 8.
-4. **Keep Quoin running windowless while remote edits are open**, or only warn on close?
-   Recommend: keep running, and say so.
-5. **Phase order** above (open and fetch before operations on the remote). Recommend: yes.
-6. **Remote items to other apps** (drag, paste): not in v1, except `host:/path` text.
-   Recommend: yes. Later, fetch-then-hand-over-a-local-copy, as Konqueror did.
+1. quoin-serve is pushed automatically.
+2. "Log in in a terminal" button for keys and host keys.
+3. Sleep kills: a long job running entirely on the workstation is cancelled when the laptop
+   sleeps or the link dies, and the job window says so. No detached jobs planned.
+4. Quoin keeps running windowless while remote edits are open; the notice on close is
+   mandatory and names each file and its app.
+5. Phase order as in section 10.
+6. No drag-and-drop or paste of remote items to other apps in v1 (`host:/path` text only);
+   drag and drop is phase 8, soon after.
 
 ## 12. Red team: findings and dispositions
 
@@ -273,7 +275,7 @@ accessor would be a crash (bool accessor); phase 1 missed GbkItem and GbkJob (ad
 tests); the first release could not fetch anything (phases reordered); disconnected
 behaviour unspecified (specified); BatchMode dead ends (terminal login); one connection per
 window process, not per app (stated); sftp:// would bring gvfs mounts back (never handed
-out); custom actions (phase 8).
+out); custom actions (phase 9).
 
 Minor, changed: free space and mode in the protocol; chunks over the frame cap; entries
 built off the main thread; async D-Bus wrapper; scp address rule and `./` escape; remote
