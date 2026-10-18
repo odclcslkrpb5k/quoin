@@ -92,6 +92,17 @@ publish_release() {
 
 Install or update: \`curl -fsSL https://raw.githubusercontent.com/odclcslkrpb5k/quoin/main/install.sh | bash\`" \
     "$dist/quoin" "$dist/quoin-serve" "$dist/quoin.desktop.in" "$dist/$icon" "$dist/SHA256SUMS"
+  # Check what was published rather than trusting it went through: every file there.
+  local have
+  have=$(gh release view "$hash" --json assets -q '.assets[].name')
+  for want in quoin quoin-serve quoin.desktop.in "$icon" SHA256SUMS; do
+    if ! grep -qxF "$want" <<<"$have"; then
+      echo "publish: release $hash is missing $want" >&2
+      exit 1
+    fi
+  done
+  echo "published $hash with: $(tr '\n' ' ' <<<"$have")"
+  gh release list --limit 1
 }
 
 case "$cmd" in
