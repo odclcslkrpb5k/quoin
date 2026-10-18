@@ -42,6 +42,16 @@ void gbk_edits_launched (uint64_t id, GPid pid);
 [[nodiscard]] char *gbk_edits_find (const char *host, const char *path);
 /* How many copies are watched. */
 guint gbk_edits_count (void);
+/* Copies being watched, for the ☰ menu: each item's action is win.show-edit with the
+ * watch's id (uint64); "None open" when there are none. nullptr before init. */
+GMenuModel *gbk_edits_menu (void);
+/* The names in `folder` (another machine's) that are being edited here: a set of char*, or
+ * nullptr for none. */
+[[nodiscard]] GHashTable *gbk_edits_names_in (const GbkLoc *folder);
+/* Where watch `id`'s file is: its folder there and its name (as opened). */
+[[nodiscard]] bool gbk_edits_where (uint64_t id, GbkLoc **folder, char **name);
+/* Does an inotify descriptor's fdinfo text show a watch on (dev, ino)? (Exposed for tests.) */
+bool gbk_edits_fdinfo_watches (const char *fdinfo, uint64_t dev, uint64_t ino);
 
 /* News about files being edited, for every window's status bar (gbk_window_set_activity);
  * the latest stays until there is newer. "" when there is none. */

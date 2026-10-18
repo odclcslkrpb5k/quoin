@@ -40,7 +40,26 @@ typedef struct
   int retry_ms;
   bool blocked;           /* the machine answering isn't the one it came from */
   bool adopted;           /* left by an earlier Quoin: ends once uploaded */
+  bool file_seen;         /* another process was seen using the copy itself */
+  int unused_looks;       /* surveys since then that saw nobody using it */
 } Edit;
+
+/* Who uses the copies: a look through /proc, on a thread (it reads every process's open
+ * files, which takes a moment). */
+typedef struct
+{
+  uint64_t id;
+  char *dir;              /* the copy's own folder: anything open inside it counts */
+  uint64_t dir_dev, dir_ino, file_dev, file_ino;   /* for inotify watches */
+  bool used;              /* answer: another process has it open or watches it */
+} Wanted;
+
+typedef struct
+{
+  GArray *wanted;         /* Wanted */
+  GHashTable *names;      /* answer: running processes' executable and command names */
+  int64_t started_us;
+} Survey;
 
 /* Copies an earlier Quoin left changed and unsent, with their locks. */
 typedef struct
@@ -69,7 +88,14 @@ static struct
   GMutex scan_lock;
   bool scan_running;
   GPtrArray *found;       /* Unsent*, set by the scan */
+  bool survey_running;    /* (scan_lock) */
+  Survey *surveyed;       /* (scan_lock) the last survey's answers, for the timer */
+  bool notice_due;        /* the last window closed: say so once a fresh survey is in */
+  GMenu *menu;            /* files being edited, for every window's ☰ menu */
 } E;
+
+static void changed (void);
+static void notice (void);
 
 static void
 unsent_free (Unsent *u)
@@ -193,31 +219,6 @@ process_names (const char *pid_dir, char **exe, char **comm)
   return true;
 }
 
-/* Names of this user's running processes (executables and commands). */
-static GHashTable *
-running_names (void)
-{
-  GHashTable *names = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, nullptr);
-  g_autoptr (GDir) d = g_dir_open ("/proc", 0, nullptr);
-  const char *name;
-  uid_t me = getuid ();
-  while (d != nullptr && (name = g_dir_read_name (d)) != nullptr)
-    {
-      if (!g_ascii_isdigit (name[0]))
-        continue;
-      g_autofree char *dir = g_build_filename ("/proc", name, nullptr);
-      struct stat st;
-      char *exe, *comm;
-      if (stat (dir, &st) != 0 || st.st_uid != me || !process_names (dir, &exe, &comm))
-        continue;
-      if (exe != nullptr)
-        g_hash_table_add (names, exe);
-      if (comm != nullptr)
-        g_hash_table_add (names, comm);
-    }
-  return names;
-}
-
 static bool
 pid_running (GPid pid, char **exe)
 {
@@ -237,21 +238,209 @@ name_running (GHashTable *names, const char *exe)
   return strlen (exe) > 15 && g_hash_table_contains (names, cut);
 }
 
-static void
-judge_app (Edit *e, GHashTable *names, int64_t now)
+/* A hex number up to the next space or the end. */
+static bool
+hex_field (const char *p, guint64 *out)
 {
-  bool running = false;
-  if (e->pid > 0)
+  char *end = nullptr;
+  errno = 0;
+  *out = g_ascii_strtoull (p, &end, 16);
+  return errno == 0 && end != p && (*end == ' ' || *end == '\0');
+}
+
+static void
+wanted_clear (void *p)
+{
+  g_free (((Wanted *) p)->dir);
+}
+
+static void
+survey_free (Survey *s)
+{
+  g_array_unref (s->wanted);
+  g_clear_pointer (&s->names, g_hash_table_unref);
+  g_free (s);
+}
+
+/* "inotify wd:1 ino:1a2b sdev:800003 mask:..." lines of an inotify descriptor's fdinfo:
+ * whether one watches (dev, ino). The kernel writes the device as major << 20 | minor. */
+bool
+gbk_edits_fdinfo_watches (const char *fdinfo, uint64_t dev, uint64_t ino)
+{
+  g_auto (GStrv) lines = g_strsplit (fdinfo, "\n", -1);
+  for (size_t i = 0; lines[i] != nullptr; i++)
     {
-      g_autofree char *exe = nullptr;
-      running = pid_running (e->pid, &exe);
-      if (running && exe != nullptr && e->exe == nullptr && !generic (exe))
-        e->exe = g_steal_pointer (&exe);   /* what the launch turned into */
-      if (!running)
-        e->pid = 0;
+      const char *l = lines[i];
+      if (!g_str_has_prefix (l, "inotify "))
+        continue;
+      const char *ino_at = strstr (l, " ino:");
+      const char *dev_at = strstr (l, " sdev:");
+      if (ino_at == nullptr || dev_at == nullptr)
+        continue;
+      guint64 wino, wdev;
+      if (!hex_field (ino_at + 5, &wino) || !hex_field (dev_at + 6, &wdev))
+        continue;
+      if (wino == ino && wdev >> 20 == major ((dev_t) dev)
+          && (wdev & 0xfffff) == minor ((dev_t) dev))
+        return true;
     }
-  if (!running && e->exe != nullptr)
-    running = name_running (names, e->exe);
+  return false;
+}
+
+/* One process's open files and inotify watches, against what's wanted. */
+static void
+survey_process (const char *pid_dir, GArray *wanted)
+{
+  g_autofree char *fd_dir = g_build_filename (pid_dir, "fd", nullptr);
+  g_autoptr (GDir) d = g_dir_open (fd_dir, 0, nullptr);
+  const char *fd;
+  while (d != nullptr && (fd = g_dir_read_name (d)) != nullptr)
+    {
+      /* The link's text, never stat: that could wait on a hung network filesystem. */
+      g_autofree char *link = g_build_filename (fd_dir, fd, nullptr);
+      g_autofree char *target = g_file_read_link (link, nullptr);
+      if (target == nullptr)
+        continue;
+      bool inotify = g_str_equal (target, "anon_inode:inotify");
+      g_autofree char *info = nullptr;
+      if (inotify)
+        {
+          g_autofree char *info_path = g_build_filename (pid_dir, "fdinfo", fd, nullptr);
+          if (!g_file_get_contents (info_path, &info, nullptr, nullptr))
+            continue;
+        }
+      for (guint k = 0; k < wanted->len; k++)
+        {
+          Wanted *w = &g_array_index (wanted, Wanted, k);
+          size_t n = strlen (w->dir);
+          if (inotify)
+            w->used = w->used || gbk_edits_fdinfo_watches (info, w->dir_dev, w->dir_ino)
+                      || (w->file_ino != 0
+                          && gbk_edits_fdinfo_watches (info, w->file_dev, w->file_ino));
+          else
+            w->used
+                = w->used
+                  || (strncmp (target, w->dir, n) == 0 && (target[n] == '\0' || target[n] == '/'));
+        }
+    }
+}
+
+static void *
+survey_worker (void *data)
+{
+  Survey *s = data;
+  s->names = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, nullptr);
+  g_autoptr (GDir) d = g_dir_open ("/proc", 0, nullptr);
+  const char *name;
+  uid_t me = getuid ();
+  g_autofree char *self = g_strdup_printf ("%d", (int) getpid ());
+  while (d != nullptr && (name = g_dir_read_name (d)) != nullptr)
+    {
+      if (!g_ascii_isdigit (name[0]))
+        continue;
+      g_autofree char *dir = g_build_filename ("/proc", name, nullptr);
+      struct stat st;
+      char *exe, *comm;
+      if (stat (dir, &st) != 0 || st.st_uid != me || !process_names (dir, &exe, &comm))
+        continue;
+      if (exe != nullptr)
+        g_hash_table_add (s->names, exe);
+      if (comm != nullptr)
+        g_hash_table_add (s->names, comm);
+      if (!g_str_equal (name, self))     /* a Quoin window showing the copy doesn't count */
+        survey_process (dir, s->wanted);
+    }
+  g_mutex_lock (&E.scan_lock);
+  if (E.surveyed != nullptr)
+    survey_free (E.surveyed);
+  E.surveyed = s;
+  E.survey_running = false;
+  g_mutex_unlock (&E.scan_lock);
+  return nullptr;
+}
+
+static void
+survey_start (void)
+{
+  g_mutex_lock (&E.scan_lock);
+  bool already = E.survey_running;
+  E.survey_running = true;
+  g_mutex_unlock (&E.scan_lock);
+  if (already)
+    return;
+  Survey *s = g_new0 (Survey, 1);
+  s->started_us = g_get_monotonic_time ();
+  s->wanted = g_array_new (false, true, sizeof (Wanted));
+  g_array_set_clear_func (s->wanted, wanted_clear);
+  for (guint i = 0; i < E.edits->len; i++)
+    {
+      const Edit *e = g_ptr_array_index (E.edits, i);
+      Wanted w = { .id = e->id, .dir = gbk_edit_record_dir (E.cache, e->rec) };
+      g_autofree char *copy = gbk_edit_record_copy (E.cache, e->rec);
+      struct stat st;
+      if (stat (w.dir, &st) == 0)
+        {
+          w.dir_dev = st.st_dev;
+          w.dir_ino = st.st_ino;
+        }
+      if (lstat (copy, &st) == 0)
+        {
+          w.file_dev = st.st_dev;
+          w.file_ino = st.st_ino;
+        }
+      g_array_append_val (s->wanted, w);
+    }
+  GThread *t = g_thread_try_new ("gbk-edits-survey", survey_worker, s, nullptr);
+  if (t != nullptr)
+    {
+      g_thread_unref (t);
+      return;
+    }
+  survey_free (s);
+  g_mutex_lock (&E.scan_lock);
+  E.survey_running = false;
+  g_mutex_unlock (&E.scan_lock);
+}
+
+/* Is the app still using the copy? Best: another process has it (or its folder) open or
+ * watches it for changes, as editors do while a file is open in them. Apps that never
+ * show that (they read the file, close it, and watch nothing) are judged by their process:
+ * the launched one, or one with the app's executable name. `fresh`: the survey began after
+ * the last window closed; one look then is enough. */
+static void
+judge_app (Edit *e, const Survey *s, bool fresh, int64_t now)
+{
+  bool used = false;
+  for (guint k = 0; k < s->wanted->len; k++)
+    {
+      const Wanted *w = &g_array_index (s->wanted, Wanted, k);
+      if (w->id == e->id)
+        used = w->used;
+    }
+  bool running;
+  if (used)
+    {
+      e->file_seen = true;
+      e->unused_looks = 0;
+      running = true;
+    }
+  else if (e->file_seen)
+    running = ++e->unused_looks < (fresh ? 1 : 2);   /* a save may close it for a moment */
+  else
+    {
+      running = false;
+      if (e->pid > 0)
+        {
+          g_autofree char *exe = nullptr;
+          running = pid_running (e->pid, &exe);
+          if (running && exe != nullptr && e->exe == nullptr && !generic (exe))
+            e->exe = g_steal_pointer (&exe);   /* what the launch turned into */
+          if (!running)
+            e->pid = 0;
+        }
+      if (!running && e->exe != nullptr)
+        running = name_running (s->names, e->exe);
+    }
   switch (e->app)
     {
     case APP_STARTING:
@@ -260,6 +449,10 @@ judge_app (Edit *e, GHashTable *names, int64_t now)
       else if (now - e->started_us >= (int64_t) grace_ms () * 1000)
         e->app = APP_UNKNOWN;
       break;
+    case APP_UNKNOWN:
+      if (used)
+        e->app = APP_RUNNING;                /* a late sign of life */
+      break;
     case APP_RUNNING:
       if (!running)
         {
@@ -267,8 +460,7 @@ judge_app (Edit *e, GHashTable *names, int64_t now)
           e->gone_us = now;
         }
       break;
-    case APP_GONE:
-    case APP_UNKNOWN: break;
+    case APP_GONE: break;
     default: gbk_fatal ("bad app state %d", (int) e->app);
     }
 }
@@ -355,6 +547,7 @@ on_uploaded (GbkJob *job, GError *error, Edit *e)
               e->rec->remote = g_build_filename (dir, made->pdata[0], nullptr);
               g_autofree char *shown = g_filename_display_name (made->pdata[0]);
               as = g_strdup_printf (" as “%s”", shown);
+              changed ();
             }
           e->rec->base = t;
           g_autoptr (GDateTime) now = g_date_time_new_now_local ();
@@ -517,14 +710,21 @@ tick (void *data G_GNUC_UNUSED)
     offer_unsent (found);
 
   int every = MIN (GBK_EDITS_APP_CHECK_MS, grace_ms ());
-  bool judge = (int64_t) E.ticks * poll_ms () % every < poll_ms ();
-  g_autoptr (GHashTable) names = judge && E.edits->len > 0 ? running_names () : nullptr;
+  bool due = (int64_t) E.ticks * poll_ms () % every < poll_ms ();
+  if ((due || E.notice_due) && E.edits->len > 0)
+    survey_start ();
+  g_mutex_lock (&E.scan_lock);
+  Survey *s = g_steal_pointer (&E.surveyed);
+  bool surveying = E.survey_running;
+  g_mutex_unlock (&E.scan_lock);
+  bool fresh = s != nullptr && E.windows_gone_us != 0 && s->started_us >= E.windows_gone_us;
+  guint before = E.edits->len;
   for (guint i = 0; i < E.edits->len;)
     {
       Edit *e = g_ptr_array_index (E.edits, i);
       look (e, now);
-      if (names != nullptr)
-        judge_app (e, names, now);
+      if (s != nullptr)
+        judge_app (e, s, fresh, now);
       if (finished (e, now))
         {
           save (e);
@@ -533,7 +733,18 @@ tick (void *data G_GNUC_UNUSED)
         }
       i++;
     }
-  if (E.edits->len > 0 || scanning)
+  if (s != nullptr)
+    survey_free (s);
+  if (E.edits->len != before)
+    changed ();
+  /* The last window closed: say Quoin stays only if, looked at since, a file still is open. */
+  if (E.notice_due && (fresh || E.edits->len == 0))
+    {
+      E.notice_due = false;
+      if (E.edits->len > 0)
+        notice ();
+    }
+  if (E.edits->len > 0 || scanning || surveying)
     return true;
   hold (false);
   E.timer = 0;
@@ -563,6 +774,7 @@ gbk_edits_watch (GbkEditRecord *rec, int lock_fd, const char *asked, const char 
   g_ptr_array_add (E.edits, e);
   hold (true);
   run_timer ();
+  changed ();
   return e->id;
 }
 
@@ -594,6 +806,90 @@ guint
 gbk_edits_count (void)
 {
   return E.edits != nullptr ? E.edits->len : 0;
+}
+
+/* ---- what is open, for the windows ---- */
+
+GMenuModel *
+gbk_edits_menu (void)
+{
+  return E.menu != nullptr ? G_MENU_MODEL (E.menu) : nullptr;
+}
+
+static void
+rebuild_menu (void)
+{
+  g_menu_remove_all (E.menu);
+  for (guint i = 0; i < E.edits->len; i++)
+    {
+      const Edit *e = g_ptr_array_index (E.edits, i);
+      g_autofree char *name = g_filename_display_name (e->rec->name);
+      g_autofree char *label
+          = e->rec->app[0] != '\0'
+                ? g_strdup_printf ("%s on %s (%s)", name, e->rec->host, e->rec->app)
+                : g_strdup_printf ("%s on %s", name, e->rec->host);
+      g_autoptr (GMenuItem) item = g_menu_item_new (label, nullptr);
+      g_menu_item_set_action_and_target_value (item, "win.show-edit", g_variant_new_uint64 (e->id));
+      g_menu_append_item (E.menu, item);
+    }
+  if (E.edits->len == 0)
+    g_menu_append (E.menu, "None open", nullptr);   /* no action: shown greyed out */
+}
+
+/* The set of edits changed: the ☰ menus and the marked files in every window follow. */
+static void
+changed (void)
+{
+  rebuild_menu ();
+  for (GList *l = E.app != nullptr ? gtk_application_get_windows (E.app) : nullptr; l != nullptr;
+       l = l->next)
+    if (GBK_IS_WINDOW (l->data))
+      gbk_window_edits_changed (l->data);
+}
+
+static void
+add_name (GHashTable **names, const char *path, const char *folder)
+{
+  g_autofree char *dir = g_path_get_dirname (path);
+  if (!g_str_equal (dir, folder))
+    return;
+  if (*names == nullptr)
+    *names = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, nullptr);
+  g_hash_table_add (*names, g_path_get_basename (path));
+}
+
+GHashTable *
+gbk_edits_names_in (const GbkLoc *folder)
+{
+  GHashTable *names = nullptr;
+  if (E.edits == nullptr || gbk_loc_is_local (folder))
+    return nullptr;
+  const char *path = gbk_loc_path (folder);
+  for (guint i = 0; i < E.edits->len; i++)
+    {
+      const Edit *e = g_ptr_array_index (E.edits, i);
+      if (!g_str_equal (e->rec->host, gbk_loc_host (folder)))
+        continue;
+      add_name (&names, e->asked, path);
+      add_name (&names, e->rec->remote, path);
+    }
+  return names;
+}
+
+bool
+gbk_edits_where (uint64_t id, GbkLoc **folder, char **name)
+{
+  for (guint i = 0; E.edits != nullptr && i < E.edits->len; i++)
+    {
+      const Edit *e = g_ptr_array_index (E.edits, i);
+      if (e->id != id)
+        continue;
+      g_autofree char *dir = g_path_get_dirname (e->asked);
+      *folder = gbk_loc_new_remote (e->rec->host, dir);
+      *name = g_path_get_basename (e->asked);
+      return true;
+    }
+  return false;
 }
 
 /* ---- the last window closes ---- */
@@ -633,16 +929,22 @@ on_window_added (GtkApplication *app G_GNUC_UNUSED, GtkWindow *w G_GNUC_UNUSED,
                  void *data G_GNUC_UNUSED)
 {
   E.windows_gone_us = 0;
+  E.notice_due = false;
 }
 
+/* The last window closed: look again at once whether anything still uses the copies, and
+ * only then say that Quoin stays (tick); when nothing does, it simply ends. */
 static void
 on_window_removed (GtkApplication *app, GtkWindow *w G_GNUC_UNUSED, void *data G_GNUC_UNUSED)
 {
   if (gtk_application_get_windows (app) != nullptr)
     return;
   E.windows_gone_us = g_get_monotonic_time ();
-  if (E.edits->len > 0)
-    notice ();
+  if (E.edits->len == 0)
+    return;
+  E.notice_due = true;
+  survey_start ();
+  run_timer ();
 }
 
 /* ---- copies an earlier Quoin left unsent ---- */
@@ -669,6 +971,7 @@ act_on_unsent (GPtrArray *found, GbkEditsAnswer answer)
             g_ptr_array_add (E.edits, e);
             hold (true);
             run_timer ();
+            changed ();
             break;
           }
         case GBK_EDITS_SHOW:
@@ -819,6 +1122,8 @@ gbk_edits_init (GtkApplication *app, GbkContext *ctx)
   E.cache = gbk_edits_cache ();
   E.edits = g_ptr_array_new_with_free_func ((GDestroyNotify) edit_free);
   E.owner = g_object_new (G_TYPE_OBJECT, nullptr);
+  E.menu = g_menu_new ();
+  rebuild_menu ();
   gbk_connect (E.owner, app, "window-added", G_CALLBACK (on_window_added), nullptr);
   gbk_connect (E.owner, app, "window-removed", G_CALLBACK (on_window_removed), nullptr);
   gbk_edits_scan ();
@@ -864,7 +1169,7 @@ gbk_edits_shutdown (void)
   for (int i = 0; i < 500; i++)
     {
       g_mutex_lock (&E.scan_lock);
-      bool scanning = E.scan_running;
+      bool scanning = E.scan_running || E.survey_running;
       g_mutex_unlock (&E.scan_lock);
       if (!scanning)
         break;
@@ -874,7 +1179,9 @@ gbk_edits_shutdown (void)
   hold (false);
   g_mutex_lock (&E.scan_lock);
   g_clear_pointer (&E.found, g_ptr_array_unref);
+  g_clear_pointer (&E.surveyed, survey_free);
   g_mutex_unlock (&E.scan_lock);
+  g_clear_object (&E.menu);
   /* Uploads still running finish on their own; their results go nowhere now. */
   g_clear_object (&E.owner);
   g_clear_pointer (&E.edits, g_ptr_array_unref);

@@ -83,7 +83,10 @@ program that won't start. On anything else, [build from source](#building).
   The status bar says what is happening ("Saving notes.txt to ws1…", "Saved notes.txt to
   ws1 at 14:02"); while Quoin isn't the window in use, a desktop notification says it too
   (briefly for a save, until dismissed for a failure or a question). Quoin keeps running
-  after its last window closes until that app has closed, and says so; a save it couldn't
+  after its last window closes while a file is still open in an app, and says so (it can
+  tell when an editor closes the file, even if the editor keeps running). Files being
+  edited carry a small emblem in their folder, and **Files Being Edited** in the ☰ menu
+  lists them; a save it couldn't
   upload is offered the next time Quoin starts. Renaming, deleting
   and the like there, and drag and drop with other machines, come next (see
   [docs/remote-plan.md](docs/remote-plan.md)).

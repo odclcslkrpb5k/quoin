@@ -470,6 +470,11 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   w->activity label, same text in every window (gbk_edits_say). The X11 busy cursor the
   user saw while saving is not set by Quoin (no cursor code); suspected startup
   notification from launching the app (pending until the app reports ready, ~30 s).
+- IN USE, not app running (user, 2026-10-18): edits.c surveys /proc on a thread (open
+  files inside the copy's folder by link text; inotify watches on copy/folder via fdinfo).
+  Test lessons: a forked child of the test process was invisible in /proc (the test process
+  isn't dumpable), so tests watch with a separate python3 program; and a plain g_usleep in
+  a GUI test stops Quoin's timer (surveys replace each other unread): use run_for().
 - ANALYZER + REFCOUNTS: -fanalyzer can't follow refcounts: a task/job referenced by a
   table AND its worker gets "use after free" on error paths. Give such things ONE owner
   (the worker) and let tables borrow them under a lock (peer.c tasks and jobs).

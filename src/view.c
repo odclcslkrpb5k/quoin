@@ -8,6 +8,7 @@
 #define PAD_X 4
 #define PAD_Y 1
 #define ICON_GAP 4
+#define EMBLEM_SIZE 10
 #define MIN_COL_W 48
 #define TEXT_SLACK 3            /* px added to estimated widths (kerning can widen a bit) */
 #define SEARCH_TIMEOUT_MS 1000
@@ -83,6 +84,9 @@ struct _GbkView
   /* Icons, per type id, at the current scale. */
   GPtrArray *icons;             /* cairo_surface_t* or nullptr */
   GArray *icons_tried;          /* bool */
+  GHashTable *marked; /* names (char*) open for editing elsewhere (edits.h); may be nullptr */
+  cairo_surface_t *emblem; /* drawn on a marked item's icon */
+  bool emblem_tried;
   int icon_scale;
 };
 
@@ -210,7 +214,7 @@ text_width (GbkView *v, GbkHandle h, const GbkEntry *e)
   uint32_t slot = (uint32_t) (h & 0xffffffffu);
   uint32_t gen = (uint32_t) (h >> 32);
   if (slot >= v->widths->len)
-    g_array_set_size (v->widths, slot + 1);       /* new elements zeroed (clear = true) */
+    g_array_set_size (v->widths, slot + 1); /* new elements zeroed (clear = true) */
   WidthCache *wc = &g_array_index (v->widths, WidthCache, slot);
   if (wc->gen != gen)
     {
@@ -302,7 +306,7 @@ relayout (GbkView *v)
           w = MAX (w, PAD_X + ICON_SIZE + ICON_GAP + text_width (v, h, e) + PAD_X);
         }
       int add = MIN (w, cap);
-      x = x > G_MAXINT - add ? G_MAXINT : x + add;   /* absurdly wide: saturate */
+      x = x > G_MAXINT - add ? G_MAXINT : x + add; /* absurdly wide: saturate */
     }
   g_array_index (v->col_x, int, ncols) = x;
   update_adjustment (v);
@@ -346,6 +350,8 @@ scroll_to_index (GbkView *v, size_t i)
 static void
 clear_icons (GbkView *v)
 {
+  g_clear_pointer (&v->emblem, cairo_surface_destroy);
+  v->emblem_tried = false;
   for (guint i = 0; i < v->icons->len; i++)
     g_clear_pointer (&g_ptr_array_index (v->icons, i), cairo_surface_destroy);
   g_ptr_array_set_size (v->icons, 0);
@@ -385,6 +391,40 @@ icon_for (GbkView *v, GbkTypeId type)
       = gtk_icon_info_load_surface (info, gtk_widget_get_window (GTK_WIDGET (v)), nullptr);
   g_ptr_array_index (v->icons, type) = surface;
   return surface;
+}
+
+/* The "being edited" emblem, drawn over the bottom right of an item's icon. */
+static cairo_surface_t *
+emblem (GbkView *v)
+{
+  if (v->emblem_tried)
+    return v->emblem;
+  v->emblem_tried = true;
+  const char *names[]
+      = { "document-edit-symbolic", "document-edit", "accessories-text-editor", nullptr };
+  GtkIconTheme *theme = gtk_icon_theme_get_for_screen (gtk_widget_get_screen (GTK_WIDGET (v)));
+  g_autoptr (GtkIconInfo) info = gtk_icon_theme_choose_icon_for_scale (
+      theme, names, EMBLEM_SIZE, gtk_widget_get_scale_factor (GTK_WIDGET (v)),
+      GTK_ICON_LOOKUP_FORCE_SIZE);
+  if (info != nullptr)
+    v->emblem = gtk_icon_info_load_surface (info, gtk_widget_get_window (GTK_WIDGET (v)), nullptr);
+  return v->emblem;
+}
+
+void
+gbk_view_set_marked (GbkView *v, GHashTable *names)
+{
+  g_clear_pointer (&v->marked, g_hash_table_unref);
+  v->marked = names != nullptr ? g_hash_table_ref (names) : nullptr;
+  gtk_widget_queue_draw (GTK_WIDGET (v));
+}
+
+bool
+gbk_view_is_marked (const GbkView *v, GbkHandle h)
+{
+  const GbkEntry *e = v->model != nullptr ? gbk_dir_model_get (v->model, h) : nullptr;
+  return e != nullptr && v->marked != nullptr
+         && g_hash_table_contains (v->marked, gbk_entry_name (e));
 }
 
 static void
@@ -571,7 +611,7 @@ gbk_view_move_cursor (GbkView *v, GbkMoveStep step, int count, GbkSelectMode mod
   size_t cur = index_of (v, v->cursor);
   size_t target;
   if (cur == SIZE_MAX)
-    target = (step == GBK_MOVE_ENDS && count > 0) ? n - 1 : 0;   /* no cursor yet */
+    target = (step == GBK_MOVE_ENDS && count > 0) ? n - 1 : 0; /* no cursor yet */
   else
     switch (step)
       {
@@ -826,6 +866,16 @@ gbk_view_draw (GtkWidget *w, cairo_t *cr)
           if (icon != nullptr)
             {
               cairo_set_source_surface (cr, icon, x + PAD_X, y + icon_dy);
+              cairo_paint (cr);
+            }
+          cairo_surface_t *mark
+              = v->marked != nullptr && g_hash_table_contains (v->marked, gbk_entry_name (e))
+                    ? emblem (v)
+                    : nullptr;
+          if (mark != nullptr)
+            {
+              cairo_set_source_surface (cr, mark, x + PAD_X + ICON_SIZE - EMBLEM_SIZE + 2,
+                                        y + icon_dy + ICON_SIZE - EMBLEM_SIZE + 2);
               cairo_paint (cr);
             }
 
@@ -1140,7 +1190,7 @@ gbk_view_key_press (GtkWidget *w, GdkEventKey *ev)
   GbkView *v = GBK_VIEW (w);
   GdkModifierType mods = ev->state & gtk_accelerator_get_default_mod_mask ();
   if (mods & (GDK_MOD1_MASK | GDK_SUPER_MASK | GDK_HYPER_MASK | GDK_META_MASK))
-    return false;                       /* Alt+...: window-level navigation */
+    return false; /* Alt+...: window-level navigation */
   bool ctrl = mods & GDK_CONTROL_MASK, shift = mods & GDK_SHIFT_MASK;
   GbkSelectMode mode = shift ? GBK_SELECT_EXTEND : ctrl ? GBK_SELECT_NONE : GBK_SELECT_REPLACE;
 
@@ -1189,7 +1239,7 @@ gbk_view_key_press (GtkWidget *w, GdkEventKey *ev)
 
     case GDK_KEY_space:
       if (v->search->len > 0 && !ctrl)
-        gbk_view_type_ahead (v, " ");    /* mid-search, space is part of the name */
+        gbk_view_type_ahead (v, " "); /* mid-search, space is part of the name */
       else
         gbk_view_toggle_cursor (v);
       return true;
@@ -1443,6 +1493,7 @@ gbk_view_finalize (GObject *o)
   clear_icons (v);
   g_ptr_array_unref (v->icons);
   g_array_unref (v->icons_tried);
+  g_clear_pointer (&v->marked, g_hash_table_unref);
   g_array_unref (v->col_x);
   g_array_unref (v->widths);
   g_hash_table_unref (v->selected);

@@ -253,9 +253,18 @@ As built in phase 6 (2026-10-18), editing (src/edits.c, edit-store.c, fetch.c):
   and uploads once it changed and then held still for a poll. Not connected: retried with
   backoff and no dialogs; a failed upload isn't retried until the next save. A machine
   answering with another machine-id or uid gets nothing (and the person is told).
-- How long: while the app runs, judged every 5 s from the launched pid and from processes
-  named like the app's executable (launchers and shells don't count), after a 60 s grace.
-  An app never seen: while a Quoin window is open, then 10 minutes. Each watch holds the
+- How long (revised 2026-10-18, user: single-process apps such as Mousepad and Ristretto
+  outlive the file): while the copy is IN USE. Every 5 s a thread looks through /proc:
+  another process with an open file inside the copy's own folder (link text only, never
+  stat: no hang on a dead network mount), or an inotify watch on the copy or its folder
+  (fdinfo "ino:… sdev:…", the kernel's major<<20|minor; GTK editors' GFileMonitor watches
+  the folder, and the folder is the copy's alone). Two looks without: closed. Apps that
+  never show either fall back to the process rule: the launched pid, or a process named like
+  the app's executable (launchers and shells don't count), after a 60 s grace; never seen
+  at all: while a Quoin window is open, then 10 minutes. When the last window closes a
+  fresh look decides at once: nothing in use, Quoin just ends (no notice).
+- Shown in Quoin: files being edited get an emblem on their icon in their folder there, and
+  the ☰ menu has "Files Being Edited" (each opens its folder with it selected). Each watch holds the
   GApplication; the last window closing shows the notice listing "name (App) from host".
 - At start a scan (thread) offers unsent copies (Upload / Show / Discard, locks held while
   asked) and removes finished records older than 7 days, and old folders without a record.

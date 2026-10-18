@@ -302,6 +302,7 @@ LOC_PATH_FILES = {
     "src/props.c": "asks the other machine for its own file's details (gbk_conn_info)",
     "src/job.c": "hands another machine's paths to a copy reading from there (gbk_conn_source)",
     "src/fetch.c": "records which file there a copy came from, to find it again (gbk_edits_find)",
+    "src/edits.c": "matches a folder there against the files being edited (gbk_edits_names_in)",
     "src/cliptext.c": "writes locations as text for the clipboard between Quoin windows",
     "tests/fuzz/fuzz-clip.c": "checks the clipboard round trip",
     "tests/test-loc.c": "tests it",

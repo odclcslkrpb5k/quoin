@@ -128,9 +128,26 @@ is_current (GbkWindow *w, const GbkBrowser *b)
   return i >= 0 && (const void *) gtk_notebook_get_nth_page (w->tabs, i) == (const void *) b;
 }
 
+/* Files of this tab's folder being edited elsewhere get an emblem (edits.h). */
+static void
+mark_edits (const GbkBrowser *b)
+{
+  g_autoptr (GHashTable) names = gbk_edits_names_in (gbk_browser_loc (b));
+  gbk_view_set_marked (gbk_browser_view (b), names);
+}
+
+void
+gbk_window_edits_changed (GbkWindow *w)
+{
+  int n = gtk_notebook_get_n_pages (w->tabs);
+  for (int i = 0; i < n; i++)
+    mark_edits (GBK_BROWSER (gtk_notebook_get_nth_page (w->tabs, i)));
+}
+
 static void
 on_browser_path (GbkBrowser *b, GbkWindow *w)
 {
+  mark_edits (b);
   update_tab_label (b);
   if (is_current (w, b))
     update_chrome (w);
@@ -1326,6 +1343,21 @@ action_network (GSimpleAction *a G_GNUC_UNUSED, GVariant *param, void *data)
   gbk_browser_open_address (active (data), &home);
 }
 
+/* A file being edited (☰ menu): its folder, with it selected. Unknown ids (a stale menu,
+ * or D-Bus) do nothing. */
+static void
+action_show_edit (GSimpleAction *a G_GNUC_UNUSED, GVariant *param, void *data)
+{
+  g_autoptr (GbkLoc) folder = nullptr;
+  g_autofree char *name = nullptr;
+  if (!gbk_edits_where (g_variant_get_uint64 (param), &folder, &name))
+    return;
+  gbk_window_open (data, folder);
+  g_autoptr (GPtrArray) names = g_ptr_array_new ();
+  g_ptr_array_add (names, name);
+  gbk_browser_select_names (active (data), names);
+}
+
 ACTION (action_location)
 {
   gbk_pathbar_edit (gbk_browser_pathbar (active (data)));
@@ -1369,6 +1401,7 @@ static const GActionEntry actions[] = {
   { .name = "location", .activate = action_location },
   { .name = "device-open", .parameter_type = "s", .activate = action_device_open },
   { .name = "network", .parameter_type = "s", .activate = action_network },
+  { .name = "show-edit", .parameter_type = "t", .activate = action_show_edit },
   { .name = "device-unmount", .parameter_type = "s", .activate = action_device_unmount },
   { .name = "device-eject", .parameter_type = "s", .activate = action_device_eject },
   /* Stateful: no activate handler means a boolean toggles / a string is set. */
@@ -1558,6 +1591,8 @@ app_menu_button (GbkWindow *w)
   g_menu_append_submenu (s1, "Devices", gbk_devices_menu (w->devices));
   g_autoptr (GMenuModel) network = network_menu (w);
   g_menu_append_submenu (s1, "Network", network);
+  if (gbk_edits_menu () != nullptr)
+    g_menu_append_submenu (s1, "Files Being Edited", gbk_edits_menu ());
   g_menu_append_section (menu, nullptr, G_MENU_MODEL (s1));
   g_autoptr (GMenu) s2 = g_menu_new ();
   g_menu_append (s2, "Show Hidden Files", "win.show-hidden");

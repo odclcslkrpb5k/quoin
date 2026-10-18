@@ -483,6 +483,138 @@ test_edit_upload (void)
   g_assert_true (wait_until (no_edits, nullptr));
 }
 
+/* The ☰ list's labels. */
+static char *
+edits_listed (void)
+{
+  GMenuModel *m = gbk_edits_menu ();
+  GString *s = g_string_new ("");
+  for (int i = 0; i < g_menu_model_get_n_items (m); i++)
+    {
+      g_autofree char *label = nullptr;
+      g_menu_model_get_item_attribute (m, i, G_MENU_ATTRIBUTE_LABEL, "s", &label);
+      g_string_append_printf (s, "%s%s", i > 0 ? "|" : "", label);
+    }
+  return g_string_free (s, false);
+}
+
+static bool
+marked (void *data)
+{
+  Named *n = data;
+  GbkDirModel *m = model_of (n->w);
+  GbkHandle h = m != nullptr ? gbk_dir_model_find (m, n->name) : GBK_HANDLE_NONE;
+  return h != GBK_HANDLE_NONE && gbk_view_is_marked (gbk_window_view (n->w), h);
+}
+
+/* Let time pass with the main loop running (a plain sleep would stop Quoin looking). */
+static void
+run_for (int ms)
+{
+  int64_t until = g_get_monotonic_time () + (int64_t) ms * 1000;
+  while (g_get_monotonic_time () < until)
+    {
+      while (gtk_events_pending ())
+        gtk_main_iteration ();
+      g_usleep (10000);
+    }
+}
+
+static void
+touch_home (const char *name)
+{
+  g_autofree char *p = g_build_filename (home, name, nullptr);
+  g_assert_true (g_file_set_contents (p, "", -1, nullptr));
+}
+
+static void
+unlink_home (const char *name)
+{
+  g_autofree char *p = g_build_filename (home, name, nullptr);
+  unlink (p);
+}
+
+/* An app that keeps running after closing the file (one process for many files, as Mousepad
+ * and Ristretto are): the watch ends when the file is no longer open, not when the app
+ * exits. While open, the file is marked in its folder and listed in the ☰ menu. The last
+ * window closing then ends Quoin quietly: no notice, nothing to wait for. */
+static void
+test_closed_file_ends_watch (void)
+{
+  put ("data/held.txt", "held");
+  touch_home ("hold-file");
+  touch_home ("hold-app");
+  GbkWindow *w = window_on_remote_data ();
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "held.txt"));
+  g_signal_emit_by_name (gbk_window_view (w), "activate");
+  g_autofree char *copy = opened_copy ("held.txt");
+  g_assert_nonnull (copy);
+  Named held = { w, "held.txt" };
+  g_assert_true (wait_until (marked, &held));
+  g_autofree char *listed = edits_listed ();
+  g_assert_cmpstr (listed, ==, "held.txt on ws (Opener)");
+  run_for (1500);                            /* several looks: still open, still watched */
+  g_assert_cmpuint (gbk_edits_count (), ==, 1);
+
+  unlink_home ("hold-file");                 /* closed; the app goes on running */
+  run_for (400);                             /* (the stand-in takes up to 0.1 s to close it) */
+  gtk_widget_destroy (GTK_WIDGET (w));       /* the last window: a fresh look, no notice */
+  g_assert_true (wait_until (no_edits, nullptr));
+  g_autoptr (GPtrArray) dialogs = message_dialogs ();
+  g_assert_cmpuint (dialogs->len, ==, 0);
+  g_autofree char *none = edits_listed ();
+  g_assert_cmpstr (none, ==, "None open");
+  unlink_home ("hold-app");
+}
+
+/* An app that only watches the file for changes (as GTK editors do, through its folder)
+ * keeps it watched, whatever its process is called; when it stops, the watch ends. */
+static void
+test_watched_file_keeps_watch (void)
+{
+  put ("data/watched.txt", "w");
+  GbkWindow *w = window_on_remote_data ();
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "watched.txt"));
+  g_signal_emit_by_name (gbk_window_view (w), "activate");
+  g_autofree char *copy = opened_copy ("watched.txt");
+  g_assert_nonnull (copy);
+  g_autofree char *dir = g_path_get_dirname (copy);
+  /* A separate program watching the copy's folder, as a GTK editor does with a file open
+   * (its GFileMonitor watches the folder). It stops when ~/hold-watch goes. */
+  touch_home ("hold-watch");
+  g_autofree char *hold = g_build_filename (home, "hold-watch", nullptr);
+  char script[] = "import ctypes, os, sys, time\n"
+                  "libc = ctypes.CDLL(None, use_errno=True)\n"
+                  "fd = libc.inotify_init1(0)\n"
+                  "assert fd >= 0 and libc.inotify_add_watch(fd, sys.argv[1].encode(), 0x2) >= 0\n"
+                  "while os.path.exists(sys.argv[2]): time.sleep(0.05)\n";
+  char *argv[] = { (char[]) { "python3" }, (char[]) { "-c" }, script, dir, hold, nullptr };
+  g_autoptr (GError) error = nullptr;
+  g_assert_true (g_spawn_async (nullptr, argv, nullptr, G_SPAWN_SEARCH_PATH, nullptr, nullptr,
+                                nullptr, &error));
+  g_assert_no_error (error);
+  run_for (1500);                            /* the opener has long gone; the watcher hasn't */
+  g_assert_cmpuint (gbk_edits_count (), ==, 1);
+  unlink (hold);
+  g_assert_true (wait_until (no_edits, nullptr));
+  gtk_widget_destroy (GTK_WIDGET (w));
+}
+
+/* The kernel's description of inotify watches, as /proc shows it. */
+static void
+test_fdinfo (void)
+{
+  const char *info = "pos:\t0\nflags:\t02000000\nmnt_id:\t15\nino:\t1057\n"
+                     "inotify wd:2 ino:1a2b sdev:800003 mask:fce ignored_mask:0 "
+                     "fhandle-bytes:8 fhandle-type:1 f_handle:2b1a0000\n"
+                     "inotify wd:1 ino:ff sdev:fd00001 mask:2 ignored_mask:0\n";
+  g_assert_true (gbk_edits_fdinfo_watches (info, makedev (8, 3), 0x1a2b));
+  g_assert_true (gbk_edits_fdinfo_watches (info, makedev (253, 1), 0xff));
+  g_assert_false (gbk_edits_fdinfo_watches (info, makedev (8, 3), 0xff));
+  g_assert_false (gbk_edits_fdinfo_watches (info, makedev (8, 4), 0x1a2b));
+  g_assert_false (gbk_edits_fdinfo_watches ("inotify wd:1 ino:zz sdev:1\n", makedev (0, 1), 0));
+}
+
 static guint unsent_offered;
 static GbkEditsAnswer unsent_reply;
 
@@ -793,7 +925,11 @@ main (int argc, char **argv)
   /* It stays open while ~/hold-app exists (at most 30 s). */
   g_assert_true (g_file_set_contents (
       opener,
-      "#!/bin/sh\nfor f; do touch \"$f.opened\"; done\nn=0\n"
+      "#!/bin/sh\nfor f; do touch \"$f.opened\"; done\n"
+      /* With ~/hold-file it keeps the file open first, as an editor with it loaded. */
+      "[ -e \"$HOME/hold-file\" ] && exec 3<\"$1\"\nn=0\n"
+      "while [ -e \"$HOME/hold-file\" ] && [ $n -lt 300 ]; do sleep 0.1; n=$((n+1)); done\n"
+      "exec 3<&-\nn=0\n"
       "while [ -e \"$HOME/hold-app\" ] && [ $n -lt 300 ]; do sleep 0.1; n=$((n+1)); done\n",
       -1, nullptr));
   g_assert_cmpint (chmod (opener, 0755), ==, 0);
@@ -829,6 +965,9 @@ main (int argc, char **argv)
   g_test_add_func ("/remotewin/paste-there", test_paste_there);
   g_test_add_func ("/remotewin/edit-upload", test_edit_upload);
   g_test_add_func ("/remotewin/unsent-offered", test_unsent_offered);
+  g_test_add_func ("/remotewin/closed-file-ends-watch", test_closed_file_ends_watch);
+  g_test_add_func ("/remotewin/watched-file-keeps-watch", test_watched_file_keeps_watch);
+  g_test_add_func ("/remotewin/fdinfo", test_fdinfo);
   g_test_add_func ("/remotewin/cache-cleanup", test_cache_cleanup);
   g_test_add_func ("/remotewin/open-names-app", test_open_names_app);
   int status = g_test_run ();
