@@ -490,6 +490,12 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   `once(path, old, new)`: recreate it if out/ was cleaned) or the Edit tool.
 - UI rule (user, 2026-10-18): an action says what it will do before you click it. The Open
   entry names the application ("Open With Mousepad") whenever one app will be used.
+- appchoose.c: GtkAppChooserDialog for Open With ▸ Other Application… and for Open on files
+  with no default app (replaces the "No application is set" error). Tick box = set default;
+  otherwise set_as_last_used (joins recommended). Modal + destroy-with-parent: dies with its
+  window. Tests pick via gbk_appchoose_set_pick_for_test (the list can't be clicked). GUI
+  tests must not "activate" a selection holding files with no app: the modal chooser then
+  swallows later Menu-key presses.
 - CHAIN with && : a check run after a failing edit script tests unchanged code (did it
   2026-10-17). Edits then `./build format && ./build check`. RECURRED 2026-10-18 (the
   rule was written down and still skipped), so now Engineer: out/edit.py leaves

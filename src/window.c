@@ -1,4 +1,5 @@
 #include "window.h"
+#include "appchoose.h"
 #include "clipboard.h"
 #include "devices.h"
 #include "edits.h"
@@ -346,6 +347,72 @@ launch_context (GbkWindow *w)
 
 /* Double-click / Enter. A single folder is entered; several folders open in new tabs;
  * files are run or opened per gbk_open_plan. */
+static bool
+has_default (const GbkItem *it)
+{
+  g_autoptr (GAppInfo) app = g_app_info_get_default_for_type (it->mime, false);
+  return app != nullptr;
+}
+
+/* Open files (GbkItem*) with `app`: here directly, from another machine as copies. */
+static void
+open_with (GbkWindow *w, GPtrArray *items, GAppInfo *app)
+{
+  if (items->len == 0)
+    return;
+  if (!gbk_loc_is_local (((const GbkItem *) g_ptr_array_index (items, 0))->loc))
+    {
+      g_autoptr (GPtrArray) copies
+          = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_item_free);
+      for (guint i = 0; i < items->len; i++)
+        g_ptr_array_add (copies, gbk_item_copy (g_ptr_array_index (items, i)));
+      gbk_fetch_open (GTK_WINDOW (w), copies, app);
+      return;
+    }
+  g_autoptr (GAppLaunchContext) lc = launch_context (w);
+  g_autoptr (GError) error = nullptr;
+  if (!gbk_open_with (app, items, lc, &error))
+    gbk_jobui_error (GTK_WINDOW (w), "Couldn't open", error->message);
+}
+
+/* The window and files a choice of application is for (appchoose.h). The dialog goes with
+ * the window, so the window outlives this. */
+typedef struct
+{
+  GbkWindow *w;
+  GPtrArray *items;
+} Choosing;
+
+static void
+choosing_free (Choosing *c)
+{
+  g_ptr_array_unref (c->items);
+  g_free (c);
+}
+
+static void
+on_app_chosen (GAppInfo *app, void *data)
+{
+  const Choosing *c = data;
+  open_with (c->w, c->items, app);
+}
+
+/* Ask which application opens `items` (GbkItem*, files), then open them with it. */
+static void
+choose_app (GbkWindow *w, GPtrArray *items)
+{
+  if (items->len == 0)
+    return;
+  Choosing *c = g_new0 (Choosing, 1);
+  c->w = w;
+  c->items = g_ptr_array_ref (items);
+  const GbkItem *first = g_ptr_array_index (items, 0);
+  g_autofree char *what = items->len == 1 ? g_strdup_printf ("“%s”", first->display)
+                                          : g_strdup_printf ("%u files", items->len);
+  gbk_appchoose (GTK_WINDOW (w), what, gbk_menu_common_mime (items), on_app_chosen, c,
+                 (GDestroyNotify) choosing_free);
+}
+
 static void
 open_items (GbkWindow *w, GbkBrowser *b, GPtrArray *items)
 {
@@ -354,17 +421,21 @@ open_items (GbkWindow *w, GbkBrowser *b, GPtrArray *items)
       gbk_browser_open (b, ((GbkItem *) g_ptr_array_index (items, 0))->loc);
       return;
     }
-  /* Files on another machine open as read-only copies (fetch.h): never run from there. */
+  /* Files on another machine open as copies (fetch.h): never run from there. Files no
+   * application is set to open: the person picks one. */
   g_autoptr (GPtrArray) fetch = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_item_free);
+  g_autoptr (GPtrArray) unknown = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_item_free);
   for (guint i = 0; i < items->len; i++)
     {
       const GbkItem *it = g_ptr_array_index (items, i);
       if (!it->is_dir && !gbk_loc_is_local (it->loc))
-        g_ptr_array_add (fetch, gbk_item_copy (it));
+        g_ptr_array_add (has_default (it) ? fetch : unknown, gbk_item_copy (it));
     }
-  if (fetch->len > 0)
+  if (fetch->len > 0 || unknown->len > 0)
     {
-      gbk_fetch_open (GTK_WINDOW (w), fetch, nullptr);
+      if (fetch->len > 0)
+        gbk_fetch_open (GTK_WINDOW (w), fetch, nullptr);
+      choose_app (w, unknown);
       return;
     }
   g_autoptr (GPtrArray) by_default = g_ptr_array_new ();
@@ -383,7 +454,12 @@ open_items (GbkWindow *w, GbkBrowser *b, GPtrArray *items)
           if (!gbk_open_execute (w->ctx->config, it, true, gbk_browser_loc (b), &error))
             report (b, it->display, error);
           break;
-        case GBK_OPEN_DEFAULT: g_ptr_array_add (by_default, it); break;
+        case GBK_OPEN_DEFAULT:
+          if (has_default (it))
+            g_ptr_array_add (by_default, it);
+          else
+            g_ptr_array_add (unknown, gbk_item_copy (it));
+          break;
         default: gbk_fatal ("bad open plan");
         }
     }
@@ -394,6 +470,7 @@ open_items (GbkWindow *w, GbkBrowser *b, GPtrArray *items)
       if (!gbk_open_default (by_default, lc, &error))
         report (b, "Open", error);
     }
+  choose_app (w, unknown);
 }
 
 /* ---- view events ---- */
@@ -742,18 +819,12 @@ on_menu_item (GtkMenuItem *mi, GbkWindow *w)
       break;
     case GBK_MENU_OPEN_WITH:
       {
+        /* No application: "Other Application…", to choose one. */
         GAppInfo *app = g_object_get_data (G_OBJECT (mi), KEY_APP);
-        if (!gbk_loc_is_local (first->loc))
-          {
-            g_autoptr (GPtrArray) copies
-                = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_item_free);
-            for (guint i = 0; i < items->len; i++)
-              g_ptr_array_add (copies, gbk_item_copy (g_ptr_array_index (items, i)));
-            gbk_fetch_open (GTK_WINDOW (w), copies, app);
-            break;
-          }
-        g_autoptr (GAppLaunchContext) lc = launch_context (w);
-        ok = gbk_open_with (app, items, lc, &error);
+        if (app != nullptr)
+          open_with (w, items, app);
+        else
+          choose_app (w, items);
         break;
       }
     case GBK_MENU_EXECUTE:
@@ -838,12 +909,11 @@ open_label (const GPtrArray *items)
   return g_strdup_printf ("Open With %s", g_app_info_get_display_name (common));
 }
 
+/* The type's recommended applications (files of one type), then "Other Application…". */
 static void
 add_open_with (GbkWindow *w, GtkWidget *menu, const char *mime)
 {
-  GList *apps = g_app_info_get_recommended_for_type (mime);
-  if (apps == nullptr)
-    return;
+  GList *apps = mime != nullptr ? g_app_info_get_recommended_for_type (mime) : nullptr;
   GtkWidget *sub = gtk_menu_new ();
   for (GList *l = apps; l != nullptr; l = l->next)
     {
@@ -852,7 +922,10 @@ add_open_with (GbkWindow *w, GtkWidget *menu, const char *mime)
       GtkWidget *mi = menu_item (w, sub, label, GBK_MENU_OPEN_WITH);
       g_object_set_data_full (G_OBJECT (mi), KEY_APP, g_object_ref (app), g_object_unref);
     }
+  if (apps != nullptr)
+    gtk_menu_shell_append (GTK_MENU_SHELL (sub), gtk_separator_menu_item_new ());
   g_list_free_full (apps, g_object_unref);
+  menu_item (w, sub, "Other Application…", GBK_MENU_OPEN_WITH);
   GtkWidget *parent = gtk_menu_item_new_with_label ("Open With");
   gtk_menu_item_set_submenu (GTK_MENU_ITEM (parent), sub);
   gtk_menu_shell_append (GTK_MENU_SHELL (menu), parent);

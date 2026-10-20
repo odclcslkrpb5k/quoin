@@ -48,6 +48,15 @@ all_regular (const GPtrArray *items)
 }
 
 static bool
+no_dirs (const GPtrArray *items)
+{
+  for (guint i = 0; i < items->len; i++)
+    if (((const GbkItem *) g_ptr_array_index (items, i))->is_dir)
+      return false;
+  return items->len > 0;
+}
+
+static bool
 all_dirs (const GPtrArray *items)
 {
   for (guint i = 0; i < items->len; i++)
@@ -153,7 +162,7 @@ gbk_menu_entries (const GbkConfig *config, GPtrArray *items, GbkMenuTarget targe
           add (out, GBK_MENU_OPEN_TAB, nullptr);
           add (out, GBK_MENU_OPEN_WINDOW, nullptr);
         }
-      if (gbk_menu_common_mime (items) != nullptr)
+      if (no_dirs (items))
         add (out, GBK_MENU_OPEN_WITH, nullptr);
       if (only != nullptr && gbk_open_can_execute (only))
         {

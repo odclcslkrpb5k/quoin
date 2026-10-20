@@ -1,7 +1,7 @@
 /* Context menu contents, computed from a selection snapshot. Pure: no GTK, so it's tested
  * directly. The window turns entries into a GtkMenu and performs them.
  *
- * On items:      Open, Open in New Tab / Window (all folders), Open With (same-type files),
+ * On items:      Open, Open in New Tab / Window (all folders), Open With (files only),
  *                Execute / Execute in Terminal (one runnable file), Open Terminal Here (one
  *                folder), clipboard and file operations, Copy Full Path, Executable (all
  *                regular files), configured actions that match every item, Properties (one).
@@ -21,7 +21,8 @@ typedef enum
   GBK_MENU_OPEN,
   GBK_MENU_OPEN_TAB,           /* folders, each in a new tab */
   GBK_MENU_OPEN_WINDOW,        /* folders, each in a new window */
-  GBK_MENU_OPEN_WITH,          /* submenu: the window lists applications for `mime` */
+  GBK_MENU_OPEN_WITH,          /* submenu: the window lists the files' type's applications
+                       * (one type) and Other Application… */
   GBK_MENU_EXECUTE,
   GBK_MENU_EXECUTE_TERMINAL,
   GBK_MENU_TERMINAL_HERE,

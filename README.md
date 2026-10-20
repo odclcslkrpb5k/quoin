@@ -99,8 +99,10 @@ program that won't start. On anything else, [build from source](#building).
 - **Running files:**
   - Executable scripts run in a terminal that stays open, so you see their output.
   - Other executables run directly.
-  - Everything else opens in its default application.
-  - The right-click menu also offers Execute, Execute in Terminal and Open With.
+  - Everything else opens in its default application. A file with none asks which
+    application to use (GTK's standard chooser), and can make the choice the default.
+  - The right-click menu also offers Execute, Execute in Terminal and Open With, whose
+    **Other Application…** opens the same chooser.
 - **Your own right-click actions** per file type, such as "Extract Here" for archives
   (see [Configuration](#configuration)).
 - **Status bar:** folder and file counts, the selection's size and free space on the left.

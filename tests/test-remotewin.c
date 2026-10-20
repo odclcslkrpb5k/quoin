@@ -1,6 +1,7 @@
 /* Browsing another machine in a real window, with tests/fake-ssh as ssh (the "other
  * machine" is this one, under a private home). Phase 4 of docs/remote-plan.md: look, never
  * change; survive the connection dying. */
+#include "appchoose.h"
 #include "browser.h"
 #include "edits.h"
 #include "jobui.h"
@@ -826,6 +827,150 @@ test_open_names_app (void)
   gtk_widget_destroy (GTK_WIDGET (rw));
 }
 
+/* The application chooser on screen (borrowed), or nullptr. */
+static GtkDialog *
+app_chooser (void)
+{
+  g_autoptr (GList) tops = gtk_window_list_toplevels ();
+  for (GList *l = tops; l != nullptr; l = l->next)
+    if (GTK_IS_APP_CHOOSER_DIALOG (l->data) && gtk_widget_get_visible (l->data))
+      return l->data;
+  return nullptr;
+}
+
+static bool
+chooser_up (void *unused G_GNUC_UNUSED)
+{
+  return app_chooser () != nullptr;
+}
+
+static bool
+chooser_gone (void *unused G_GNUC_UNUSED)
+{
+  return app_chooser () == nullptr;
+}
+
+/* A descendant of `w` of type `type` (borrowed), or nullptr. */
+static GtkWidget *
+find_widget (GtkWidget *w, GType type)
+{
+  if (G_TYPE_CHECK_INSTANCE_TYPE (w, type))
+    return w;
+  if (!GTK_IS_CONTAINER (w))
+    return nullptr;
+  g_autoptr (GList) children = gtk_container_get_children (GTK_CONTAINER (w));
+  for (GList *l = children; l != nullptr; l = l->next)
+    {
+      GtkWidget *found = find_widget (l->data, type);
+      if (found != nullptr)
+        return found;
+    }
+  return nullptr;
+}
+
+/* Choose Open With ▸ Other Application… for the selection. */
+static void
+open_with_other (GbkWindow *w)
+{
+  GbkView *v = gbk_window_view (w);
+  gtk_widget_grab_focus (GTK_WIDGET (v));
+  GdkEvent *ev = gdk_event_new (GDK_KEY_PRESS);
+  ev->key.window = g_object_ref (gtk_widget_get_window (GTK_WIDGET (w)));
+  ev->key.keyval = GDK_KEY_Menu;
+  ev->key.time = GDK_CURRENT_TIME;
+  gdk_event_set_device (ev, gdk_seat_get_keyboard (gdk_display_get_default_seat (
+                                gtk_widget_get_display (GTK_WIDGET (w)))));
+  gtk_main_do_event (ev);
+  gdk_event_free (ev);
+  GList *menus = gtk_menu_get_for_attach_widget (GTK_WIDGET (v));
+  g_assert_cmpuint (g_list_length (menus), ==, 1);
+  GtkMenu *menu = menus->data;
+  GtkMenuItem *other = nullptr;
+  g_autoptr (GList) items = gtk_container_get_children (GTK_CONTAINER (menu));
+  for (GList *l = items; l != nullptr && other == nullptr; l = l->next)
+    {
+      GtkWidget *sub = GTK_IS_MENU_ITEM (l->data) ? gtk_menu_item_get_submenu (l->data) : nullptr;
+      if (sub == nullptr || g_strcmp0 (gtk_menu_item_get_label (l->data), "Open With") != 0)
+        continue;
+      g_autoptr (GList) apps = gtk_container_get_children (GTK_CONTAINER (sub));
+      GList *last = g_list_last (apps);
+      g_assert_cmpstr (gtk_menu_item_get_label (last->data), ==, "Other Application…");
+      other = last->data;
+    }
+  g_assert_nonnull (other);
+  gtk_menu_item_activate (other);
+  gtk_menu_shell_deactivate (GTK_MENU_SHELL (menu));
+  while (gtk_events_pending ())
+    gtk_main_iteration ();
+}
+
+/* A file no application opens asks which should (GTK's chooser), here and there; so does
+ * Open With ▸ Other Application…. Cancel opens nothing; a choice opens the files with it,
+ * and with the tick box becomes the type's default. */
+static void
+test_choose_app (void)
+{
+  put ("local/odd.gbk-nothing-opens-this", "o");
+  g_autofree char *local = g_build_filename (home, "local", nullptr);
+  g_autoptr (GbkLoc) loc = gbk_loc_new_local (local);
+  GbkWindow *w = gbk_window_new (app, ctx, loc);
+  gtk_widget_show_all (GTK_WIDGET (w));
+  g_assert_true (wait_until (local_ready, w));
+  g_autoptr (GAppInfo) opener = nullptr;
+  GList *all = g_app_info_get_all ();
+  for (GList *l = all; l != nullptr; l = l->next)
+    if (g_strcmp0 (g_app_info_get_id (l->data), "gbk-opener.desktop") == 0)
+      opener = g_object_ref (l->data);
+  g_list_free_full (all, g_object_unref);
+  g_assert_nonnull (opener);
+  gbk_appchoose_set_pick_for_test (opener);
+  const char *mime = "application/octet-stream";
+  g_autoptr (GAppInfo) before = g_app_info_get_default_for_type (mime, false);
+  g_assert_null (before);
+
+  /* Open: asked instead of an error. Cancel: nothing opens. */
+  select_names (w, (const char *const[]) { "odd.gbk-nothing-opens-this", nullptr });
+  g_signal_emit_by_name (gbk_window_view (w), "activate");
+  g_assert_true (wait_until (chooser_up, nullptr));
+  gtk_dialog_response (app_chooser (), GTK_RESPONSE_CANCEL);
+  g_assert_true (wait_until (chooser_gone, nullptr));
+  run_for (300);
+  g_assert_false (exists ("local/odd.gbk-nothing-opens-this.opened"));
+
+  /* Chosen, with the tick box: it opens, and opens that type from now on. */
+  g_signal_emit_by_name (gbk_window_view (w), "activate");
+  g_assert_true (wait_until (chooser_up, nullptr));
+  GtkWidget *always = find_widget (GTK_WIDGET (app_chooser ()), GTK_TYPE_CHECK_BUTTON);
+  g_assert_nonnull (always);
+  gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (always), true);
+  gtk_dialog_response (app_chooser (), GTK_RESPONSE_OK);
+  g_autofree char *marker = g_build_filename (local, "odd.gbk-nothing-opens-this.opened", nullptr);
+  g_assert_true (wait_until (file_there, marker));
+  g_autoptr (GAppInfo) after = g_app_info_get_default_for_type (mime, false);
+  g_assert_nonnull (after);
+  g_assert_cmpstr (g_app_info_get_id (after), ==, "gbk-opener.desktop");
+  g_autofree char *label = first_menu_label (w);
+  g_assert_cmpstr (label, ==, "Open With Opener");
+  g_app_info_reset_type_associations (mime);
+  gtk_widget_destroy (GTK_WIDGET (w));
+
+  /* There: Other Application… opens a copy with the choice. The window going while the
+   * chooser is up takes the chooser with it. */
+  put ("data/other.txt", "other");
+  GbkWindow *rw = window_on_remote_data ();
+  select_names (rw, (const char *const[]) { "other.txt", nullptr });
+  open_with_other (rw);
+  g_assert_true (wait_until (chooser_up, nullptr));
+  gtk_dialog_response (app_chooser (), GTK_RESPONSE_OK);
+  g_autofree char *copy = opened_copy ("other.txt");
+  g_assert_nonnull (copy);
+  open_with_other (rw);
+  g_assert_true (wait_until (chooser_up, nullptr));
+  gtk_widget_destroy (GTK_WIDGET (rw));
+  g_assert_true (wait_until (chooser_gone, nullptr));
+  gbk_appchoose_set_pick_for_test (nullptr);
+}
+
 static bool
 props_loaded (void *p)
 {
@@ -975,6 +1120,7 @@ main (int argc, char **argv)
   g_test_add_func ("/remotewin/fdinfo", test_fdinfo);
   g_test_add_func ("/remotewin/cache-cleanup", test_cache_cleanup);
   g_test_add_func ("/remotewin/open-names-app", test_open_names_app);
+  g_test_add_func ("/remotewin/choose-app", test_choose_app);
   int status = g_test_run ();
 
   while (gtk_events_pending ())

@@ -503,6 +503,7 @@ test_context_menu (void)
 
   /* Double-click (activate) on it runs it too. */
   unlink (marker);
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (m, "prog"));
   g_signal_emit_by_name (gbk_window_view (w), "activate");
   g_assert_true (wait_until (file_exists, marker));
 

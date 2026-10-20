@@ -125,10 +125,12 @@ test_menus (void)
                ITEMS,
                "open with | cut copy copy-path | trash delete | executable | action:extract "
                "action:compress");
-  /* Mixed: no Open With, and extract doesn't apply to the text file. */
+  /* Mixed: Open With (another application for them all), and extract doesn't apply to the
+   * text file. */
   assert_menu (items_of (item ("/d/a.zip", "application/zip", false, false, false),
                          item ("/d/t.txt", "text/plain", false, false, false), (GbkItem *) nullptr),
-               ITEMS, "open | cut copy copy-path | trash delete | executable | action:compress");
+               ITEMS,
+               "open with | cut copy copy-path | trash delete | executable | action:compress");
   /* Two folders: open both in tabs or windows; no Terminal Here or Paste Into for two. */
   assert_menu (
       items_of (item ("/d/s1", "inode/directory", true, false, false),
