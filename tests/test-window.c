@@ -1592,6 +1592,27 @@ test_tabs (void)
       cairo_surface_destroy (surf);
     }
 
+  /* Ctrl+Shift+T reopens closed tabs, newest first, where they were, with their history. */
+  g_assert_false (g_action_group_get_action_enabled (G_ACTION_GROUP (w), "reopen-tab"));
+  g_assert_cmpint (gtk_notebook_get_current_page (GTK_NOTEBOOK (notebook)), ==, 0);
+  send_key_to_window (w, GDK_KEY_t, GDK_CONTROL_MASK);   /* a tab at 1, gone root → one */
+  open_at (w, one);
+  wait_at (w, one);
+  send_key_to_window (w, GDK_KEY_w, GDK_CONTROL_MASK);
+  g_assert_cmpint (gbk_window_n_tabs (w), ==, 4);
+  g_assert_true (g_action_group_get_action_enabled (G_ACTION_GROUP (w), "reopen-tab"));
+  send_key_to_window (w, GDK_KEY_T, GDK_CONTROL_MASK | GDK_SHIFT_MASK);
+  g_assert_cmpint (gbk_window_n_tabs (w), ==, 5);
+  wait_at (w, one);
+  GtkNotebook *nb = GTK_NOTEBOOK (notebook);
+  g_assert_cmpint (gtk_notebook_get_current_page (nb), ==, 1);   /* its old place */
+  g_assert_false (g_action_group_get_action_enabled (G_ACTION_GROUP (w), "reopen-tab"));
+  activate (w, "back");
+  wait_at (w, root);                          /* its history came with it */
+  activate (w, "reopen-tab");                 /* nothing left to reopen: nothing happens */
+  g_assert_cmpint (gbk_window_n_tabs (w), ==, 5);
+  send_key_to_window (w, GDK_KEY_w, GDK_CONTROL_MASK);
+
   /* Ctrl+W closes tabs; the last one closes the window. */
   send_key_to_window (w, GDK_KEY_w, GDK_CONTROL_MASK);
   g_assert_cmpint (gbk_window_n_tabs (w), ==, 3);

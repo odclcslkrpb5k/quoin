@@ -29,7 +29,27 @@ struct _GbkWindow
   GtkGesture *mouse_back;     /* mouse buttons 8/9, caught before any child sees them */
   GtkGesture *mouse_forward;
   GbkDevices *devices;    /* the ☰ menu's Devices submenu, and its operations */
+  GPtrArray *closed;      /* ClosedTab*: tabs closed here, most recent last (Ctrl+Shift+T) */
 };
+
+/* A closed tab, enough to bring it back: where it was, its history, its place. */
+typedef struct
+{
+  GbkLoc *loc;
+  GPtrArray *back, *forward;   /* GbkLoc* */
+  int position;
+} ClosedTab;
+
+#define CLOSED_MAX 25           /* closed tabs remembered per window */
+
+static void
+closed_tab_free (ClosedTab *t)
+{
+  gbk_loc_unref (t->loc);
+  g_ptr_array_unref (t->back);
+  g_ptr_array_unref (t->forward);
+  g_free (t);
+}
 
 G_DEFINE_FINAL_TYPE (GbkWindow, gbk_window, GTK_TYPE_APPLICATION_WINDOW)
 
@@ -162,6 +182,14 @@ on_browser_status (GbkBrowser *b, GbkWindow *w)
 }
 
 static void
+update_reopen (GbkWindow *w)
+{
+  GAction *a = g_action_map_lookup_action (G_ACTION_MAP (w), "reopen-tab");
+  g_simple_action_set_enabled (G_SIMPLE_ACTION (a), w->closed->len > 0);
+}
+
+/* Closing the last tab closes the window, which isn't remembered. */
+static void
 close_tab (GbkWindow *w, GbkBrowser *b)
 {
   if (gtk_notebook_get_n_pages (w->tabs) <= 1)
@@ -169,6 +197,14 @@ close_tab (GbkWindow *w, GbkBrowser *b)
       gtk_window_close (GTK_WINDOW (w));
       return;
     }
+  ClosedTab *t = g_new0 (ClosedTab, 1);
+  t->loc = gbk_loc_ref (gbk_browser_loc (b));
+  gbk_browser_history (b, &t->back, &t->forward);
+  t->position = gtk_notebook_page_num (w->tabs, GTK_WIDGET (b));
+  if (w->closed->len >= CLOSED_MAX)
+    g_ptr_array_remove_index (w->closed, 0);
+  g_ptr_array_add (w->closed, t);
+  update_reopen (w);
   gtk_widget_destroy (GTK_WIDGET (b));
 }
 
@@ -195,8 +231,9 @@ static void on_view_drop (GbkView *v, GPtrArray *locs, guint64 folder, GdkEvent 
 static void on_pathbar_drop (GbkPathbar *bar, GbkLoc *loc, GPtrArray *locs, GdkEvent *trigger,
                              GbkWindow *w);
 
+/* A new tab at `position` (-1: after the current one). */
 static GbkBrowser *
-add_tab (GbkWindow *w, GbkLoc *loc, bool switch_to)
+add_tab_at (GbkWindow *w, GbkLoc *loc, bool switch_to, int position)
 {
   GbkBrowser *b = gbk_browser_new (w->ctx, w->show_hidden, w->sort);
 
@@ -234,7 +271,7 @@ add_tab (GbkWindow *w, GbkLoc *loc, bool switch_to)
   gbk_connect (G_OBJECT (w), gbk_browser_pathbar (b), "drop", G_CALLBACK (on_pathbar_drop), w);
 
   gtk_widget_show_all (GTK_WIDGET (b));
-  int at = gtk_notebook_get_current_page (w->tabs) + 1;
+  int at = position >= 0 ? position : gtk_notebook_get_current_page (w->tabs) + 1;
   gtk_notebook_insert_page (w->tabs, GTK_WIDGET (b), label_box, at);
   gtk_notebook_set_tab_reorderable (w->tabs, GTK_WIDGET (b), true);
   update_tab_label (b);
@@ -245,6 +282,12 @@ add_tab (GbkWindow *w, GbkLoc *loc, bool switch_to)
       gtk_widget_grab_focus (GTK_WIDGET (v));
     }
   return b;
+}
+
+static GbkBrowser *
+add_tab (GbkWindow *w, GbkLoc *loc, bool switch_to)
+{
+  return add_tab_at (w, loc, switch_to, -1);
 }
 
 static void
@@ -1382,6 +1425,20 @@ ACTION (action_close_tab)
   close_tab (w, active (w));
 }
 
+/* Ctrl+Shift+T: the tab closed last comes back where it was, with its history. */
+ACTION (action_reopen_tab)
+{
+  GbkWindow *w = data;
+  if (w->closed->len == 0)
+    return;
+  ClosedTab *t = g_ptr_array_steal_index (w->closed, w->closed->len - 1);
+  update_reopen (w);
+  int position = MIN (t->position, gtk_notebook_get_n_pages (w->tabs));
+  GbkBrowser *b = add_tab_at (w, t->loc, true, position);
+  gbk_browser_set_history (b, t->back, t->forward);
+  closed_tab_free (t);
+}
+
 ACTION (action_close_window)
 {
   gtk_window_close (GTK_WINDOW (data));
@@ -1467,6 +1524,7 @@ static const GActionEntry actions[] = {
   { .name = "properties", .activate = action_properties },
   { .name = "new-tab", .activate = action_new_tab },
   { .name = "close-tab", .activate = action_close_tab },
+  { .name = "reopen-tab", .activate = action_reopen_tab },
   { .name = "close-window", .activate = action_close_window },
   { .name = "new-window", .activate = action_new_window },
   { .name = "next-tab", .activate = action_next_tab },
@@ -1496,6 +1554,7 @@ static const struct
   { "win.show-hidden", { "<Control>h", nullptr } },
   { "win.terminal", { "F4", nullptr } },
   { "win.close-tab", { "<Control>w", nullptr } },
+  { "win.reopen-tab", { "<Control><Shift>t", nullptr } },
   { "win.close-window", { "<Control>q", nullptr } },
   { "win.new-tab", { "<Control>t", nullptr } },
   { "win.new-window", { "<Control>n", nullptr } },
@@ -1597,6 +1656,7 @@ gbk_window_finalize (GObject *o)
 {
   GbkWindow *w = GBK_WINDOW (o);
   g_clear_pointer (&w->paste_dest, gbk_loc_unref);
+  g_ptr_array_unref (w->closed);
   gbk_context_unref (w->ctx);
   G_OBJECT_CLASS (gbk_window_parent_class)->finalize (o);
 }
@@ -1611,8 +1671,9 @@ gbk_window_class_init (GbkWindowClass *klass)
 }
 
 static void
-gbk_window_init (GbkWindow *w G_GNUC_UNUSED)
+gbk_window_init (GbkWindow *w)
 {
+  w->closed = g_ptr_array_new_with_free_func ((GDestroyNotify) closed_tab_free);
 }
 
 /* Machines to open: the hosts in ~/.ssh/config, then any this process has connected to.
@@ -1679,6 +1740,7 @@ app_menu_button (GbkWindow *w)
   g_menu_append_section (menu, nullptr, G_MENU_MODEL (s3));
   g_autoptr (GMenu) s4 = g_menu_new ();
   g_menu_append (s4, "Close Tab", "win.close-tab");
+  g_menu_append (s4, "Reopen Closed Tab", "win.reopen-tab");
   g_menu_append (s4, "Close Window", "win.close-window");
   g_menu_append_section (menu, nullptr, G_MENU_MODEL (s4));
 
@@ -1699,6 +1761,7 @@ gbk_window_new (const GtkApplication *app, GbkContext *ctx, GbkLoc *loc)
   w->show_hidden = ctx->config->show_hidden;
   w->sort = ctx->config->sort;
   g_action_map_add_action_entries (G_ACTION_MAP (w), actions, G_N_ELEMENTS (actions), w);
+  update_reopen (w);   /* nothing closed yet */
   w->devices = gbk_devices_new ();
   gbk_connect (G_OBJECT (w), w->devices, "pre-unmount", G_CALLBACK (on_pre_unmount), w);
   gtk_window_set_default_size (GTK_WINDOW (w), 700, 440);

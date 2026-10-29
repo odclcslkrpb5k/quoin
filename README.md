@@ -130,6 +130,7 @@ program that won't start. On anything else, [build from source](#building).
 | Alt+Enter | Properties (of the selected item, or the folder) |
 | Menu key, Shift+F10 | Right-click menu |
 | Ctrl+T / Ctrl+W | New tab / close tab |
+| Ctrl+Shift+T | Reopen the last closed tab (where it was, with its history) |
 | Ctrl+Page Up / Ctrl+Page Down | Previous / next tab |
 | Ctrl+N / Ctrl+Q | New window / close window |
 

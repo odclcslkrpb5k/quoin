@@ -2,7 +2,7 @@
 # It may only shrink: a new finding fails ./build check, and so does a fixed one still
 # listed here. Taken 2026-10-16 at 81 entries; burned down 2026-10-17 to what is left below,
 # none of which can be fixed:
-#   constParameterPointer in src/job.c (2), src/scanner.c, src/window.c, tests/test-devices.c
+#   constParameterPointer in src/job.c (2), src/scanner.c, tests/test-devices.c
 #     (3), tests/test-lifetime.c (2): seven are GObject _init/_class_init functions, whose
 #     signatures G_DEFINE_TYPE declares; two are is_cancelled, whose g_atomic_int_get
 #     casts the const away (-Wcast-qual refuses it).
@@ -12,7 +12,6 @@
 # tool check file count
 cppcheck constParameterPointer src/job.c 2
 cppcheck constParameterPointer src/scanner.c 1
-cppcheck constParameterPointer src/window.c 1
 cppcheck constParameterPointer tests/test-devices.c 3
 cppcheck constParameterPointer tests/test-lifetime.c 2
 cppcheck syntaxError /usr/include/gtk-3.0/gdk/gdkdevicetool.h 1

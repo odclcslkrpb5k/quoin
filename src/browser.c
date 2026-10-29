@@ -370,6 +370,33 @@ gbk_browser_forward (GbkBrowser *b)
   open_loc (b, target, nullptr);
 }
 
+static GPtrArray *
+copy_history (const GPtrArray *from)
+{
+  GPtrArray *to = gbk_loc_array_new ();
+  for (guint i = 0; i < from->len; i++)
+    g_ptr_array_add (to, gbk_loc_ref (g_ptr_array_index (from, i)));
+  return to;
+}
+
+void
+gbk_browser_history (const GbkBrowser *b, GPtrArray **back, GPtrArray **forward)
+{
+  *back = copy_history (b->back);
+  *forward = copy_history (b->forward);
+}
+
+void
+gbk_browser_set_history (GbkBrowser *b, const GPtrArray *back, const GPtrArray *forward)
+{
+  g_ptr_array_set_size (b->back, 0);
+  g_ptr_array_set_size (b->forward, 0);
+  for (guint i = 0; i < back->len; i++)
+    push_history (b->back, g_ptr_array_index (back, i));
+  for (guint i = 0; i < forward->len; i++)
+    push_history (b->forward, g_ptr_array_index (forward, i));
+}
+
 void
 gbk_browser_up (GbkBrowser *b)
 {

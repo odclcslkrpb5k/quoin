@@ -31,6 +31,11 @@ void gbk_browser_back (GbkBrowser *b);
 void gbk_browser_forward (GbkBrowser *b);
 void gbk_browser_up (GbkBrowser *b);
 
+/* The tab's back and forward history (GbkLoc*, most recent last): new arrays, to give to
+ * another tab with gbk_browser_set_history (reopening a closed one). */
+void gbk_browser_history (const GbkBrowser *b, GPtrArray **back, GPtrArray **forward);
+void gbk_browser_set_history (GbkBrowser *b, const GPtrArray *back, const GPtrArray *forward);
+
 GbkLoc *gbk_browser_loc (const GbkBrowser *b);
 GbkView *gbk_browser_view (const GbkBrowser *b);
 GbkPathbar *gbk_browser_pathbar (const GbkBrowser *b);
