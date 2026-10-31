@@ -24,6 +24,7 @@ struct _GbkWindow
   GtkToggleButton *hidden_button;   /* status bar, right: ".*", bound to win.show-hidden */
 
   bool show_hidden;       /* window-wide: applies to every tab */
+  bool full_path_title;   /* the title is the folder's full path, or only its name */
   GbkSortMode sort;
   GbkLoc *paste_dest;     /* destination of the paste request in flight */
   GtkGesture *mouse_back;     /* mouse buttons 8/9, caught before any child sees them */
@@ -84,7 +85,7 @@ update_status (GbkWindow *w)
 static void
 set_title_loc (GbkWindow *w, const GbkLoc *loc)
 {
-  g_autofree char *shown = gbk_loc_display (loc);
+  g_autofree char *shown = w->full_path_title ? gbk_loc_display (loc) : gbk_loc_display_name (loc);
   gtk_window_set_title (GTK_WINDOW (w), shown);
 }
 
@@ -317,6 +318,16 @@ set_show_hidden (GbkWindow *w, bool show)
   GAction *a = g_action_map_lookup_action (G_ACTION_MAP (w), "show-hidden");
   /* Also updates the status bar's ".*" toggle, which is bound to this action. */
   g_simple_action_set_state (G_SIMPLE_ACTION (a), g_variant_new_boolean (show));
+}
+
+static void
+set_full_path_title (GbkWindow *w, bool full)
+{
+  w->full_path_title = full;
+  GAction *a = g_action_map_lookup_action (G_ACTION_MAP (w), "full-path-title");
+  g_simple_action_set_state (G_SIMPLE_ACTION (a), g_variant_new_boolean (full));
+  if (gtk_notebook_get_n_pages (w->tabs) > 0)
+    set_title_loc (w, gbk_browser_loc (active (w)));
 }
 
 static void
@@ -1500,6 +1511,12 @@ change_show_hidden (GSimpleAction *a G_GNUC_UNUSED, GVariant *state, void *data)
 }
 
 static void
+change_full_path_title (GSimpleAction *a G_GNUC_UNUSED, GVariant *state, void *data)
+{
+  set_full_path_title (data, g_variant_get_boolean (state));
+}
+
+static void
 change_sort (GSimpleAction *a G_GNUC_UNUSED, GVariant *state, void *data)
 {
   /* Actions are reachable from outside the process (D-Bus): ignore unknown values. */
@@ -1537,6 +1554,7 @@ static const GActionEntry actions[] = {
   { .name = "device-eject", .parameter_type = "s", .activate = action_device_eject },
   /* Stateful: no activate handler means a boolean toggles / a string is set. */
   { .name = "show-hidden", .state = "false", .change_state = change_show_hidden },
+  { .name = "full-path-title", .state = "true", .change_state = change_full_path_title },
   { .name = "sort", .parameter_type = "s", .state = "'name'", .change_state = change_sort },
 };
 
@@ -1729,6 +1747,7 @@ app_menu_button (GbkWindow *w)
     g_menu_append_submenu (s1, "Files Being Edited", gbk_edits_menu ());
   g_menu_append_section (menu, nullptr, G_MENU_MODEL (s1));
   g_autoptr (GMenu) s2 = g_menu_new ();
+  g_menu_append (s2, "Full Path in Title Bar", "win.full-path-title");
   g_menu_append (s2, "Show Hidden Files", "win.show-hidden");
   g_menu_append (s2, "Sort by Name", "win.sort::name");
   g_menu_append (s2, "Sort by Date Modified", "win.sort::modified");
@@ -1759,6 +1778,7 @@ gbk_window_new (const GtkApplication *app, GbkContext *ctx, GbkLoc *loc)
   GbkWindow *w = g_object_new (GBK_TYPE_WINDOW, "application", app, nullptr);
   w->ctx = gbk_context_ref (ctx);
   w->show_hidden = ctx->config->show_hidden;
+  w->full_path_title = ctx->config->full_path_title;
   w->sort = ctx->config->sort;
   g_action_map_add_action_entries (G_ACTION_MAP (w), actions, G_N_ELEMENTS (actions), w);
   update_reopen (w);   /* nothing closed yet */
@@ -1829,6 +1849,7 @@ gbk_window_new (const GtkApplication *app, GbkContext *ctx, GbkLoc *loc)
   gbk_connect (G_OBJECT (w), w->tabs, "page-removed", G_CALLBACK (on_page_removed), w);
 
   set_show_hidden (w, w->show_hidden);
+  set_full_path_title (w, w->full_path_title);
   set_sort (w, w->sort);
   add_tab (w, loc, true);
   update_chrome (w);

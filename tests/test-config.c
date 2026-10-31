@@ -31,6 +31,7 @@ test_defaults (void)
 {
   g_autoptr (GbkConfig) c = gbk_config_new_default ();
   g_assert_false (c->show_hidden);
+  g_assert_true (c->full_path_title);
   g_assert_cmpint (c->sort, ==, GBK_SORT_NAME);
   g_assert_true (gbk_command_uses (c->terminal_run, 'c'));
   g_assert_cmpstr (gbk_config_interpreter (c, "x.py")[0], ==, "python3");
@@ -70,6 +71,7 @@ test_full (void)
                                   "Terminal=st -d %d\n"
                                   "TerminalRun=st -d %d -e %c\n"
                                   "ShowHidden=true\n"
+                                  "FullPathInTitle=false\n"
                                   "SortBy=modified\n"
                                   "[Interpreters]\n"
                                   "py=python3 -u\n"
@@ -82,6 +84,7 @@ test_full (void)
                                   errors);
   g_assert_cmpuint (errors->len, ==, 0);
   g_assert_true (c->show_hidden);
+  g_assert_false (c->full_path_title);
   g_assert_cmpint (c->sort, ==, GBK_SORT_MTIME);
   g_assert_cmpstr (gbk_command_template (c->terminal), ==, "st -d %d");
   const char *const *py = gbk_config_interpreter (c, "a.py");

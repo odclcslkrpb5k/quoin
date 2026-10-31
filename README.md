@@ -145,6 +145,8 @@ loads it, so it always matches what the program accepts. You can set:
 
 - the terminal commands (F4, and running scripts);
 - whether hidden files are shown at startup;
+- whether the title bar shows the folder's full path or only its name (also in the ☰
+  menu);
 - the starting sort;
 - script interpreters;
 - extra extension → file type mappings;

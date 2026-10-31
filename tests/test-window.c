@@ -223,7 +223,18 @@ test_navigation (void)
   mouse_button (gtk_button_get_event_window (GTK_BUTTON (crumb)), 9);
   wait_at (w, root);
 
-  /* The title is the full folder path, nothing else. */
+  /* The title is the full folder path, nothing else; or, switched off in the ☰ menu, only
+   * the folder's name. */
+  g_assert_cmpstr (gtk_window_get_title (GTK_WINDOW (w)), ==, root);
+  activate (w, "full-path-title");
+  g_autofree char *root_name = g_path_get_basename (root);
+  g_assert_cmpstr (gtk_window_get_title (GTK_WINDOW (w)), ==, root_name);
+  activate (w, "back");
+  wait_at (w, sub);
+  g_assert_cmpstr (gtk_window_get_title (GTK_WINDOW (w)), ==, "sub");
+  activate (w, "forward");
+  wait_at (w, root);
+  activate (w, "full-path-title");
   g_assert_cmpstr (gtk_window_get_title (GTK_WINDOW (w)), ==, root);
 
   /* Ctrl+H, reflected by the status bar's ".*" toggle; clicking the toggle works too. */

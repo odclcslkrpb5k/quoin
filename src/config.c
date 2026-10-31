@@ -58,6 +58,7 @@ GbkConfig *
 gbk_config_new_default (void)
 {
   GbkConfig *c = config_new_empty ();
+  c->full_path_title = true;
   c->terminal = must_parse (default_terminal, "d");
   c->terminal_run = must_parse (default_terminal_run, "dc");
   for (size_t i = 0; i < G_N_ELEMENTS (default_interpreters); i++)
@@ -144,7 +145,8 @@ get_bool (Loader *l, const char *group, const char *key, bool *out)
 static void
 load_general (Loader *l)
 {
-  static const char *const keys[] = { "Terminal", "TerminalRun", "ShowHidden", "SortBy", nullptr };
+  static const char *const keys[]
+      = { "Terminal", "TerminalRun", "ShowHidden", "FullPathInTitle", "SortBy", nullptr };
   const char *g = "General";
   check_keys (l, g, keys);
 
@@ -173,6 +175,8 @@ load_general (Loader *l)
     }
   if (g_key_file_has_key (l->kf, g, "ShowHidden", nullptr))
     get_bool (l, g, "ShowHidden", &l->c->show_hidden);
+  if (g_key_file_has_key (l->kf, g, "FullPathInTitle", nullptr))
+    get_bool (l, g, "FullPathInTitle", &l->c->full_path_title);
   if (g_key_file_has_key (l->kf, g, "SortBy", nullptr))
     {
       g_autofree char *v = get_string (l, g, "SortBy");

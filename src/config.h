@@ -23,6 +23,7 @@ typedef struct
   GbkCommand *terminal; /* F4: open a terminal here. Placeholders: d */
   GbkCommand *terminal_run; /* run something in a terminal. Placeholders: d c */
   bool show_hidden;
+  bool full_path_title;  /* the window title is the folder's full path, or only its name */
   GbkSortMode sort;
   GHashTable *interpreters; /* lowercased ext -> char** argv prefix; marks scripts */
   GPtrArray *type_overrides; /* char* pairs: ext, mime, ext, mime, ... */
