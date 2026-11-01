@@ -206,8 +206,8 @@ banned = {
   'gtk_clipboard_wait_for_text' : '(void) gtk_clipboard_wait_for_text(nullptr);',
   'pthread_exit'     : 'pthread_exit(nullptr);',
   'g_thread_exit'    : 'g_thread_exit(nullptr);',
-  'alloca'           : '(void) alloca(4);',
-  'g_newa'           : '(void) g_newa(char, 4);',
+  'alloca'           : 'char *p = alloca(4); p[0] = 0;',
+  'g_newa'           : 'char *q = g_newa(char, 4); q[0] = 0;',
   'g_spawn_command_line_async' : '(void) g_spawn_command_line_async("true", nullptr);',
   'g_signal_connect' : 'g_signal_connect(nullptr, "x", nullptr, nullptr);',
   'g_signal_connect_swapped' : 'g_signal_connect_swapped(nullptr, "x", nullptr, nullptr);',
@@ -222,9 +222,15 @@ banned = {
   'g_child_watch_add' : 'g_child_watch_add(0, nullptr, nullptr);',
   'g_dbus_connection_signal_subscribe' : 'g_dbus_connection_signal_subscribe(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr);',
 }
+# Each probe must compile with the bans off, or its failure with them proves nothing (as
+# '(void) alloca(4);' once did: GCC refuses an unused __builtin_alloca result either way).
 foreach what, code : banned
-  if cc.compiles('void f(void); void f(void) { ' + code + ' }',
-                 args : probe_args, dependencies : probe_deps, name : 'ban ' + what)
+  probe = 'void f(void); void f(void) { ' + code + ' }'
+  if not cc.compiles(probe, args : probe_args + ['-DGBK_PRELUDE_NO_BANS'],
+                     dependencies : probe_deps, name : 'probe valid ' + what)
+    error('the probe for banned API "' + what + '" fails even without the ban; fix the probe')
+  endif
+  if cc.compiles(probe, args : probe_args, dependencies : probe_deps, name : 'ban ' + what)
     error('banned API "' + what + '" compiles; prelude.h ban is not working')
   endif
 endforeach

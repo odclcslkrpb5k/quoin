@@ -157,6 +157,9 @@ Protect (deliberate, flagged):
   #pragma GCC poison bans. New system header? add it to prelude ABOVE the poison block.
   Macros must be #undef'd before poisoning. meson.build has configure-time probes: each
   ban must fail to compile (and a baseline must compile). Add a probe with every new ban.
+  Each probe must also COMPILE with -DGBK_PRELUDE_NO_BANS (2026-11-01: '(void) alloca(4)'
+  failed either way via unused-result, so it proved nothing). check-source's nobans rule
+  keeps that switch out of everything but prelude.h and meson.build.
 - g_error is banned (its for(;;) trips -fanalyzer). Use gbk_fatal() (src/fatal.h).
 - Never write "type/*" (slash-star) in comments: -Wcomment error.
 - g_assert_* in tests can return (non-fatal mode): don't deref after g_assert_nonnull;

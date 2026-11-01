@@ -56,6 +56,11 @@
 #include "analyzer-glib.h"
 #endif
 
+/* GBK_PRELUDE_NO_BANS: only meson.build's ban probes define it, to prove each probe compiles
+ * without the bans (so its failure with them is the ban's doing). check-source refuses it
+ * anywhere else. */
+#ifndef GBK_PRELUDE_NO_BANS
+
 /* --- Unbounded or error-swallowing libc string/number functions. ---
  * Use g_strdup_printf / GString / g_strlcpy / g_ascii_strtoll with error checks. */
 #pragma GCC poison strcpy strcat strncpy strncat sprintf vsprintf gets strtok
@@ -121,3 +126,4 @@
 #pragma GCC poison gdk_threads_add_timeout_seconds gdk_threads_add_timeout_seconds_full
 #pragma GCC poison g_dbus_connection_signal_subscribe
 #endif
+#endif /* GBK_PRELUDE_NO_BANS */

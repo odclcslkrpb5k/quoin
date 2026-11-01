@@ -328,8 +328,21 @@ def hidden(path, text):
             for m in HIDDEN.finditer(text)]
 
 
+NO_BANS = re.compile(r"GBK_PRELUDE_NO_BANS\b")   # also after -D
+# The switch that turns prelude.h's bans off: for meson.build's ban probes alone.
+NO_BANS_FILES = {"src/prelude.h", "meson.build", "tools/check-source.py"}
+
+
+def nobans(path, text):
+    if path in NO_BANS_FILES:
+        return []
+    return [f"{path}:{text.count(chr(10), 0, m.start()) + 1}: GBK_PRELUDE_NO_BANS turns "
+            f"every ban off: only meson.build's ban probes may use it"
+            for m in NO_BANS.finditer(text)]
+
+
 RULES = [nodiscard, unsequenced, discarded, suppression, logpath, message, hidden, locpath,
-         widening]
+         widening, nobans]
 # Declarations of GLib's own functions, for the analyzer: not ours to mark.
 EXEMPT = {"src/analyzer-glib.h"}
 
@@ -349,7 +362,8 @@ def check():
         for rule in RULES:
             problems += rule(path, text)
     for path in (p for p in other if os.path.isfile(p)):
-        problems += hidden(path, open(path, encoding="utf-8").read())
+        text = open(path, encoding="utf-8").read()
+        problems += hidden(path, text) + nobans(path, text)
     for p in problems:
         print("  " + p)
     if problems:
@@ -429,6 +443,10 @@ EXAMPLES = [
     (hidden, "x.c", "const char *s = \"a\u00a0b\";", 1),
     (hidden, "x.c", "/* a\u200bb */", 1),
     (hidden, "x.c", "const char *s = \"a\\u00a0b\";", 0),
+    (nobans, "src/x.c", "#define GBK_PRELUDE_NO_BANS", 1),
+    (nobans, "src/meson.build", "c_args : '-DGBK_PRELUDE_NO_BANS',", 1),
+    (nobans, "meson.build", "args : probe_args + ['-DGBK_PRELUDE_NO_BANS'],", 0),
+    (nobans, "src/prelude.h", "#ifndef GBK_PRELUDE_NO_BANS", 0),
 ]
 
 
