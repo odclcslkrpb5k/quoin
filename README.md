@@ -57,7 +57,7 @@ program that won't start. On anything else, [build from source](#building).
 - **Drag and drop.** Drag files out to any application, which decides what to do with
   them. Dropping files *into* Quoin (onto a folder, empty space or a path bar button)
   always asks first: **Move Here**, **Copy Here** or **Cancel**, at the pointer. Nothing is
-  moved by accident.
+  moved by accident. This works between Quoin windows on any machines too (see below).
 - **Copies are like `cp -a`:** permissions, ownership (where allowed), timestamps,
   extended attributes and ACLs, hard links within the copy, and special files are kept.
 - **Create files and folders** from the right-click menu on empty space.
@@ -89,8 +89,14 @@ program that won't start. On anything else, [build from source](#building).
   after its last window closes while a file is still open in an app, and says so (it can
   tell when an editor closes the file, even if the editor keeps running). Files being
   edited show in bold, with a small emblem, in their folder, and **Files Being Edited** in the ☰ menu
-  lists them. A save it couldn't upload is offered the next time Quoin starts. Drag and drop
-  with other machines comes next (see [docs/remote-plan.md](docs/remote-plan.md)).
+  lists them. A save it couldn't upload is offered the next time Quoin starts. **Drag and
+  drop** works with folders there as here: between them and this machine, either way,
+  and between Quoin windows. Drag files from there to another application (a browser's
+  upload, an editor, the desktop) and it gets copies downloaded here, into
+  `~/.cache/quoin/remote/`; the download starts as you start dragging, so it's normally
+  done by the time you drop (if not, the status bar asks you to drop again). This is for
+  files up to 64 MB in all; folders, and anything bigger, go to other applications as
+  their `ws1:/path` text only. A download nobody took is removed when the drag ends.
 - **Properties** (right-click menu or Alt+Enter): dates (modified, accessed, changed,
   created), size, owner, group, link target, and read / write / execute permissions you can
   change with Apply. For files, the right-click menu also has an **Executable** check

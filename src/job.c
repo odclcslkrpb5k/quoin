@@ -677,6 +677,18 @@ paths_of (const GPtrArray *locs)
   return paths;
 }
 
+const char *
+gbk_job_transfer_refusal (const GPtrArray *locs, const GbkLoc *dest)
+{
+  const char *from = one_machine (locs);
+  const char *to = gbk_loc_is_local (dest) ? "" : gbk_loc_host (dest);
+  if (from == nullptr)
+    return "Copy or move from one machine at a time";
+  if (from[0] != '\0' && to[0] != '\0' && !g_str_equal (from, to))
+    return "Copying between two other machines isn't possible yet";
+  return nullptr;
+}
+
 /* COPY or MOVE with another machine on either side: decide where it runs (s->source,
  * s->asker, s->answerer), or why it can't (s->refused). */
 static void
@@ -684,20 +696,14 @@ plan_transfer (Shared *s, const GPtrArray *locs, const GbkLoc *dest)
 {
   if (dest == nullptr)
     gbk_fatal ("a copy or move without a destination");
+  const char *why = gbk_job_transfer_refusal (locs, dest);
+  if (why != nullptr)
+    {
+      s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, why);
+      return;
+    }
   const char *from = one_machine (locs);
   const char *to = gbk_loc_is_local (dest) ? "" : gbk_loc_host (dest);
-  if (from == nullptr)
-    {
-      s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                                        "Copy or move from one machine at a time");
-      return;
-    }
-  if (from[0] != '\0' && to[0] != '\0' && !g_str_equal (from, to))
-    {
-      s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                                        "Copying between two other machines isn't possible yet");
-      return;
-    }
   g_autoptr (GbkConn) c = conn_for (s, to[0] != '\0' ? to : from);
   if (c == nullptr)
     return;

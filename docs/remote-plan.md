@@ -287,6 +287,21 @@ As built in phase 7 (2026-11-01), operations on the remote:
   as owns the file there (or is root).
 - Execute and configured actions stay off for files there (phase 9).
 
+As built in phase 8 (2026-11-01), drag and drop:
+- Drags carry x-special/quoin-locations (the clipboard's Quoin-to-Quoin format, any
+  machine) first; drop targets prefer it, then text/uri-list. So remote ↔ local and
+  between Quoin windows (any process) go through the usual drop menu and COPY/MOVE jobs.
+  The menu isn't shown for what a job would refuse anyway (gbk_job_transfer_refusal, the
+  rule plan_transfer itself uses): e.g. machine A to machine B.
+- Other apps: remote files go as downloaded copies (GbkDragOut in dnd.c). GTK3 must
+  answer drag-data-get synchronously and nested main loops are out, so the FETCH job
+  starts at drag start, into the edits cache (one mkdtemp folder each, no .ini: the
+  7-day clean-up of record-less folders removes taken ones). Only when every item is a
+  regular file with a known size and they total ≤ 64 MiB (GBK_DND_FETCH_MAX); otherwise
+  uri-list isn't offered at all, only host:/path text. A drop before the download is done
+  gets nothing and the status bar says to drop again. Questions are answered Cancel (no
+  UI). Not taken by drag end: cancelled and removed (after the job finishes).
+
 ## 9. Testing
 
 - `QUOIN_SSH` replaces the ssh command; tests point it at a script running quoin-serve

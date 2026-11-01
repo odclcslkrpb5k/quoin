@@ -1161,14 +1161,11 @@ ask_drop (GbkWindow *w, GbkBrowser *b, GPtrArray *locs, GbkLoc *dest, GtkWidget 
       gbk_browser_set_message (b, "Already in this folder");
       return;
     }
-  /* Drag and drop with other machines comes later (docs/remote-plan.md, phase 8). */
-  bool remote = !gbk_loc_is_local (dest);
-  for (guint i = 0; i < locs->len; i++)
-    remote = remote || !gbk_loc_is_local (g_ptr_array_index (locs, i));
-  if (remote)
+  /* Before asking, not after: machines a copy can't join (job.h). */
+  const char *refusal = gbk_job_transfer_refusal (locs, dest);
+  if (refusal != nullptr)
     {
-      gbk_browser_set_message (b, "Drag and drop with another machine isn't possible yet; "
-                                  "use Copy or Cut and Paste");
+      gbk_browser_set_message (b, refusal);
       return;
     }
   GtkWidget *menu = gtk_menu_new ();

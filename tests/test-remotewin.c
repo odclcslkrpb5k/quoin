@@ -6,6 +6,7 @@
 #include "edits.h"
 #include "jobui.h"
 #include "notify.h"
+#include "cliptext.h"
 #include "conn.h"
 #include "job.h"
 #include "lifetime.h"
@@ -1173,6 +1174,180 @@ test_network_action (void)
   gtk_widget_destroy (GTK_WIDGET (w));
 }
 
+/* ---- drag and drop (phase 8) ---- */
+
+/* Folders in the cache of copies (downloads and edits). */
+static guint
+cache_dirs (void)
+{
+  g_autofree char *cache = g_build_filename (home, ".cache", "quoin", "remote", nullptr);
+  g_autoptr (GDir) d = g_dir_open (cache, 0, nullptr);
+  guint n = 0;
+  const char *name;
+  while (d != nullptr && (name = g_dir_read_name (d)) != nullptr)
+    {
+      g_autofree char *p = g_build_filename (cache, name, nullptr);
+      n += g_file_test (p, G_FILE_TEST_IS_DIR) ? 1 : 0;
+    }
+  return n;
+}
+
+static bool
+drag_ready (void *d)
+{
+  return gbk_drag_out_ready (d);
+}
+
+static bool
+offers_uris (const GbkDragOut *d)
+{
+  g_autoptr (GtkTargetList) targets = gbk_drag_out_targets (d);
+  guint info;
+  return gtk_target_list_find (targets, gdk_atom_intern_static_string ("text/uri-list"), &info);
+}
+
+static GdkEvent *
+fake_trigger (GtkWidget *widget, double x, double y)
+{
+  GdkEvent *ev = gdk_event_new (GDK_BUTTON_PRESS);
+  ev->button.window = g_object_ref (gtk_widget_get_window (widget));
+  ev->button.button = GDK_BUTTON_PRIMARY;
+  ev->button.x = x;
+  ev->button.y = y;
+  ev->button.time = GDK_CURRENT_TIME;
+  gdk_event_set_device (
+      ev, gdk_seat_get_pointer (gdk_display_get_default_seat (gtk_widget_get_display (widget))));
+  return ev;
+}
+
+/* Drop `locs` onto empty space in `w`'s view and choose `label` from the menu asked. */
+static void
+drop_choosing (GbkWindow *w, GPtrArray *locs, const char *label)
+{
+  GtkWidget *vw = GTK_WIDGET (gbk_window_view (w));
+  double x = gtk_widget_get_allocated_width (vw) - 5;
+  g_autoptr (GdkEvent) trigger = fake_trigger (vw, x, 2);
+  g_assert_true (gbk_view_drop_locs_for_test (gbk_window_view (w), locs, x, 2, trigger));
+  GList *menus = gtk_menu_get_for_attach_widget (vw);
+  g_assert_cmpuint (g_list_length (menus), ==, 1);
+  g_autoptr (GList) items = gtk_container_get_children (menus->data);
+  for (GList *l = items; l != nullptr; l = l->next)
+    if (!GTK_IS_SEPARATOR_MENU_ITEM (l->data)
+        && g_strcmp0 (gtk_menu_item_get_label (l->data), label) == 0)
+      {
+        gtk_menu_item_activate (l->data);
+        gtk_menu_shell_deactivate (menus->data);
+        while (gtk_events_pending ())
+          gtk_main_iteration ();
+        return;
+      }
+  gbk_fatal ("no \"%s\" in the drop menu", label);
+}
+
+static GPtrArray *
+locs_of_one (GbkLoc *loc)
+{
+  GPtrArray *locs = gbk_loc_array_new ();
+  g_ptr_array_add (locs, loc);
+  return locs;
+}
+
+/* Out to other apps: files there go as copies downloaded here, removed if nobody took
+ * them; folders as host:path text only. To Quoin windows: the locations themselves. In:
+ * drops between here and there copy or move across, after asking. */
+static void
+test_drag_and_drop (void)
+{
+  put ("data/a.txt", "aaa");
+  put ("data/sub/inner", "");
+  put ("local/dropped.txt", "dropped");
+  GbkWindow *w = window_on_remote_data ();
+  GbkView *v = gbk_window_view (w);
+  gbk_view_select_only (v, gbk_dir_model_find (model_of (w), "a.txt"));
+  guint before = cache_dirs ();
+
+  /* Taken by another app: a file here, and it stays after the drag. */
+  GbkDragOut *out = gbk_view_drag_out_for_test (v);
+  g_assert_true (offers_uris (out));
+  g_assert_true (wait_until (drag_ready, out));
+  g_autofree char *text = gbk_drag_out_data (out, GBK_DND_TEXT);
+  g_autofree char *want_text = g_strdup_printf ("ws:%s/data/a.txt", home);
+  g_assert_cmpstr (text, ==, want_text);
+  g_autofree char *uris = gbk_drag_out_data (out, GBK_DND_URIS);
+  bool cut;
+  g_autoptr (GPtrArray) paths = gbk_clip_parse (uris, strlen (uris), false, &cut);
+  g_assert_cmpuint (paths->len, ==, 1);
+  const char *copy = g_ptr_array_index (paths, 0);
+  g_autofree char *cache = g_build_filename (home, ".cache", "quoin", "remote", nullptr);
+  g_assert_true (g_str_has_prefix (copy, cache) && g_str_has_suffix (copy, "/a.txt"));
+  g_autofree char *content = nullptr;
+  g_assert_true (g_file_get_contents (copy, &content, nullptr, nullptr));
+  g_assert_cmpstr (content, ==, "aaa");
+  gbk_drag_out_free (out);
+  g_assert_true (g_file_test (copy, G_FILE_TEST_EXISTS));
+  g_assert_cmpuint (cache_dirs (), ==, before + 1);
+
+  /* Nobody took it: removed when the drag ends, finished or not. */
+  out = gbk_view_drag_out_for_test (v);
+  g_assert_true (wait_until (drag_ready, out));
+  g_assert_cmpuint (cache_dirs (), ==, before + 2);
+  gbk_drag_out_free (out);
+  g_assert_cmpuint (cache_dirs (), ==, before + 1);
+  gbk_drag_out_free (gbk_view_drag_out_for_test (v));
+  g_assert_true (wait_until (no_jobs, nullptr));
+  g_assert_cmpuint (cache_dirs (), ==, before + 1);
+
+  /* Quoin windows get the location itself. */
+  out = gbk_view_drag_out_for_test (v);
+  g_autofree char *quoin = gbk_drag_out_data (out, GBK_DND_LOCS);
+  gbk_drag_out_free (out);
+  g_autoptr (GPtrArray) locs = gbk_clip_parse_locs (quoin, strlen (quoin), &cut);
+  g_assert_cmpuint (locs->len, ==, 1);
+  g_assert_cmpstr (gbk_loc_host (g_ptr_array_index (locs, 0)), ==, "ws");
+
+  /* A folder: nothing to download, so other apps get its name as text alone. */
+  gbk_view_select_only (v, gbk_dir_model_find (model_of (w), "sub"));
+  out = gbk_view_drag_out_for_test (v);
+  g_assert_false (offers_uris (out));
+  gbk_drag_out_free (out);
+  g_assert_true (wait_until (no_jobs, nullptr));   /* the one above, stopping */
+  g_assert_cmpuint (cache_dirs (), ==, before + 1);
+
+  /* Dropped into a folder here: copied across. */
+  g_autofree char *local = g_build_filename (home, "local", nullptr);
+  g_autoptr (GbkLoc) local_loc = gbk_loc_new_local (local);
+  GbkWindow *lw = gbk_window_new (app, ctx, local_loc);
+  gtk_widget_show_all (GTK_WIDGET (lw));
+  g_assert_true (wait_until (ready, lw));
+  drop_choosing (lw, locs, "Copy Here");
+  g_autofree char *arrived = g_build_filename (local, "a.txt", nullptr);
+  g_assert_true (wait_until (file_there, arrived));
+  g_assert_true (wait_until (no_jobs, nullptr));
+  g_assert_true (exists ("data/a.txt"));
+
+  /* A file here dropped there: Move Here moves it across. */
+  g_autofree char *up = g_build_filename (local, "dropped.txt", nullptr);
+  g_autoptr (GPtrArray) ups = locs_of_one (gbk_loc_new_local (up));
+  drop_choosing (w, ups, "Move Here");
+  char up_there[] = "data/dropped.txt";
+  g_assert_true (wait_until (there_rel, up_there));
+  g_assert_true (wait_until (no_jobs, nullptr));
+  g_assert_false (g_file_test (up, G_FILE_TEST_EXISTS));
+
+  /* From yet another machine: not possible, and said before asking anything. */
+  g_autoptr (GPtrArray) far = locs_of_one (gbk_loc_new_remote ("elsewhere", "/x"));
+  GtkWidget *vw = GTK_WIDGET (v);
+  g_autoptr (GdkEvent) t = fake_trigger (vw, 5, 2);
+  g_assert_true (
+      gbk_view_drop_locs_for_test (v, far, gtk_widget_get_allocated_width (vw) - 5, 2, t));
+  g_assert_null (gtk_menu_get_for_attach_widget (vw));
+  g_assert_cmpstr (gbk_window_status (w), ==,
+                   "Copying between two other machines isn't possible yet");
+
+  gtk_widget_destroy (GTK_WIDGET (lw));
+  gtk_widget_destroy (GTK_WIDGET (w));
+}
+
 static bool
 no_conns (void *data G_GNUC_UNUSED)
 {
@@ -1242,6 +1417,7 @@ main (int argc, char **argv)
   g_test_add_func ("/remotewin/cache-cleanup", test_cache_cleanup);
   g_test_add_func ("/remotewin/open-names-app", test_open_names_app);
   g_test_add_func ("/remotewin/choose-app", test_choose_app);
+  g_test_add_func ("/remotewin/drag-and-drop", test_drag_and_drop);
   int status = g_test_run ();
 
   while (gtk_events_pending ())

@@ -68,6 +68,9 @@ G_DECLARE_FINAL_TYPE (GbkJob, gbk_job, GBK, JOB, GObject)
  * G_IO_ERROR_NOT_SUPPORTED (Properties asks the connection itself). `dest_dir` for
  * COPY/MOVE. */
 [[nodiscard]] GbkJob *gbk_job_new (GbkOpKind kind, const GPtrArray *sources, GbkLoc *dest_dir);
+/* Why a COPY or MOVE of `locs` into `dest` can't run, whatever the files (machines on
+ * both sides it can't join): a message, or nullptr if it can. */
+const char *gbk_job_transfer_refusal (const GPtrArray *locs, const GbkLoc *dest);
 [[nodiscard]] GbkJob *gbk_job_new_rename (GbkLoc *loc, const char *new_name);
 /* Create an empty file or folder `name` in `dir` (never replacing anything). */
 [[nodiscard]] GbkJob *gbk_job_new_create (GbkLoc *dir, const char *name, bool folder);

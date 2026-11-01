@@ -1072,9 +1072,14 @@ test_drag_and_drop (void)
   g_assert_true (both_exist (dest));
   g_assert_true (wait_until (bar_menus_gone, bar));
 
-  /* Dragging out carries the selection as a uri-list. */
-  g_autofree char *dragged = gbk_view_drag_uris (v);
+  /* Dragging out carries the selection: a uri-list for other apps, the locations for
+   * Quoin windows. */
+  g_autoptr (GbkDragOut) out = gbk_view_drag_out_for_test (v);
+  g_assert_true (gbk_drag_out_ready (out));
+  g_autofree char *dragged = gbk_drag_out_data (out, GBK_DND_URIS);
   g_assert_cmpstr (dragged, ==, here);
+  g_autofree char *quoin = gbk_drag_out_data (out, GBK_DND_LOCS);
+  g_assert_true (g_str_has_prefix (quoin, "copy\n"));
 
   gtk_widget_destroy (GTK_WIDGET (w));
   rm_rf (root);

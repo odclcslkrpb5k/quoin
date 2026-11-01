@@ -369,6 +369,14 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   x11+xtst): fake motion/buttons at root coords. Synthetic drag + gtk_drag_cancel leaves
   icon popups mapped forever -> don't. GTK keeps empty 1x1 popups at -99,-99 for DnD IPC:
   "no popups" checks must ignore childless popups. Xvfb has no WM: windows stack at 0,0.
+- DnD PHASE 8 (2026-11-01): GbkDragOut (dnd.c) owns a drag out: LOCS target first
+  (x-special/quoin-locations, any machine), uri-list only when local or a remote download
+  was started (files, ≤ GBK_DND_FETCH_MAX 64 MiB), text = paths / host:path. Download =
+  FETCH job at drag start into gbk_edits_cache() mkdtemp dirs, no UI (questions answered
+  Cancel); untaken → cancelled + removed at drag end (on "finished" if still running:
+  tests must wait no_jobs before counting cache dirs). ask_drop checks
+  gbk_job_transfer_refusal before the menu. Tests: gbk_view_drag_out_for_test +
+  gbk_drag_out_data, gbk_view_drop_locs_for_test (test-remotewin drag-and-drop).
 - DEVICES (user, 2026-10-15: Thunar's sidebar Devices list, in the ☰ menu; user chose ONE
   "Devices" submenu, each device a submenu Open / Unmount / Eject|Safely Remove). devices.{h,c}
   (core, GIO only): GbkDevices per window wraps GVolumeMonitor (gvfs udisks2 if installed,
@@ -504,6 +512,8 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   2026-10-17). Edits then `./build format && ./build check`. RECURRED 2026-10-18 (the
   rule was written down and still skipped), so now Engineer: out/edit.py leaves
   out/EDIT-FAILED on a failed edit and ./build refuses to run while it exists.
+  RECURRED 2026-11-01 via a bare `assert` in an ad-hoc edit script (not once()), so the
+  guard didn't fire: use must(cond, what) from out/edit.py for any check in an edit script.
 - FORMAT before CHECK: `./build format` rewrites C with clang-format; run it before every
   `./build check` (check refuses unformatted C; I tripped it twice in one session). Phase 0 there
   (fsync before deleting a moved source; reject "."/".." in entry validation) is a real

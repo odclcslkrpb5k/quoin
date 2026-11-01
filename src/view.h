@@ -6,6 +6,7 @@
 #pragma once
 
 #include "dirmodel.h"
+#include "dnd.h"
 
 #define GBK_TYPE_VIEW (gbk_view_get_type ())
 G_DECLARE_FINAL_TYPE (GbkView, gbk_view, GBK, VIEW, GtkWidget)
@@ -71,11 +72,14 @@ const char *gbk_view_type_ahead_text (GbkView *v);   /* "" when idle */
 size_t gbk_view_rows_per_column (const GbkView *v);
 GbkHandle gbk_view_item_at (GbkView *v, double x, double y);   /* widget coordinates */
 
-/* Drag and drop (see dnd.h). What a drag of the current selection carries (uri-list). */
-[[nodiscard]] char *gbk_view_drag_uris (GbkView *v);
+/* Drag and drop (see dnd.h). Tests: what a drag of the current selection would carry. */
+[[nodiscard]] GbkDragOut *gbk_view_drag_out_for_test (GbkView *v);
 /* Would a drop at (x, y) be accepted, and where (*folder: an item, or NONE for the view's
  * folder)? `from_self`: the drag started in this view. */
 bool gbk_view_drop_target_at (GbkView *v, double x, double y, bool from_self, GbkHandle *folder);
 /* Tests: as if `uri_list` were dropped at (x, y) from another app. */
 bool gbk_view_drop_for_test (GbkView *v, const char *uri_list, double x, double y,
                              GdkEvent *trigger);
+/* Tests: as if `locs` (GbkLoc*) were dropped at (x, y) from a Quoin window. */
+bool gbk_view_drop_locs_for_test (GbkView *v, GPtrArray *locs, double x, double y,
+                                  GdkEvent *trigger);
