@@ -464,6 +464,8 @@ gbk_proto_put_job (GByteArray *out, uint64_t channel, const GbkJobRequest *r,
   put_u64 (out, r->session);
   put_str16 (out, r->dest != nullptr ? r->dest : "", PATH_MAX_BYTES);
   put_token (out, &r->base);
+  put_str16 (out, r->name != nullptr ? r->name : "", NAME_MAX_BYTES);
+  put_u32 (out, r->rwx);
   end_frame (out, f);
 }
 
@@ -1173,6 +1175,8 @@ gbk_job_request_clear (GbkJobRequest *r)
 {
   g_free (r->dest);
   r->dest = nullptr;
+  g_free (r->name);
+  r->name = nullptr;
 }
 
 bool
@@ -1187,16 +1191,26 @@ gbk_proto_get_job (const GbkFrame *f, GbkJobRequest *r)
   uint64_t session = get_u64 (&rd);
   g_autofree char *dest = get_str (&rd, PATH_MAX_BYTES);
   GbkFileToken base = get_token (&rd);
-  if (!done (&rd) || kind > GBK_OP_UPLOAD || here > 1)
+  g_autofree char *name = get_str (&rd, NAME_MAX_BYTES);
+  uint32_t rwx = get_u32 (&rd);
+  if (!done (&rd) || kind > GBK_OP_PERMISSIONS || here > 1)
     return false;
-  bool needs_dest = kind == GBK_OP_COPY || kind == GBK_OP_MOVE || kind == GBK_OP_UPLOAD;
-  if (needs_dest ? !absolute (dest) : dest[0] != '\0')
+  bool creates = kind == GBK_OP_CREATE_FILE || kind == GBK_OP_CREATE_FOLDER;
+  bool needs_dest = kind == GBK_OP_COPY || kind == GBK_OP_MOVE || kind == GBK_OP_UPLOAD || creates;
+  bool needs_name = kind == GBK_OP_RENAME || creates;
+  /* Only copies, moves and uploads read the asking machine's files. */
+  bool may_read_here = kind == GBK_OP_COPY || kind == GBK_OP_MOVE || kind == GBK_OP_UPLOAD;
+  if ((needs_dest ? !absolute (dest) : dest[0] != '\0')
+      || (needs_name ? !valid_name (name) : name[0] != '\0')
+      || (kind == GBK_OP_PERMISSIONS ? rwx > 0777 : rwx != 0) || (here == 1 && !may_read_here))
     return false;
   r->kind = (GbkOpKind) kind;
   r->sources_here = here == 1;
   r->session = session;
   r->dest = needs_dest ? g_steal_pointer (&dest) : nullptr;
   r->base = base;
+  r->name = needs_name ? g_steal_pointer (&name) : nullptr;
+  r->rwx = rwx;
   return true;
 }
 

@@ -159,29 +159,6 @@ test_browse (void)
   gtk_widget_destroy (GTK_WIDGET (w));
 }
 
-/* Nothing that changes anything there, apart from copies and moves: each says so, starts
- * no job, changes nothing. */
-static void
-test_refusals (void)
-{
-  put ("data/a.txt", "aaa");
-  GbkWindow *w = window_on_remote_data ();
-  GbkDirModel *m = model_of (w);
-  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (m, "a.txt"));
-  const char *actions[] = { "trash", "delete", "rename" };
-  for (size_t i = 0; i < G_N_ELEMENTS (actions); i++)
-    {
-      g_action_group_activate_action (G_ACTION_GROUP (w), actions[i], nullptr);
-      while (gtk_events_pending ())
-        gtk_main_iteration ();
-      g_test_message ("%s: %s", actions[i], gbk_window_status (w));
-      g_assert_cmpstr (gbk_window_status (w), ==, "Not possible on another machine yet");
-      g_assert_cmpint (gbk_job_live (), ==, 0);
-    }
-  g_assert_true (exists ("data/a.txt"));
-  gtk_widget_destroy (GTK_WIDGET (w));
-}
-
 static bool
 file_there (void *path)
 {
@@ -350,6 +327,138 @@ dialog_shown (void *data)
         }
     }
   return false;
+}
+
+static bool
+gone_rel (void *rel)
+{
+  return !exists (rel);
+}
+
+static bool
+there_rel (void *rel)
+{
+  return exists (rel);
+}
+
+/* A visible dialog titled `title` (borrowed), or nullptr. */
+static GtkDialog *
+dialog_titled (const char *title)
+{
+  g_autoptr (GList) tops = gtk_window_list_toplevels ();
+  for (GList *l = tops; l != nullptr; l = l->next)
+    if (GTK_IS_DIALOG (l->data) && gtk_widget_get_visible (l->data)
+        && g_strcmp0 (gtk_window_get_title (l->data), title) == 0)
+      return l->data;
+  return nullptr;
+}
+
+static bool
+rename_asked (void *unused G_GNUC_UNUSED)
+{
+  return dialog_titled ("Rename") != nullptr;
+}
+
+static void
+on_finished_keep (GbkJob *job G_GNUC_UNUSED, GError *error, GError **out)
+{
+  *out = error != nullptr ? g_error_copy (error) : nullptr;
+}
+
+/* Run `job` to the end; its error, if any. */
+static GError *
+run_job (GbkJob *job)
+{
+  GError *error = nullptr;
+  gbk_connect (G_OBJECT (job), job, "finished", G_CALLBACK (on_finished_keep), &error);
+  gbk_job_start (job);
+  g_assert_true (wait_until (no_jobs, nullptr));
+  return error;
+}
+
+static uint32_t
+mode_of (const char *rel)
+{
+  g_autofree char *p = g_build_filename (home, rel, nullptr);
+  struct stat st;
+  g_assert_cmpint (stat (p, &st), ==, 0);
+  return st.st_mode & 07777;
+}
+
+/* Changing things there runs there: trash (that machine's trash), delete (after asking),
+ * rename, create, the execute bit and permissions; Properties may change them. Running
+ * things there (Execute, actions) still doesn't. */
+static void
+test_operations_there (void)
+{
+  put ("data/a.txt", "aaa");
+  put ("data/b.txt", "bbb");
+  put ("data/c.txt", "ccc");
+  char a_rel[] = "data/a.txt", b_rel[] = "data/b.txt", d_rel[] = "data/d.txt";
+  GbkWindow *w = window_on_remote_data ();
+  GbkDirModel *m = model_of (w);
+
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (m, "a.txt"));
+  g_action_group_activate_action (G_ACTION_GROUP (w), "trash", nullptr);
+  g_assert_true (wait_until (gone_rel, a_rel));
+  g_assert_true (exists ("xdg-data/Trash/files/a.txt")
+                 || exists (".local/share/Trash/files/a.txt"));
+
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "b.txt"));
+  g_action_group_activate_action (G_ACTION_GROUP (w), "delete", nullptr);
+  Wanted sure = { .starts = "Permanently delete" };
+  g_assert_true (wait_until (dialog_shown, &sure));
+  gtk_dialog_response (GTK_DIALOG (sure.found), GTK_RESPONSE_ACCEPT);
+  g_assert_true (wait_until (gone_rel, b_rel));
+
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "c.txt"));
+  g_action_group_activate_action (G_ACTION_GROUP (w), "rename", nullptr);
+  g_assert_true (wait_until (rename_asked, nullptr));
+  GtkDialog *ren = dialog_titled ("Rename");
+  GtkEntry *entry = g_object_get_data (G_OBJECT (ren), "gbk-entry");
+  gtk_entry_set_text (entry, "d.txt");
+  gtk_dialog_response (ren, GTK_RESPONSE_ACCEPT);
+  g_assert_true (wait_until (there_rel, d_rel));
+  g_assert_false (exists ("data/c.txt"));
+  g_assert_true (wait_until (no_jobs, nullptr));
+
+  /* Create: never over something there. */
+  GbkLoc *data = gbk_window_loc (w);
+  g_autoptr (GbkJob) mk = gbk_job_new_create (data, "made", true);
+  g_autoptr (GError) mk_error = run_job (mk);
+  g_assert_no_error (mk_error);
+  g_autofree char *made = g_build_filename (home, "data", "made", nullptr);
+  g_assert_true (g_file_test (made, G_FILE_TEST_IS_DIR));
+  g_autoptr (GbkJob) again = gbk_job_new_create (data, "d.txt", false);
+  g_autoptr (GError) again_error = run_job (again);
+  g_assert_error (again_error, G_IO_ERROR, G_IO_ERROR_EXISTS);
+  g_autofree char *d_text = nullptr;
+  g_autofree char *d_path = g_build_filename (home, "data", "d.txt", nullptr);
+  g_assert_true (g_file_get_contents (d_path, &d_text, nullptr, nullptr));
+  g_assert_cmpstr (d_text, ==, "ccc");
+
+  /* The execute bit, then permissions. */
+  g_autoptr (GPtrArray) d = gbk_loc_array_new ();
+  g_ptr_array_add (d, gbk_loc_new_remote ("ws", d_path));
+  g_assert_cmpint (chmod (d_path, 0644), ==, 0);
+  g_autoptr (GbkJob) x = gbk_job_new_executable (d, true);
+  g_autoptr (GError) x_error = run_job (x);
+  g_assert_no_error (x_error);
+  g_assert_cmpuint (mode_of ("data/d.txt"), ==, 0755);
+  g_autoptr (GbkJob) perms = gbk_job_new_permissions (g_ptr_array_index (d, 0), 0640);
+  g_autoptr (GError) perms_error = run_job (perms);
+  g_assert_no_error (perms_error);
+  g_assert_cmpuint (mode_of ("data/d.txt"), ==, 0640);
+
+  /* Never one job over two machines. */
+  g_autoptr (GPtrArray) mixed = gbk_loc_array_new ();
+  g_ptr_array_add (mixed, gbk_loc_new_remote ("ws", d_path));
+  g_ptr_array_add (mixed, gbk_loc_new_local (d_path));
+  g_autoptr (GbkJob) both = gbk_job_new (GBK_OP_DELETE, mixed, nullptr);
+  g_autoptr (GError) both_error = run_job (both);
+  g_assert_error (both_error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+  g_assert_true (exists ("data/d.txt"));
+  gtk_widget_destroy (GTK_WIDGET (w));
 }
 
 static bool
@@ -977,6 +1086,13 @@ props_loaded (void *p)
   return gbk_props_loaded (p);
 }
 
+static bool
+mode_is_664 (void *path)
+{
+  struct stat st;
+  return stat (path, &st) == 0 && (st.st_mode & 0777) == 0664;
+}
+
 static void
 test_properties (void)
 {
@@ -989,8 +1105,13 @@ test_properties (void)
   g_assert_true (wait_until (props_loaded, p));
   g_assert_cmpstr (gbk_props_value (p, "Name"), ==, "a.txt");
   g_assert_cmpstr (gbk_props_value (p, "Size"), ==, "3 bytes (3 bytes)");
-  /* Read there; changing them there comes later. */
-  g_assert_false (gtk_widget_is_sensitive (GTK_WIDGET (gbk_props_permission (p, 0, 0))));
+  /* Read there, and changed there (the file is ours there). */
+  g_assert_cmpint (chmod (path, 0644), ==, 0);
+  GtkToggleButton *group_write = gbk_props_permission (p, 1, 1);
+  g_assert_true (gtk_widget_is_sensitive (GTK_WIDGET (group_write)));
+  gtk_toggle_button_set_active (group_write, true);
+  gtk_button_clicked (gbk_props_apply_button (p));
+  g_assert_true (wait_until (mode_is_664, path));
   gtk_widget_destroy (GTK_WIDGET (p));
   gtk_widget_destroy (GTK_WIDGET (w));
 }
@@ -1107,7 +1228,7 @@ main (int argc, char **argv)
   gbk_edits_set_timing_for_test (50, 400, 400);
   gbk_edits_init (app, ctx);
   g_test_add_func ("/remotewin/browse", test_browse);
-  g_test_add_func ("/remotewin/refusals", test_refusals);
+  g_test_add_func ("/remotewin/operations-there", test_operations_there);
   g_test_add_func ("/remotewin/properties", test_properties);
   g_test_add_func ("/remotewin/disconnect-and-back", test_disconnect_and_back);
   g_test_add_func ("/remotewin/network-action", test_network_action);

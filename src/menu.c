@@ -85,16 +85,16 @@ gbk_menu_works_remote (GbkMenuKind kind)
     case GBK_MENU_COPY:        /* copies and moves cross between machines (job.c) */
     case GBK_MENU_CUT:
     case GBK_MENU_PASTE:
-    case GBK_MENU_PASTE_INTO: return true;
-    case GBK_MENU_EXECUTE:
-    case GBK_MENU_EXECUTE_TERMINAL:
-    case GBK_MENU_ACTION:
-    case GBK_MENU_TRASH:
+    case GBK_MENU_PASTE_INTO:
+    case GBK_MENU_TRASH:       /* run there (job.c), into that machine's trash */
     case GBK_MENU_DELETE:
     case GBK_MENU_RENAME:
     case GBK_MENU_EXECUTABLE:
     case GBK_MENU_CREATE_FOLDER:
-    case GBK_MENU_CREATE_FILE: return false;
+    case GBK_MENU_CREATE_FILE: return true;
+    case GBK_MENU_EXECUTE:     /* never run anything from there here */
+    case GBK_MENU_EXECUTE_TERMINAL:
+    case GBK_MENU_ACTION: return false;
     default: gbk_fatal ("bad menu entry kind %d", (int) kind);
     }
 }

@@ -1840,6 +1840,51 @@ job_progress (uint64_t done, uint64_t total, const char *current, void *data)
   job_send (j, b);
 }
 
+/* Every job but an upload: a tree operation, or one on a single item (the request was
+ * checked when it came: a name is a single filename, the bits at most 0777, and nothing
+ * but a copy or a move reads the asking machine's files). */
+[[nodiscard]] static bool
+run_single (Job *j, GbkSource *src, const GbkOpsHooks *hooks, GPtrArray *created, GError **error)
+{
+  const GbkJobRequest *r = &j->req;
+  const char *first = j->sources->len > 0 ? g_ptr_array_index (j->sources, 0) : nullptr;
+  bool one = j->sources->len == 1;
+  switch (r->kind)
+    {
+    case GBK_OP_COPY:
+    case GBK_OP_MOVE:
+    case GBK_OP_TRASH:
+    case GBK_OP_DELETE:
+      return gbk_ops_run_from (src, r->kind, j->sources, r->dest, hooks, created, error);
+    case GBK_OP_SET_EXECUTABLE:
+    case GBK_OP_CLEAR_EXECUTABLE:
+      return gbk_ops_set_executable_each (j->sources, r->kind == GBK_OP_SET_EXECUTABLE, hooks,
+                                          error);
+    case GBK_OP_RENAME:
+    case GBK_OP_CREATE_FILE:
+    case GBK_OP_CREATE_FOLDER:
+    case GBK_OP_PERMISSIONS:
+      if (!one)
+        {
+          g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                               "One item at a time");
+          return false;
+        }
+      if (r->kind == GBK_OP_PERMISSIONS)
+        return gbk_ops_set_permissions (first, r->rwx, error);
+      if (r->kind == GBK_OP_RENAME
+              ? !gbk_ops_rename (first, r->name, error)
+              : !gbk_ops_create (r->dest, r->name, r->kind == GBK_OP_CREATE_FOLDER, error))
+        return false;
+      g_ptr_array_add (created, g_strdup (r->name));
+      return true;
+    case GBK_OP_UPLOAD:
+    default:
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "Not a job");
+      return false;
+    }
+}
+
 static void *
 job_worker (void *data)
 {
@@ -1870,7 +1915,7 @@ job_worker (void *data)
         }
     }
   else
-    ok = gbk_ops_run_from (src, j->req.kind, j->sources, j->req.dest, &hooks, created, &error);
+    ok = run_single (j, src, &hooks, created, &error);
   gbk_proto_put_created (b, j->channel, created);
   if (ok)
     gbk_proto_put_empty (b, GBK_MSG_DONE, j->channel);

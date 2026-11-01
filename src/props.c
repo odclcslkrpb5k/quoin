@@ -149,13 +149,18 @@ show_details (GbkProps *p, const GbkFileInfo *info)
       gtk_toggle_button_set_active (p->perm[who][what],
                                     (p->loaded_rwx & (1u << (8 - (who * 3 + what)))) != 0);
   p->updating = false;
-  uid_t me = geteuid ();
-  bool remote = !gbk_loc_is_local (p->loc);
-  bool may_change = !remote && !info->dangling && (me == 0 || me == info->uid);
+  /* Who we are where the file is: there, the user the connection logged in as. */
+  int64_t me = geteuid ();
+  if (!gbk_loc_is_local (p->loc))
+    {
+      GbkRemote *r = gbk_remote_default ();
+      const GbkConn *c = r != nullptr ? gbk_remote_peek (r, gbk_loc_host (p->loc)) : nullptr;
+      const GbkHello *hello = c != nullptr ? gbk_conn_hello (c) : nullptr;
+      me = hello != nullptr ? (int64_t) hello->uid : -1;
+    }
+  bool may_change = !info->dangling && me >= 0 && (me == 0 || me == (int64_t) info->uid);
   gtk_widget_set_sensitive (p->perm_box, may_change);
-  if (remote)
-    gtk_label_set_text (p->perm_note, "Changing these on another machine comes later.");
-  else if (info->dangling)
+  if (info->dangling)
     gtk_label_set_text (p->perm_note, "A broken link has no permissions.");
   else if (!may_change)
     {

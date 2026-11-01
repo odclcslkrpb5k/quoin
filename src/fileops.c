@@ -1214,7 +1214,7 @@ bool
 gbk_ops_run_from (GbkSource *src, GbkOpKind kind, GPtrArray *sources, const char *dest_dir,
                   const GbkOpsHooks *hooks, GPtrArray *created, GError **error)
 {
-  if (kind == GBK_OP_UPLOAD)
+  if (kind != GBK_OP_COPY && kind != GBK_OP_MOVE && kind != GBK_OP_TRASH && kind != GBK_OP_DELETE)
     {
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "Not a tree operation");
       return false;
@@ -1274,7 +1274,13 @@ gbk_ops_run_from (GbkSource *src, GbkOpKind kind, GPtrArray *sources, const char
           break;
         case GBK_OP_TRASH: trash_path (&c, path); break;
         case GBK_OP_DELETE: delete_path (&c, path); break;
-        case GBK_OP_UPLOAD:
+        case GBK_OP_UPLOAD: /* refused above */
+        case GBK_OP_RENAME:
+        case GBK_OP_CREATE_FILE:
+        case GBK_OP_CREATE_FOLDER:
+        case GBK_OP_SET_EXECUTABLE:
+        case GBK_OP_CLEAR_EXECUTABLE:
+        case GBK_OP_PERMISSIONS:
         default: gbk_fatal ("bad op %d", (int) kind);
         }
     }
@@ -1591,6 +1597,34 @@ static mode_t
 rwx_mode (mode_t old, uint32_t rwx)
 {
   return (old & 07000) | (rwx & 0777);
+}
+
+bool
+gbk_ops_set_executable_each (const GPtrArray *paths, bool executable, const GbkOpsHooks *hooks,
+                             GError **error)
+{
+  for (guint i = 0; i < paths->len; i++)
+    {
+      if (hooks->cancelled (hooks->data))
+        break;
+      const char *path = g_ptr_array_index (paths, i);
+      g_autoptr (GError) e = nullptr;
+      if (gbk_ops_set_executable (path, executable, &e))
+        continue;
+      if (paths->len == 1)
+        {
+          g_propagate_error (error, g_steal_pointer (&e));
+          return false;
+        }
+      if (hooks->error (path, e, hooks->data) == GBK_CHOICE_CANCEL)
+        break;
+    }
+  if (hooks->cancelled (hooks->data))
+    {
+      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Cancelled");
+      return false;
+    }
+  return true;
 }
 
 bool

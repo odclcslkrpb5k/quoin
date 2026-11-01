@@ -454,6 +454,10 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   gbk_ops_remove_unchanged keeps anything not as FIRST listed. job.c plan_transfer picks
   here / read-from-there / run-there. Cut/Paste/Paste Into now work remotely; drops onto
   remote stay refused (phase 8) in ask_drop + view.
+  Phase 7 (2026-11-01): remote rename/create/trash/delete/executable/permissions = JOB
+  requests run there (GbkOpKind RENAME..PERMISSIONS, request .name/.rwx, proto v2);
+  peer.c run_single dispatches; job.c plan_there/run_there. See remote-plan.md "As built
+  in phase 7". menu: only EXECUTE*, ACTION still refused remote.
   Phase 6b (editing): see remote-plan.md "As built in phase 6 ... editing". New: GbkFileToken
   (fileops), GbkSourceOps.resolve/.state, gbk_ops_upload (+ hooks.upload_conflict, LAST
   field so positional hook initializers still work), GBK_OP_UPLOAD (jobs only), job kinds

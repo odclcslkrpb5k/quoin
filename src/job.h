@@ -62,9 +62,11 @@ G_DECLARE_FINAL_TYPE (GbkJob, gbk_job, GBK, JOB, GObject)
  *   "question"  (GbkQuestion *q)  answer with gbk_job_answer (now or later)
  *   "finished"  (GError *error)   nullptr on success (cancelled: G_IO_ERROR_CANCELLED) */
 
-/* Locations are GbkLoc (arrays hold GbkLoc*, referenced). A job on a location that isn't on
- * this machine finishes at once with G_IO_ERROR_NOT_SUPPORTED (remote jobs: a later phase of
- * docs/remote-plan.md). `dest_dir` for COPY/MOVE. */
+/* Locations are GbkLoc (arrays hold GbkLoc*, referenced). A job on files on
+ * another machine runs there (rename, create, trash, delete, permissions: on that machine's
+ * files alone; copy and move: across, too). INFO there finishes at once with
+ * G_IO_ERROR_NOT_SUPPORTED (Properties asks the connection itself). `dest_dir` for
+ * COPY/MOVE. */
 [[nodiscard]] GbkJob *gbk_job_new (GbkOpKind kind, const GPtrArray *sources, GbkLoc *dest_dir);
 [[nodiscard]] GbkJob *gbk_job_new_rename (GbkLoc *loc, const char *new_name);
 /* Create an empty file or folder `name` in `dir` (never replacing anything). */

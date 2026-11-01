@@ -74,8 +74,11 @@ program that won't start. On anything else, [build from source](#building).
   to `~/.cache/quoin/serve/` on that machine; nothing needs installing there. Logins use
   your ssh keys and agent; when ssh needs a passphrase or a host key accepted, **Log in
   in a terminal** does it once. You can look around, see Properties, open a terminal
-  there (F4), copy a path (`ws1:/srv/x`, as scp takes it), and **copy or move** files
-  and folders either way, or within that machine (Copy or Cut, then Paste). A move deletes
+  there (F4), copy a path (`ws1:/srv/x`, as scp takes it), **copy or move** files
+  and folders either way, or within that machine (Copy or Cut, then Paste), and rename,
+  create, trash (into that machine's trash), delete and change permissions there, as
+  here. Nothing runs there from Quoin: Execute and your right-click actions are for
+  files on this machine. A move deletes
   an original only once the copy is safely stored, and only if it hasn't changed since.
   **Open** a file there and it is fetched into `~/.cache/quoin/remote/` and opened from
   there; each save is uploaded back, but only over the file as it was when you opened it
@@ -86,9 +89,8 @@ program that won't start. On anything else, [build from source](#building).
   after its last window closes while a file is still open in an app, and says so (it can
   tell when an editor closes the file, even if the editor keeps running). Files being
   edited show in bold, with a small emblem, in their folder, and **Files Being Edited** in the ☰ menu
-  lists them. A save it couldn't upload is offered the next time Quoin starts. Renaming,
-  deleting and the like there, and drag and drop with other machines, come next (see
-  [docs/remote-plan.md](docs/remote-plan.md)).
+  lists them. A save it couldn't upload is offered the next time Quoin starts. Drag and drop
+  with other machines comes next (see [docs/remote-plan.md](docs/remote-plan.md)).
 - **Properties** (right-click menu or Alt+Enter): dates (modified, accessed, changed,
   created), size, owner, group, link target, and read / write / execute permissions you can
   change with Apply. For files, the right-click menu also has an **Executable** check

@@ -19,7 +19,7 @@
 #define GBK_PROTO_MAGIC "QUOIN-SERVE"
 /* Wire format version: both ends are always the same build (quoin-serve is pushed by the
  * laptop), so this only has to change with the format, and a mismatch is refused. */
-#define GBK_PROTO_VERSION 1
+#define GBK_PROTO_VERSION 2
 /* Largest frame body (type + channel + payload). */
 #define GBK_PROTO_FRAME_MAX (1u << 20)
 #define GBK_PROTO_MAGIC_MAX 256         /* longest acceptable magic line */
@@ -97,8 +97,11 @@ typedef struct
   GbkOpKind kind;
   bool sources_here;      /* the sources are on the asking machine: read them from it */
   uint64_t session;       /* sources_here: the asking machine's session for those reads */
-  char *dest;             /* COPY, MOVE, UPLOAD (the file replaced): absolute; else nullptr */
+  char *dest;             /* COPY, MOVE, UPLOAD (the file replaced), CREATE_* (the folder):
+               * absolute; else nullptr */
   GbkFileToken base;      /* UPLOAD: the file there as it was opened */
+  char *name;             /* RENAME (the new name), CREATE_*: one filename; else nullptr */
+  uint32_t rwx;           /* PERMISSIONS: the bits (0777 at most); else 0 */
 } GbkJobRequest;
 
 void gbk_job_request_clear (GbkJobRequest *r);

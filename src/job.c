@@ -223,28 +223,6 @@ hook_cancelled (void *data)
   return is_cancelled (data);
 }
 
-/* Execute bit on several files: a failure asks Skip / Cancel when others remain. */
-static void
-run_executable (Shared *s, bool on, GError **error)
-{
-  for (guint i = 0; i < s->sources->len && !is_cancelled (s); i++)
-    {
-      const char *path = g_ptr_array_index (s->sources, i);
-      g_autoptr (GError) e = nullptr;
-      if (gbk_ops_set_executable (path, on, &e))
-        continue;
-      if (s->sources->len == 1)
-        {
-          g_propagate_error (error, g_steal_pointer (&e));
-          return;
-        }
-      if (hook_error (path, e, s) == GBK_CHOICE_CANCEL)
-        break;
-    }
-  if (is_cancelled (s))
-    g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Cancelled");
-}
-
 /* COPY or MOVE: here, from another machine, or on another machine. */
 [[nodiscard]] static bool
 run_transfer (Shared *s, GbkOpKind kind, const GbkOpsHooks *hooks, GPtrArray *created,
@@ -413,6 +391,36 @@ run_upload (Shared *s, const GbkOpsHooks *hooks, Msg *done)
   return ok;
 }
 
+/* A job on another machine's files alone, run there. */
+[[nodiscard]] static bool
+run_there (Shared *s, const GbkOpsHooks *hooks, GPtrArray *created, GError **error)
+{
+  GbkOpKind op;
+  switch (s->kind)
+    {
+    case GBK_JOB_TRASH: op = GBK_OP_TRASH; break;
+    case GBK_JOB_DELETE: op = GBK_OP_DELETE; break;
+    case GBK_JOB_RENAME: op = GBK_OP_RENAME; break;
+    case GBK_JOB_CREATE_FILE: op = GBK_OP_CREATE_FILE; break;
+    case GBK_JOB_CREATE_FOLDER: op = GBK_OP_CREATE_FOLDER; break;
+    case GBK_JOB_SET_EXECUTABLE: op = GBK_OP_SET_EXECUTABLE; break;
+    case GBK_JOB_CLEAR_EXECUTABLE: op = GBK_OP_CLEAR_EXECUTABLE; break;
+    case GBK_JOB_PERMISSIONS: op = GBK_OP_PERMISSIONS; break;
+    case GBK_JOB_COPY:
+    case GBK_JOB_MOVE:
+    case GBK_JOB_INFO:
+    case GBK_JOB_FETCH:
+    case GBK_JOB_UPLOAD:
+    default: gbk_fatal ("job kind %d doesn't run there this way", (int) s->kind);
+    }
+  bool creates = op == GBK_OP_CREATE_FILE || op == GBK_OP_CREATE_FOLDER;
+  GbkJobRequest req = { .kind = op,
+                        .dest = creates ? s->dest : nullptr,
+                        .name = s->name,
+                        .rwx = op == GBK_OP_PERMISSIONS ? s->rwx : 0 };
+  return gbk_asker_run_job (s->asker, &req, s->sources, hooks, created, nullptr, error);
+}
+
 /* The result travels as `error` alone, so it must say what the return value said: false
  * exactly when the error is set (GError's convention). Read the error only after the call
  * has returned: as two arguments of one call, their order is unspecified. */
@@ -434,6 +442,15 @@ worker (void *data)
   done->created = g_ptr_array_new_with_free_func (g_free);
   const char *first = g_ptr_array_index (s->sources, 0);
   bool ok;
+  if (s->asker != nullptr && s->kind != GBK_JOB_COPY && s->kind != GBK_JOB_MOVE
+      && s->kind != GBK_JOB_UPLOAD)
+    {
+      ok = run_there (s, &hooks, done->created, &done->error);
+      agree (ok, done->error);
+      post_msg (s, done);
+      shared_unref (s);
+      return nullptr;
+    }
   switch (s->kind)
     {
     case GBK_JOB_COPY:
@@ -459,8 +476,12 @@ worker (void *data)
       if (gbk_ops_create (s->dest, s->name, s->kind == GBK_JOB_CREATE_FOLDER, &done->error))
         g_ptr_array_add (done->created, g_strdup (s->name));
       break;
-    case GBK_JOB_SET_EXECUTABLE: run_executable (s, true, &done->error); break;
-    case GBK_JOB_CLEAR_EXECUTABLE: run_executable (s, false, &done->error); break;
+    case GBK_JOB_SET_EXECUTABLE:
+    case GBK_JOB_CLEAR_EXECUTABLE:
+      ok = gbk_ops_set_executable_each (s->sources, s->kind == GBK_JOB_SET_EXECUTABLE, &hooks,
+                                        &done->error);
+      agree (ok, done->error);
+      break;
     case GBK_JOB_PERMISSIONS:
       ok = gbk_ops_set_permissions (first, s->rwx, &done->error);
       agree (ok, done->error);
@@ -692,6 +713,26 @@ plan_transfer (Shared *s, const GPtrArray *locs, const GbkLoc *dest)
     }
 }
 
+/* Anything else on another machine: it runs there, on that machine's files alone. */
+static void
+plan_there (Shared *s, const GPtrArray *locs, const GbkLoc *dest)
+{
+  const char *host = one_machine (locs);
+  if (host == nullptr || host[0] == '\0'
+      || (dest != nullptr && g_strcmp0 (gbk_loc_host (dest), host) != 0))
+    {
+      s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                        "Only for files on one machine at a time");
+      return;
+    }
+  g_autoptr (GbkConn) c = conn_for (s, host);
+  if (c == nullptr)
+    return;
+  s->asker = gbk_conn_asker (c);
+  s->sources = paths_of (locs);
+  s->dest = dest != nullptr ? g_strdup (gbk_loc_path (dest)) : nullptr;
+}
+
 static GbkJob *
 job_new (GbkJobKind kind, const GPtrArray *sources, GbkLoc *dest)
 {
@@ -714,6 +755,11 @@ job_new (GbkJobKind kind, const GPtrArray *sources, GbkLoc *dest)
     {
       g_clear_pointer (&s->sources, g_ptr_array_unref);
       plan_transfer (s, sources, dest);
+    }
+  else if (kind != GBK_JOB_INFO)
+    {
+      g_clear_pointer (&s->sources, g_ptr_array_unref);
+      plan_there (s, sources, dest);
     }
   else
     s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
@@ -743,6 +789,12 @@ gbk_job_new (GbkOpKind kind, const GPtrArray *sources, GbkLoc *dest_dir)
       dest_dir = nullptr;
       break;
     case GBK_OP_UPLOAD: /* gbk_job_new_upload */
+    case GBK_OP_RENAME: /* the gbk_job_new_* of each */
+    case GBK_OP_CREATE_FILE:
+    case GBK_OP_CREATE_FOLDER:
+    case GBK_OP_SET_EXECUTABLE:
+    case GBK_OP_CLEAR_EXECUTABLE:
+    case GBK_OP_PERMISSIONS:
     default: gbk_fatal ("bad operation %d", (int) kind);
     }
   return job_new (k, sources, dest_dir);

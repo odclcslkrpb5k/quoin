@@ -126,6 +126,14 @@ typedef enum
   GBK_OP_TRASH,
   GBK_OP_DELETE,       /* permanent */
   GBK_OP_UPLOAD,       /* jobs on another machine only: gbk_ops_upload, never gbk_ops_run */
+  /* Jobs on another machine only (the job calls the single operations below; never
+   * gbk_ops_run): */
+  GBK_OP_RENAME,
+  GBK_OP_CREATE_FILE,
+  GBK_OP_CREATE_FOLDER,
+  GBK_OP_SET_EXECUTABLE,
+  GBK_OP_CLEAR_EXECUTABLE,
+  GBK_OP_PERMISSIONS,
 } GbkOpKind;
 
 typedef enum
@@ -200,6 +208,11 @@ typedef struct
 /* Turn execute permission on (for owner/group/others wherever they have read) or off
  * (for everyone). `path` must be, or link to, a regular file. */
 [[nodiscard]] bool gbk_ops_set_executable (const char *path, bool executable, GError **error);
+
+/* The same for each of `paths`: a failure asks (hooks->error, Skip or Cancel) when there
+ * are several, and is the error when there is one. False when cancelled or that one failed. */
+[[nodiscard]] bool gbk_ops_set_executable_each (const GPtrArray *paths, bool executable,
+                                                const GbkOpsHooks *hooks, GError **error);
 
 /* Set the rwx bits (0777) of `path` (following a symlink); setuid/setgid/sticky are kept. */
 [[nodiscard]] bool gbk_ops_set_permissions (const char *path, uint32_t rwx, GError **error);

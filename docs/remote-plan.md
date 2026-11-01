@@ -269,6 +269,24 @@ As built in phase 6 (2026-10-18), editing (src/edits.c, edit-store.c, fetch.c):
 - At start a scan (thread) offers unsent copies (Upload / Show / Discard, locks held while
   asked) and removes finished records older than 7 days, and old folders without a record.
 
+As built in phase 7 (2026-11-01), operations on the remote:
+- Rename, Create File/Folder, Trash, Delete, the Executable check item and Properties'
+  permissions work there as here. Each is a JOB run there (the same request copies and
+  moves use): GbkOpKind gained RENAME, CREATE_FILE, CREATE_FOLDER, SET_EXECUTABLE,
+  CLEAR_EXECUTABLE and PERMISSIONS, and the request a name and the bits. quoin-serve calls
+  the same single operations Quoin uses here (gbk_ops_rename, gbk_ops_create,
+  gbk_ops_set_executable_each, gbk_ops_set_permissions); trash and delete are
+  gbk_ops_run there, so trash goes to that machine's trash and "can't trash: delete?" is
+  asked here.
+- The request is checked where it arrives (Engineer): a name only where one is needed and
+  then a single filename (no "/", ".", ".."); the folder to create in absolute; the bits
+  only for PERMISSIONS and 0777 at most; only copies, moves and uploads may read the asking
+  machine's files. tests/test-proto.c sends each wrong form. Wire format version 2.
+- A job never spans machines: every item and the destination on one machine, or it is
+  refused. Properties allows changing permissions when the user the connection logged in
+  as owns the file there (or is root).
+- Execute and configured actions stay off for files there (phase 9).
+
 ## 9. Testing
 
 - `QUOIN_SSH` replaces the ssh command; tests point it at a script running quoin-serve
@@ -307,6 +325,8 @@ Each phase ships on its own and passes `./build check`.
    between windows of Quoin, and remote items dragged to other apps as a downloaded local
    copy (Konqueror's behaviour), never as sftp://.
 9. Later: custom actions run on the remote (argv hex-encoded, no shell), remote A → remote B.
+   (Open Terminal Here there already works: F4 runs ssh to a shell in that folder, since
+   phase 4.)
 
 Rough size: 5–6k new lines, the most of it in phases 3, 5 and 6. Biggest risk: the fileops
 refactor in phase 5.

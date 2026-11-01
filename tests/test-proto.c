@@ -468,10 +468,42 @@ test_job_messages (void)
   g_assert_cmpstr (back.dest, ==, "/x y");
   gbk_job_request_clear (&back);
 
-  /* A copy needs an absolute destination; a trash has none. */
+  /* Single-item jobs: a name, a folder to create in, the bits. */
+  char name[] = "new name";
+  GbkJobRequest create = { .kind = GBK_OP_CREATE_FOLDER, .dest = absolute, .name = name };
+  GbkJobRequest perms = { .kind = GBK_OP_PERMISSIONS, .rwx = 0750 };
+  g_autoptr (GByteArray) singles = g_byte_array_new ();
+  gbk_proto_put_job (singles, 9, &create, sources);
+  g_autoptr (GArray) cf = frames_of (singles);
+  g_assert_true (gbk_proto_get_job (&g_array_index (cf, GbkFrame, cf->len - 1), &back));
+  g_assert_cmpint (back.kind, ==, GBK_OP_CREATE_FOLDER);
+  g_assert_cmpstr (back.dest, ==, "/x");
+  g_assert_cmpstr (back.name, ==, "new name");
+  gbk_job_request_clear (&back);
+  g_byte_array_set_size (singles, 0);
+  gbk_proto_put_job (singles, 9, &perms, sources);
+  g_autoptr (GArray) pf = frames_of (singles);
+  g_assert_true (gbk_proto_get_job (&g_array_index (pf, GbkFrame, pf->len - 1), &back));
+  g_assert_cmpuint (back.rwx, ==, 0750);
+  g_assert_null (back.name);
+  gbk_job_request_clear (&back);
+
+  /* A copy needs an absolute destination; a trash has none. A name is one filename, only
+   * where one is needed; the bits only for permissions, 0777 at most. Only copies, moves
+   * and uploads may read the asking machine's files. */
+  char slash[] = "a/b", dots[] = "..", blank[] = "";
   GbkJobRequest bad[] = { { .kind = GBK_OP_COPY, .dest = rel },
                           { .kind = GBK_OP_COPY, .dest = nullptr },
-                          { .kind = GBK_OP_TRASH, .dest = absolute } };
+                          { .kind = GBK_OP_TRASH, .dest = absolute },
+                          { .kind = GBK_OP_RENAME, .name = slash },
+                          { .kind = GBK_OP_RENAME, .name = dots },
+                          { .kind = GBK_OP_RENAME, .name = blank },
+                          { .kind = GBK_OP_CREATE_FILE, .name = name },
+                          { .kind = GBK_OP_TRASH, .name = name },
+                          { .kind = GBK_OP_PERMISSIONS, .rwx = 01777 },
+                          { .kind = GBK_OP_DELETE, .rwx = 0644 },
+                          { .kind = GBK_OP_DELETE, .sources_here = true },
+                          { .kind = GBK_OP_PERMISSIONS + 1 } };
   for (size_t i = 0; i < G_N_ELEMENTS (bad); i++)
     {
       g_autoptr (GByteArray) b = g_byte_array_new ();
