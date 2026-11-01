@@ -377,6 +377,11 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   tests must wait no_jobs before counting cache dirs). ask_drop checks
   gbk_job_transfer_refusal before the menu. Tests: gbk_view_drag_out_for_test +
   gbk_drag_out_data, gbk_view_drop_locs_for_test (test-remotewin drag-and-drop).
+- PHASE 9 (2026-11-01): RemoteCommand actions (RUN op, runcmd.c in serve core) and A → B
+  through the laptop (answerer session `via`). Details: docs/remote-plan.md "As built in
+  phase 9". Tests: test-remotewin between-machines ("ws" and "ws2" are both this machine
+  under fake-ssh) and actions-there (exact error messages: check-source bans strstr on
+  error messages; zombies count as ended via /proc state). Protocol version 3.
 - DEVICES (user, 2026-10-15: Thunar's sidebar Devices list, in the ☰ menu; user chose ONE
   "Devices" submenu, each device a submenu Open / Unmount / Eject|Safely Remove). devices.{h,c}
   (core, GIO only): GbkDevices per window wraps GVolumeMonitor (gvfs udisks2 if installed,

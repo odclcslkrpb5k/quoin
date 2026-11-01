@@ -488,22 +488,65 @@ test_job_messages (void)
   g_assert_null (back.name);
   gbk_job_request_clear (&back);
 
+  /* An action's command: its arguments as they were, run in a folder. */
+  g_autoptr (GPtrArray) argv = g_ptr_array_new ();
+  char tar[] = "tar", xf[] = "-xf", archive[] = "/x/a b.tar";
+  g_ptr_array_add (argv, tar);
+  g_ptr_array_add (argv, xf);
+  g_ptr_array_add (argv, archive);
+  GbkJobRequest run = { .kind = GBK_OP_RUN, .dest = absolute, .argv = argv };
+  g_byte_array_set_size (singles, 0);
+  gbk_proto_put_job (singles, 9, &run, sources);
+  g_autoptr (GArray) rf = frames_of (singles);
+  g_assert_true (gbk_proto_get_job (&g_array_index (rf, GbkFrame, rf->len - 1), &back));
+  g_assert_cmpint (back.kind, ==, GBK_OP_RUN);
+  g_assert_cmpstr (back.dest, ==, "/x");
+  g_assert_cmpuint (back.argv->len, ==, 3);
+  g_assert_cmpstr (g_ptr_array_index (back.argv, 2), ==, "/x/a b.tar");
+  gbk_job_request_clear (&back);
+  g_assert_null (back.argv);
+
+  /* What fits in one: a program, not too many or too long arguments. */
+  g_autoptr (GPtrArray) no_args = g_ptr_array_new ();
+  g_assert_false (gbk_proto_argv_fits (no_args));
+  g_autoptr (GPtrArray) unnamed = g_ptr_array_new ();
+  char empty_prog[] = "";
+  g_ptr_array_add (unnamed, empty_prog);
+  g_assert_false (gbk_proto_argv_fits (unnamed));
+  g_autofree char *huge = g_strnfill (5000, 'a');
+  g_autoptr (GPtrArray) too_long = g_ptr_array_new ();
+  g_ptr_array_add (too_long, tar);
+  g_ptr_array_add (too_long, huge);
+  g_assert_false (gbk_proto_argv_fits (too_long));
+  g_autofree char *long_arg = g_strnfill (4000, 'a');
+  g_autoptr (GPtrArray) too_much = g_ptr_array_new ();
+  for (int i = 0; i < 200; i++)
+    g_ptr_array_add (too_much, long_arg);   /* 800 kB in all */
+  g_assert_false (gbk_proto_argv_fits (too_much));
+  g_assert_true (gbk_proto_argv_fits (argv));
+
   /* A copy needs an absolute destination; a trash has none. A name is one filename, only
    * where one is needed; the bits only for permissions, 0777 at most. Only copies, moves
    * and uploads may read the asking machine's files. */
   char slash[] = "a/b", dots[] = "..", blank[] = "";
-  GbkJobRequest bad[] = { { .kind = GBK_OP_COPY, .dest = rel },
-                          { .kind = GBK_OP_COPY, .dest = nullptr },
-                          { .kind = GBK_OP_TRASH, .dest = absolute },
-                          { .kind = GBK_OP_RENAME, .name = slash },
-                          { .kind = GBK_OP_RENAME, .name = dots },
-                          { .kind = GBK_OP_RENAME, .name = blank },
-                          { .kind = GBK_OP_CREATE_FILE, .name = name },
-                          { .kind = GBK_OP_TRASH, .name = name },
-                          { .kind = GBK_OP_PERMISSIONS, .rwx = 01777 },
-                          { .kind = GBK_OP_DELETE, .rwx = 0644 },
-                          { .kind = GBK_OP_DELETE, .sources_here = true },
-                          { .kind = GBK_OP_PERMISSIONS + 1 } };
+  GbkJobRequest bad[]
+      = { { .kind = GBK_OP_COPY, .dest = rel },
+          { .kind = GBK_OP_COPY, .dest = nullptr },
+          { .kind = GBK_OP_TRASH, .dest = absolute },
+          { .kind = GBK_OP_RENAME, .name = slash },
+          { .kind = GBK_OP_RENAME, .name = dots },
+          { .kind = GBK_OP_RENAME, .name = blank },
+          { .kind = GBK_OP_CREATE_FILE, .name = name },
+          { .kind = GBK_OP_TRASH, .name = name },
+          { .kind = GBK_OP_PERMISSIONS, .rwx = 01777 },
+          { .kind = GBK_OP_DELETE, .rwx = 0644 },
+          { .kind = GBK_OP_DELETE, .sources_here = true },
+          { .kind = GBK_OP_RUN },                 /* no command */
+          { .kind = GBK_OP_RUN, .argv = argv },   /* nowhere to run */
+          { .kind = GBK_OP_RUN, .dest = rel, .argv = argv },
+          { .kind = GBK_OP_TRASH, .argv = argv }, /* a command elsewhere */
+          { .kind = GBK_OP_RUN, .dest = absolute, .argv = argv, .sources_here = true },
+          { .kind = GBK_OP_RUN + 1 } };
   for (size_t i = 0; i < G_N_ELEMENTS (bad); i++)
     {
       g_autoptr (GByteArray) b = g_byte_array_new ();

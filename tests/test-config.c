@@ -55,6 +55,8 @@ test_example_conf (void)
   g_assert_cmpuint (c->actions->len, ==, 3);
   const GbkAction *a = g_ptr_array_index (c->actions, 0);
   g_assert_cmpstr (a->id, ==, "extract-here");
+  g_assert_cmpstr (gbk_command_template (a->remote_command), ==, "bsdtar -xf %f");
+  g_assert_null (((const GbkAction *) g_ptr_array_index (c->actions, 1))->remote_command);
   g_assert_true (gbk_action_matches (a, "application/zip", false));
   g_assert_false (gbk_action_matches (a, "text/plain", false));
   g_assert_false (gbk_action_matches (a, "inode/directory", true));
@@ -80,7 +82,8 @@ test_full (void)
                                   "[Action view]\n"
                                   "Name=View\n"
                                   "Types=image/*\n"
-                                  "Command=viewer %f\n",
+                                  "Command=viewer %f\n"
+                                  "RemoteCommand=identify %f\n",
                                   errors);
   g_assert_cmpuint (errors->len, ==, 0);
   g_assert_true (c->show_hidden);
@@ -92,6 +95,7 @@ test_full (void)
   g_assert_cmpstr (py[1], ==, "-u");
   g_assert_null (gbk_config_interpreter (c, "a.sh"));   /* section replaced defaults */
   const GbkAction *view = g_ptr_array_index (c->actions, 0);
+  g_assert_cmpstr (gbk_command_template (view->remote_command), ==, "identify %f");
   g_assert_true (gbk_action_matches (view, "image/png", false));
   g_assert_false (gbk_action_matches (view, "imagex/png", false));
   g_assert_false (gbk_action_matches (view, "video/mp4", false));
@@ -123,6 +127,7 @@ test_errors (void)
   assert_errors ("[Action a]\nName=x\nCommand=x\n", "matches nothing");
   assert_errors ("[Action a]\nName=x\nCommand=x\nTypes=image/png*\n", "type/* pattern");
   assert_errors ("[Action a]\nName=x\nCommand=x %c\nTypes=*\n", "not allowed here");
+  assert_errors ("[Action a]\nName=x\nCommand=x\nRemoteCommand=y %c\nTypes=*\n", "RemoteCommand");
   assert_errors ("not a key file", "");
   /* A bad entry anywhere rejects everything, including valid parts. */
   assert_errors ("[General]\nShowHidden=true\n[Bogus]\n", "unknown section");

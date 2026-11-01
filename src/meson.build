@@ -23,6 +23,7 @@ serve_lib = static_library('gbk-serve-core',
   'fileops.c',
   'proto.c',
   'peer.c',
+  'runcmd.c',
   include_directories : config_inc,
   dependencies : serve_deps,
 )

@@ -38,6 +38,7 @@ verb (GbkJob *job)
     case GBK_JOB_INFO: return "Reading Details";
     case GBK_JOB_FETCH: return "Downloading";
     case GBK_JOB_UPLOAD: return "Uploading";
+    case GBK_JOB_RUN: return "Running";
     default: return "Working";
     }
 }

@@ -134,6 +134,7 @@ typedef enum
   GBK_OP_SET_EXECUTABLE,
   GBK_OP_CLEAR_EXECUTABLE,
   GBK_OP_PERMISSIONS,
+  GBK_OP_RUN,           /* an action's command, run there and waited for (runcmd.h) */
 } GbkOpKind;
 
 typedef enum

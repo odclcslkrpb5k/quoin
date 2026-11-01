@@ -1,4 +1,5 @@
 #include "peer.h"
+#include "runcmd.h"
 
 #define TASKS_MAX 16                 /* requests answered at once */
 #define SESSIONS_MAX 1024
@@ -870,11 +871,35 @@ typedef struct
   int64_t mtime_ns, ctime_ns;
 } Token;
 
+/* A session's files on a third machine (GbkSource), shared by the session and its tasks. */
+typedef struct
+{
+  gatomicrefcount rc;
+  GbkSource *src;
+} Via;
+
+static Via *
+via_ref (Via *v)
+{
+  g_atomic_ref_count_inc (&v->rc);
+  return v;
+}
+
+static void
+via_unref (Via *v)
+{
+  if (v == nullptr || !g_atomic_ref_count_dec (&v->rc))
+    return;
+  gbk_source_free (v->src);
+  g_free (v);
+}
+
 typedef struct
 {
   GPtrArray *roots;       /* restricted: what may be asked about (char*) */
-  bool record;
-  GHashTable *tokens;     /* record: path -> Token* */
+  bool record;            /* REMOVE allowed (a move) */
+  GHashTable *tokens;     /* record, not via: path -> Token* */
+  Via *via;               /* the files are another machine's: asked of it (nullable) */
 } Session;
 
 struct GbkAnswerer
@@ -910,6 +935,7 @@ typedef struct
   char *base;             /* a folder, opened as it is */
   char *rel;              /* `path` from `base`: resolved with `resolve` */
   uint64_t resolve;
+  Via *via;               /* nullable: read through it instead of here */
   /* READ: how many more bytes may be sent; cancelled by CANCEL or stopping. */
   GMutex lock;
   GCond cond;
@@ -930,6 +956,7 @@ session_free (Session *s)
 {
   g_clear_pointer (&s->roots, g_ptr_array_unref);
   g_clear_pointer (&s->tokens, g_hash_table_unref);
+  via_unref (s->via);
   g_free (s);
 }
 
@@ -970,6 +997,7 @@ static void
 task_free (Task *t)
 {
   gbk_answerer_unref (t->a);
+  via_unref (t->via);
   g_free (t->path);
   g_free (t->base);
   g_free (t->rel);
@@ -1094,7 +1122,7 @@ record (Task *t, const char *dir, const GPtrArray *entries, const GbkStatEntry *
 {
   g_mutex_lock (&t->a->lock);
   Session *s = g_hash_table_lookup (t->a->sessions, &t->session);
-  if (s != nullptr && s->record)
+  if (s != nullptr && s->record && s->via == nullptr)
     {
       if (one != nullptr)
         keep_first (s->tokens, g_strdup (t->path), one);
@@ -1361,10 +1389,147 @@ run_remove (Task *t)
   task_finish (t, b);
 }
 
+/* ---- a session's files on a third machine: each request passed on to it ---- */
+
+static void
+via_list (Task *t)
+{
+  g_autoptr (GError) error = nullptr;
+  GbkSource *src = t->via->src;
+  g_autoptr (GPtrArray) entries = src->ops->list (src, t->path, &error);
+  if (entries == nullptr)
+    {
+      finish_error (t, error);
+      return;
+    }
+  guint at = 0;
+  while (entries->len - at > LIST_BATCH)
+    {
+      g_autoptr (GPtrArray) batch = g_ptr_array_new ();
+      for (guint i = 0; i < LIST_BATCH; i++)
+        g_ptr_array_add (batch, g_ptr_array_index (entries, at + i));
+      at += LIST_BATCH;
+      g_autoptr (GByteArray) b = g_byte_array_new ();
+      gbk_proto_put_listing (b, t->channel, batch, false);
+      gbk_outbox_put (t->a->out, b);
+    }
+  g_autoptr (GPtrArray) rest = g_ptr_array_new ();
+  for (guint i = at; i < entries->len; i++)
+    g_ptr_array_add (rest, g_ptr_array_index (entries, i));
+  g_autoptr (GByteArray) b = g_byte_array_new ();
+  gbk_proto_put_listing (b, t->channel, rest, true);
+  task_finish (t, b);
+}
+
+static void
+via_lstat (Task *t)
+{
+  g_autoptr (GError) error = nullptr;
+  GbkSource *src = t->via->src;
+  g_autoptr (GbkStatEntry) e = src->ops->lstat (src, t->path, &error);
+  if (e == nullptr)
+    {
+      finish_error (t, error);
+      return;
+    }
+  g_autoptr (GByteArray) b = g_byte_array_new ();
+  gbk_proto_put_stated (b, t->channel, e);
+  task_finish (t, b);
+}
+
+/* As run_read, the bytes coming from the third machine as it sends them. */
+static void
+via_read (Task *t)
+{
+  g_autoptr (GError) error = nullptr;
+  GbkSource *src = t->via->src;
+  GbkSourceFile *f = src->ops->open (src, t->path, &error);
+  if (f == nullptr)
+    {
+      finish_error (t, error);
+      return;
+    }
+  g_autofree uint8_t *buf = g_malloc (GBK_PROTO_DATA_MAX);
+  for (;;)
+    {
+      g_mutex_lock (&t->lock);
+      while (t->credit == 0 && !t->cancelled)
+        g_cond_wait (&t->cond, &t->lock);
+      bool stop = t->cancelled;
+      size_t take = (size_t) MIN (t->credit, (uint64_t) GBK_PROTO_DATA_MAX);
+      g_mutex_unlock (&t->lock);
+      if (stop)
+        {
+          src->ops->close (f);
+          g_autoptr (GByteArray) nothing = g_byte_array_new ();
+          task_finish (t, nothing);
+          return;
+        }
+      ssize_t n = src->ops->read (f, buf, take, &error);
+      if (n < 0)
+        {
+          src->ops->close (f);
+          finish_error (t, error);
+          return;
+        }
+      if (n == 0)
+        break;
+      g_autoptr (GByteArray) b = g_byte_array_new ();
+      gbk_proto_put_data (b, t->channel, buf, (size_t) n);
+      g_mutex_lock (&t->lock);
+      t->credit -= (uint64_t) n;
+      g_mutex_unlock (&t->lock);
+      gbk_outbox_put (t->a->out, b);
+    }
+  GbkFileToken as_read = { 0 };
+  bool same = src->ops->state (f, &as_read);
+  src->ops->close (f);
+  g_autoptr (GByteArray) b = g_byte_array_new ();
+  gbk_proto_put_end (b, t->channel, !same, &as_read);
+  task_finish (t, b);
+}
+
+/* The third machine removes it only if it is as its own session listed it. */
+static void
+via_remove (Task *t)
+{
+  g_autoptr (GError) error = nullptr;
+  GbkSource *src = t->via->src;
+  if (!src->ops->remove (src, t->path, &error))
+    {
+      finish_error (t, error);
+      return;
+    }
+  g_autoptr (GByteArray) b = g_byte_array_new ();
+  gbk_proto_put_empty (b, GBK_MSG_REMOVED, t->channel);
+  task_finish (t, b);
+}
+
+static void
+run_via (Task *t)
+{
+  switch (t->kind)
+    {
+    case TASK_LIST: via_list (t); break;
+    case TASK_LSTAT: via_lstat (t); break;
+    case TASK_READ: via_read (t); break;
+    case TASK_REMOVE: via_remove (t); break;
+    case TASK_INFO:     /* never in a session (restricted answerers refuse them) */
+    case TASK_RESOLVE:
+    default: gbk_fatal ("task %d through another machine", (int) t->kind);
+    }
+}
+
 static void *
 task_worker (void *data)
 {
   Task *t = data;
+  if (t->via != nullptr)
+    {
+      run_via (t);
+      task_free (t);
+      return nullptr;
+    }
   switch (t->kind)
     {
     case TASK_INFO: run_info (t); break;
@@ -1421,6 +1586,7 @@ place (GbkAnswerer *a, Task *t, GError **error)
       t->base = g_path_get_dirname (root);
       t->rel = g_strconcat (name, t->path + n, nullptr);
       t->resolve = STRICT;
+      t->via = s->via != nullptr ? via_ref (s->via) : nullptr;
       return true;
     }
   g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
@@ -1632,8 +1798,20 @@ gbk_answerer_handle (GbkAnswerer *a, const GbkFrame *f)
 uint64_t
 gbk_answerer_open (GbkAnswerer *a, const GPtrArray *roots, bool record)
 {
+  return gbk_answerer_open_via (a, roots, record, nullptr);
+}
+
+uint64_t
+gbk_answerer_open_via (GbkAnswerer *a, const GPtrArray *roots, bool record, GbkSource *via)
+{
   uint64_t id = gbk_peer_channel (false);
   Session *s = session_new (record);
+  if (via != nullptr)
+    {
+      s->via = g_new0 (Via, 1);
+      g_atomic_ref_count_init (&s->via->rc);
+      s->via->src = via;
+    }
   s->roots = g_ptr_array_new_with_free_func (g_free);
   for (guint i = 0; i < roots->len; i++)
     {
@@ -1840,9 +2018,9 @@ job_progress (uint64_t done, uint64_t total, const char *current, void *data)
   job_send (j, b);
 }
 
-/* Every job but an upload: a tree operation, or one on a single item (the request was
- * checked when it came: a name is a single filename, the bits at most 0777, and nothing
- * but a copy or a move reads the asking machine's files). */
+/* Every job but an upload: a tree operation, one on a single item, or an action's command
+ * (the request was checked when it came: a name is a single filename, the bits at most
+ * 0777, a command fits, and nothing but a copy or a move reads the asking machine's files). */
 [[nodiscard]] static bool
 run_single (Job *j, GbkSource *src, const GbkOpsHooks *hooks, GPtrArray *created, GError **error)
 {
@@ -1878,6 +2056,7 @@ run_single (Job *j, GbkSource *src, const GbkOpsHooks *hooks, GPtrArray *created
         return false;
       g_ptr_array_add (created, g_strdup (r->name));
       return true;
+    case GBK_OP_RUN: return gbk_run_command (r->argv, r->dest, hooks, error);
     case GBK_OP_UPLOAD:
     default:
       g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "Not a job");

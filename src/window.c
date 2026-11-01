@@ -604,6 +604,17 @@ on_paste_files (GPtrArray *locs, bool cut, void *data)
   start_job (w, job);
 }
 
+/* An action on files on another machine: its RemoteCommand, run there as a job (progress,
+ * Cancel, and what it printed if it fails). */
+static void
+run_action_there (GbkWindow *w, const GbkAction *a, GPtrArray *items, const GbkLoc *here)
+{
+  g_autoptr (GPtrArray) runs = gbk_open_action_remote_runs (a, items, here);
+  g_autoptr (GPtrArray) locs = locs_of (items);
+  g_autoptr (GbkJob) job = gbk_job_new_run (here, locs, runs);
+  start_job (w, job);
+}
+
 static void
 paste_into (GbkWindow *w, GbkLoc *dest)
 {
@@ -889,7 +900,10 @@ on_menu_item (GtkMenuItem *mi, GbkWindow *w)
       break;
     case GBK_MENU_TERMINAL_HERE: ok = gbk_open_terminal (w->ctx->config, first->loc, &error); break;
     case GBK_MENU_ACTION:
-      ok = gbk_open_action (g_object_get_data (G_OBJECT (mi), KEY_ACTION), items, here, &error);
+      if (gbk_loc_is_local (here))
+        ok = gbk_open_action (g_object_get_data (G_OBJECT (mi), KEY_ACTION), items, here, &error);
+      else
+        run_action_there (w, g_object_get_data (G_OBJECT (mi), KEY_ACTION), items, here);
       break;
     case GBK_MENU_SORT_NAME: set_sort (w, GBK_SORT_NAME); break;
     case GBK_MENU_SORT_MTIME: set_sort (w, GBK_SORT_MTIME); break;

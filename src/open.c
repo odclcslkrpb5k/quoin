@@ -218,6 +218,44 @@ gbk_open_action (const GbkAction *a, GPtrArray *items, const GbkLoc *cwd_loc, GE
   return gbk_launch_command (a->command, &args, error);
 }
 
+static GPtrArray *
+argv_array (char **argv)
+{
+  GPtrArray *a = g_ptr_array_new_with_free_func (g_free);
+  for (size_t i = 0; argv[i] != nullptr; i++)
+    g_ptr_array_add (a, g_strdup (argv[i]));
+  return a;
+}
+
+GPtrArray *
+gbk_open_action_remote_runs (const GbkAction *a, const GPtrArray *items, const GbkLoc *cwd)
+{
+  if (a->remote_command == nullptr)
+    gbk_fatal ("action %s has no RemoteCommand", a->id);
+  g_autofree const char **paths = g_new0 (const char *, items->len + 1);
+  for (guint i = 0; i < items->len; i++)
+    paths[i] = gbk_loc_path (((const GbkItem *) g_ptr_array_index (items, i))->loc);
+  GbkCommandArgs args = {
+    .dir = gbk_loc_path (cwd),
+    .files = paths,
+    .n_files = items->len,
+  };
+  GPtrArray *runs = g_ptr_array_new_with_free_func ((GDestroyNotify) g_ptr_array_unref);
+  bool each = gbk_command_uses (a->remote_command, 'f') && args.n_files > 0;
+  for (size_t i = 0; i < (each ? args.n_files : 1); i++)
+    {
+      GbkCommandArgs one = args;
+      if (each)
+        {
+          one.files = &args.files[i];
+          one.n_files = 1;
+        }
+      g_auto (GStrv) argv = gbk_command_expand (a->remote_command, &one);
+      g_ptr_array_add (runs, argv_array (argv));
+    }
+  return runs;
+}
+
 /* Run `argv` in the configured terminal (TerminalRun), started in the local home. */
 [[nodiscard]] static bool
 run_in_terminal (const GbkConfig *config, char **argv, GError **error)

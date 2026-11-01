@@ -75,10 +75,13 @@ program that won't start. On anything else, [build from source](#building).
   your ssh keys and agent; when ssh needs a passphrase or a host key accepted, **Log in
   in a terminal** does it once. You can look around, see Properties, open a terminal
   there (F4), copy a path (`ws1:/srv/x`, as scp takes it), **copy or move** files
-  and folders either way, or within that machine (Copy or Cut, then Paste), and rename,
-  create, trash (into that machine's trash), delete and change permissions there, as
-  here. Nothing runs there from Quoin: Execute and your right-click actions are for
-  files on this machine. A move deletes
+  and folders either way, within that machine, or between two other machines (`ws1:` to
+  `ws2:`, passing through this one, which stores nothing on the way) with Copy or Cut,
+  then Paste, and rename, create, trash (into that machine's trash), delete and change
+  permissions there, as here. **Your right-click actions** work there if you give them a
+  `RemoteCommand` (see [Configuration](#configuration)): it runs on that machine, in that
+  folder, with a progress window whose Cancel stops it there; if it fails you see the end
+  of what it printed. Execute stays for files on this machine. A move deletes
   an original only once the copy is safely stored, and only if it hasn't changed since.
   **Open** a file there and it is fetched into `~/.cache/quoin/remote/` and opened from
   there; each save is uploaded back, but only over the file as it was when you opened it
@@ -112,7 +115,8 @@ program that won't start. On anything else, [build from source](#building).
   - The right-click menu also offers Execute, Execute in Terminal and Open With, whose
     **Other Application…** opens the same chooser.
 - **Your own right-click actions** per file type, such as "Extract Here" for archives
-  (see [Configuration](#configuration)).
+  (see [Configuration](#configuration)), with an optional `RemoteCommand` for files on
+  other machines.
 - **Status bar:** folder and file counts, the selection's size and free space on the left.
   On the right are the sort button (click to cycle) and the `.*` hidden-files toggle.
 

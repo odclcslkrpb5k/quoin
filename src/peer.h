@@ -98,6 +98,12 @@ bool gbk_answerer_takes (GbkMsgType type);
 /* Restricted: open a session for a job of ours that lets the other machine read `roots`
  * (absolute paths, char*) and what's inside them; `record` for a move (REMOVE). */
 uint64_t gbk_answerer_open (GbkAnswerer *a, const GPtrArray *roots, bool record);
+/* The same for `roots` on a third machine, read through `via` (taken: freed once the
+ * session and its last request are done; never cancelled through it): a copy or move from
+ * there to the other machine passes through here. A move's REMOVE is passed on, and the
+ * third machine decides by its own record (`via` made with record). */
+uint64_t gbk_answerer_open_via (GbkAnswerer *a, const GPtrArray *roots, bool record,
+                                GbkSource *via);
 void gbk_answerer_close (GbkAnswerer *a, uint64_t session);
 /* End everything in progress (reads stop) and refuse whatever comes later. */
 void gbk_answerer_stop (GbkAnswerer *a);

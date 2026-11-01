@@ -1281,6 +1281,7 @@ gbk_ops_run_from (GbkSource *src, GbkOpKind kind, GPtrArray *sources, const char
         case GBK_OP_SET_EXECUTABLE:
         case GBK_OP_CLEAR_EXECUTABLE:
         case GBK_OP_PERMISSIONS:
+        case GBK_OP_RUN:
         default: gbk_fatal ("bad op %d", (int) kind);
         }
     }

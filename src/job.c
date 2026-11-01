@@ -52,6 +52,10 @@ typedef struct
   GbkFileToken base;       /* UPLOAD: the file there as it was opened */
   char *name;              /* rename: the new name; create: the name to create */
   uint32_t rwx;            /* permissions */
+  GPtrArray *runs;         /* RUN: each command (GPtrArray* of char*), run there in turn */
+  /* A copy or move between two other machines: the destination's job reads the sources
+   * through `answerer` here, which reads them from the other machine through `via`. */
+  GbkSource *via;
   int64_t last_progress;   /* worker only */
 } Shared;
 
@@ -130,6 +134,8 @@ shared_unref (Shared *s)
   gbk_asker_unref (s->asker);
   gbk_answerer_unref (s->answerer);
   g_free (s->name);
+  g_clear_pointer (&s->runs, g_ptr_array_unref);
+  gbk_source_free (s->via);
   g_free (s);
 }
 
@@ -235,7 +241,11 @@ run_transfer (Shared *s, GbkOpKind kind, const GbkOpsHooks *hooks, GPtrArray *cr
   /* Sources here: the other machine may read them (and, moving, remove them) and nothing
    * else, for as long as this job runs. */
   bool here = s->answerer != nullptr;
-  uint64_t session = here ? gbk_answerer_open (s->answerer, s->sources, kind == GBK_OP_MOVE) : 0;
+  bool move = kind == GBK_OP_MOVE;
+  uint64_t session = !here               ? 0
+                     : s->via != nullptr ? gbk_answerer_open_via (s->answerer, s->sources, move,
+                                                                  g_steal_pointer (&s->via))
+                                         : gbk_answerer_open (s->answerer, s->sources, move);
   GbkJobRequest req = { .kind = kind, .sources_here = here, .session = session, .dest = s->dest };
   bool ok = gbk_asker_run_job (s->asker, &req, s->sources, hooks, created, nullptr, error);
   if (here)
@@ -391,10 +401,31 @@ run_upload (Shared *s, const GbkOpsHooks *hooks, Msg *done)
   return ok;
 }
 
+/* An action's commands, each run there and waited for; the first failure ends it. */
+[[nodiscard]] static bool
+run_commands (Shared *s, const GbkOpsHooks *hooks, GError **error)
+{
+  for (guint i = 0; i < s->runs->len; i++)
+    {
+      GbkJobRequest req
+          = { .kind = GBK_OP_RUN, .dest = s->dest, .argv = g_ptr_array_index (s->runs, i) };
+      if (!gbk_asker_run_job (s->asker, &req, s->sources, hooks, nullptr, nullptr, error))
+        return false;
+      if (hooks->cancelled (hooks->data))
+        {
+          g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_CANCELLED, "Cancelled");
+          return false;
+        }
+    }
+  return true;
+}
+
 /* A job on another machine's files alone, run there. */
 [[nodiscard]] static bool
 run_there (Shared *s, const GbkOpsHooks *hooks, GPtrArray *created, GError **error)
 {
+  if (s->kind == GBK_JOB_RUN)
+    return run_commands (s, hooks, error);
   GbkOpKind op;
   switch (s->kind)
     {
@@ -411,6 +442,7 @@ run_there (Shared *s, const GbkOpsHooks *hooks, GPtrArray *created, GError **err
     case GBK_JOB_INFO:
     case GBK_JOB_FETCH:
     case GBK_JOB_UPLOAD:
+    case GBK_JOB_RUN:   /* run_commands */
     default: gbk_fatal ("job kind %d doesn't run there this way", (int) s->kind);
     }
   bool creates = op == GBK_OP_CREATE_FILE || op == GBK_OP_CREATE_FOLDER;
@@ -495,6 +527,7 @@ worker (void *data)
       ok = run_upload (s, &hooks, done);
       agree (ok, done->error);
       break;
+    case GBK_JOB_RUN:   /* always there: run_there */
     default: gbk_fatal ("bad job kind %d", (int) s->kind);
     }
   post_msg (s, done);
@@ -678,15 +711,9 @@ paths_of (const GPtrArray *locs)
 }
 
 const char *
-gbk_job_transfer_refusal (const GPtrArray *locs, const GbkLoc *dest)
+gbk_job_transfer_refusal (const GPtrArray *locs, const GbkLoc *dest G_GNUC_UNUSED)
 {
-  const char *from = one_machine (locs);
-  const char *to = gbk_loc_is_local (dest) ? "" : gbk_loc_host (dest);
-  if (from == nullptr)
-    return "Copy or move from one machine at a time";
-  if (from[0] != '\0' && to[0] != '\0' && !g_str_equal (from, to))
-    return "Copying between two other machines isn't possible yet";
-  return nullptr;
+  return one_machine (locs) == nullptr ? "Copy or move from one machine at a time" : nullptr;
 }
 
 /* COPY or MOVE with another machine on either side: decide where it runs (s->source,
@@ -704,6 +731,21 @@ plan_transfer (Shared *s, const GPtrArray *locs, const GbkLoc *dest)
     }
   const char *from = one_machine (locs);
   const char *to = gbk_loc_is_local (dest) ? "" : gbk_loc_host (dest);
+  if (from[0] != '\0' && to[0] != '\0' && !g_str_equal (from, to))
+    {
+      /* Between two other machines: run on the destination's, which reads the sources
+       * through here, and here from the source's (nothing is stored here on the way). */
+      g_autoptr (GbkConn) there = conn_for (s, from);
+      g_autoptr (GbkConn) c = there != nullptr ? conn_for (s, to) : nullptr;
+      if (c == nullptr)
+        return;
+      s->sources = paths_of (locs);
+      s->dest = g_strdup (gbk_loc_path (dest));
+      s->asker = gbk_conn_asker (c);
+      s->answerer = gbk_conn_answerer (c);
+      s->via = gbk_conn_source (there, s->kind == GBK_JOB_MOVE);
+      return;
+    }
   g_autoptr (GbkConn) c = conn_for (s, to[0] != '\0' ? to : from);
   if (c == nullptr)
     return;
@@ -801,6 +843,7 @@ gbk_job_new (GbkOpKind kind, const GPtrArray *sources, GbkLoc *dest_dir)
     case GBK_OP_SET_EXECUTABLE:
     case GBK_OP_CLEAR_EXECUTABLE:
     case GBK_OP_PERMISSIONS:
+    case GBK_OP_RUN: /* gbk_job_new_run */
     default: gbk_fatal ("bad operation %d", (int) kind);
     }
   return job_new (k, sources, dest_dir);
@@ -889,6 +932,54 @@ gbk_job_new_fetch (const GPtrArray *locs, const GPtrArray *dirs)
   s->dirs = g_ptr_array_new_with_free_func (g_free);
   for (guint i = 0; i < dirs->len; i++)
     g_ptr_array_add (s->dirs, g_strdup (g_ptr_array_index (dirs, i)));
+  return job;
+}
+
+GbkJob *
+gbk_job_new_run (const GbkLoc *dir, const GPtrArray *locs, const GPtrArray *runs)
+{
+  g_autoptr (GPtrArray) none = gbk_loc_array_new ();
+  GbkJob *job = job_new (GBK_JOB_RUN, none, nullptr);
+  Shared *s = job->s;
+  bool fits = runs->len > 0;
+  for (guint i = 0; fits && i < runs->len; i++)
+    fits = gbk_proto_argv_fits (g_ptr_array_index (runs, i));
+  if (!fits)
+    {
+      s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                        "That command is too long to run there");
+      return job;
+    }
+  const char *there = one_machine (locs);
+  if (locs->len > 0 && (there == nullptr || g_strcmp0 (there, gbk_loc_host (dir)) != 0))
+    {
+      s->refused = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                        "Only for files on one machine at a time");
+      return job;
+    }
+  g_autoptr (GbkConn) c = remote_conn (s, dir);
+  if (c == nullptr)
+    return job;
+  s->asker = gbk_conn_asker (c);
+  g_ptr_array_unref (s->sources);
+  /* What it's run on (the folder itself if nothing else), as every request names some. */
+  if (locs->len > 0)
+    s->sources = paths_of (locs);
+  else
+    {
+      s->sources = g_ptr_array_new_with_free_func (g_free);
+      g_ptr_array_add (s->sources, g_strdup (gbk_loc_path (dir)));
+    }
+  s->dest = g_strdup (gbk_loc_path (dir));
+  s->runs = g_ptr_array_new_with_free_func ((GDestroyNotify) g_ptr_array_unref);
+  for (guint i = 0; i < runs->len; i++)
+    {
+      const GPtrArray *argv = g_ptr_array_index (runs, i);
+      GPtrArray *copy = g_ptr_array_new_full (argv->len, g_free);
+      for (guint k = 0; k < argv->len; k++)
+        g_ptr_array_add (copy, g_strdup (g_ptr_array_index (argv, k)));
+      g_ptr_array_add (s->runs, copy);
+    }
   return job;
 }
 

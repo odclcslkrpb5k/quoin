@@ -16,6 +16,7 @@ action_free (GbkAction *a)
   g_free (a->name);
   g_strfreev (a->types);
   gbk_command_free (a->command);
+  gbk_command_free (a->remote_command);
   g_free (a);
 }
 
@@ -276,7 +277,8 @@ valid_type_pattern (const char *p)
 static void
 load_action (Loader *l, const char *group)
 {
-  static const char *const keys[] = { "Name", "Types", "Directories", "Command", nullptr };
+  static const char *const keys[]
+      = { "Name", "Types", "Directories", "Command", "RemoteCommand", nullptr };
   check_keys (l, group, keys);
   const char *id = group + strlen ("Action ");
   if (id[0] == '\0')
@@ -286,6 +288,10 @@ load_action (Loader *l, const char *group)
     }
 
   g_autoptr (GbkCommand) cmd = get_command (l, group, "Command", "dfF");
+  /* Optional: what runs instead for files on another machine, there (no display there). */
+  g_autoptr (GbkCommand) remote = g_key_file_has_key (l->kf, group, "RemoteCommand", nullptr)
+                                      ? get_command (l, group, "RemoteCommand", "dfF")
+                                      : nullptr;
   g_autofree char *name = get_string (l, group, "Name");
   bool dirs = false;
   if (g_key_file_has_key (l->kf, group, "Directories", nullptr))
@@ -316,6 +322,7 @@ load_action (Loader *l, const char *group)
   a->types = g_steal_pointer (&types);
   a->directories = dirs;
   a->command = g_steal_pointer (&cmd);
+  a->remote_command = g_steal_pointer (&remote);
   g_ptr_array_add (l->c->actions, a);
 }
 

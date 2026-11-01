@@ -302,6 +302,26 @@ As built in phase 8 (2026-11-01), drag and drop:
   gets nothing and the status bar says to drop again. Questions are answered Cancel (no
   UI). Not taken by drag end: cancelled and removed (after the job finishes).
 
+As built in phase 9 (2026-11-01):
+- Actions (user's choice, 2026-11-01): an optional `RemoteCommand=` per action (same
+  placeholders d f F, expanded with the paths there); only actions with one are offered
+  for remote files (menu.c keep_remote). The window expands it (gbk_open_action_remote_runs:
+  one argv, or one per file for %f) and starts a RUN job (gbk_job_new_run): one JOB request
+  per argv, GbkOpKind RUN, `dest` the folder, `argv` in the request (wire version 3;
+  gbk_proto_argv_fits caps it: 1..4096 args, each a path's length at most, half a frame in
+  all; checked when the job is made, again when encoded, again where it arrives).
+  quoin-serve runs it with posix_spawnp (runcmd.c): its own session, stdin/stdout
+  /dev/null, stderr's last 2 KiB kept, default SIGPIPE; waits; Cancel = SIGTERM to the
+  session, SIGKILL 2 s later. Failure: "prog failed (exit status N):\n<last 3 lines>".
+  Never a shell: sshd's command line isn't used at all (the request travels in the
+  protocol), so nothing needs hex encoding.
+- A → B: the job runs on B as a local → B copy would, but the laptop's restricted answerer
+  session is opened with `via` (gbk_answerer_open_via): a GbkSource on A
+  (gbk_conn_source, record for a move). LIST/LSTAT/READ/REMOVE in that session are passed
+  to A (peer.c via_*); roots still restrict what B may ask for. Data streams A → laptop →
+  B under B's credit; nothing is stored here. A move's REMOVE goes to A, which removes only
+  what is as its own session listed it. Only sources on several machines are refused.
+
 ## 9. Testing
 
 - `QUOIN_SSH` replaces the ssh command; tests point it at a script running quoin-serve
@@ -339,7 +359,8 @@ Each phase ships on its own and passes `./build check`.
 8. **Drag and drop** (soon after v1, user's request): remote ↔ local drops inside Quoin,
    between windows of Quoin, and remote items dragged to other apps as a downloaded local
    copy (Konqueror's behaviour), never as sftp://.
-9. Later: custom actions run on the remote (argv hex-encoded, no shell), remote A → remote B.
+9. **Done 2026-11-01**: custom actions run on the remote (an argv in the JOB request, no
+   shell; user chose an opt-in RemoteCommand per action), remote A → remote B.
    (Open Terminal Here there already works: F4 runs ssh to a shell in that folder, since
    phase 4.)
 

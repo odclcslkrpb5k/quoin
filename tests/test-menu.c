@@ -3,6 +3,19 @@
 
 static GbkConfig *config;
 
+/* Two actions: one for zips (with a RemoteCommand), one for everything. */
+static GbkConfig *
+with_actions (void)
+{
+  const char conf[] = "[Action extract]\nName=Extract\nTypes=application/zip;\nCommand=x %F\n"
+                      "RemoteCommand=unzip %f\n"
+                      "[Action compress]\nName=Compress\nTypes=*\nDirectories=true\nCommand=c %F\n";
+  g_autoptr (GPtrArray) errors = g_ptr_array_new_with_free_func (g_free);
+  GbkConfig *c = gbk_config_load_data (conf, strlen (conf), errors);
+  g_assert_cmpuint (errors->len, ==, 0);
+  return c;
+}
+
 static GbkItem *
 item (const char *path, const char *mime, bool dir, bool exec, bool script)
 {
@@ -175,13 +188,16 @@ remote_item (const char *path, const char *mime, bool dir)
   return it;
 }
 
-/* On another machine: everything but running things there (Execute, actions). */
+/* On another machine: everything but Execute, and only the actions with a RemoteCommand. */
 static void
 test_remote_menus (void)
 {
+  gbk_config_free (config);
+  config = with_actions ();
   assert_menu (items_of (remote_item ("/d/a.zip", "application/zip", false), (GbkItem *) nullptr),
                ITEMS,
-               "open with | cut copy copy-path | trash delete rename | executable | properties");
+               "open with | cut copy copy-path | trash delete rename | executable | action:extract"
+               " | properties");
   assert_menu (items_of (remote_item ("/d/sub", "inode/directory", true), (GbkItem *) nullptr),
                ITEMS,
                "open open-tab open-window term-here | cut copy paste-into copy-path | trash delete "
@@ -207,11 +223,7 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, nullptr);
-  const char conf[] = "[Action extract]\nName=Extract\nTypes=application/zip;\nCommand=x %F\n"
-                      "[Action compress]\nName=Compress\nTypes=*\nDirectories=true\nCommand=c %F\n";
-  g_autoptr (GPtrArray) errors = g_ptr_array_new_with_free_func (g_free);
-  config = gbk_config_load_data (conf, strlen (conf), errors);
-  g_assert_cmpuint (errors->len, ==, 0);
+  config = with_actions ();
   g_test_add_func ("/menu/contents", test_menus);
   g_test_add_func ("/menu/no-actions", test_no_actions_no_dangling_separator);
   g_test_add_func ("/menu/remote", test_remote_menus);

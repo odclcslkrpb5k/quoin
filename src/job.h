@@ -41,6 +41,7 @@ typedef enum
   GBK_JOB_INFO,
   GBK_JOB_FETCH,             /* files from another machine, to open (gbk_job_new_fetch) */
   GBK_JOB_UPLOAD,            /* an edited copy back to where it came from */
+  GBK_JOB_RUN,               /* an action's commands, on another machine (gbk_job_new_run) */
 } GbkJobKind;
 
 /* What a FETCH brought. */
@@ -68,8 +69,9 @@ G_DECLARE_FINAL_TYPE (GbkJob, gbk_job, GBK, JOB, GObject)
  * G_IO_ERROR_NOT_SUPPORTED (Properties asks the connection itself). `dest_dir` for
  * COPY/MOVE. */
 [[nodiscard]] GbkJob *gbk_job_new (GbkOpKind kind, const GPtrArray *sources, GbkLoc *dest_dir);
-/* Why a COPY or MOVE of `locs` into `dest` can't run, whatever the files (machines on
- * both sides it can't join): a message, or nullptr if it can. */
+/* Why a COPY or MOVE of `locs` into `dest` can't run, whatever the files (sources on
+ * several machines): a message, or nullptr if it can. Any machine to any other works: two
+ * other machines through this one. */
 const char *gbk_job_transfer_refusal (const GPtrArray *locs, const GbkLoc *dest);
 [[nodiscard]] GbkJob *gbk_job_new_rename (GbkLoc *loc, const char *new_name);
 /* Create an empty file or folder `name` in `dir` (never replacing anything). */
@@ -87,6 +89,11 @@ const char *gbk_job_transfer_refusal (const GPtrArray *locs, const GbkLoc *dest)
 /* Save `local` (here) over `target` (another machine) if it is still as `base` says, else
  * ask (GBK_QUESTION_UPLOAD). gbk_job_created(): the name written there (none: not uploaded,
  * as answered); gbk_job_uploaded(): the new file's state. */
+/* Run commands (`runs`: each a GPtrArray of char*, its argv) one after another on the
+ * machine `dir` (another one) is on, in `dir`, on `locs` (GbkLoc*, there too). Fails at
+ * the first that fails, saying what it printed last. */
+[[nodiscard]] GbkJob *gbk_job_new_run (const GbkLoc *dir, const GPtrArray *locs,
+                                       const GPtrArray *runs);
 [[nodiscard]] GbkJob *gbk_job_new_upload (const char *local, const GbkLoc *target,
                                           const GbkFileToken *base);
 

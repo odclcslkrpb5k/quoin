@@ -94,7 +94,7 @@ gbk_menu_works_remote (GbkMenuKind kind)
     case GBK_MENU_CREATE_FILE: return true;
     case GBK_MENU_EXECUTE:     /* never run anything from there here */
     case GBK_MENU_EXECUTE_TERMINAL:
-    case GBK_MENU_ACTION: return false;
+    case GBK_MENU_ACTION: return false;  /* those with a RemoteCommand do: keep_remote */
     default: gbk_fatal ("bad menu entry kind %d", (int) kind);
     }
 }
@@ -116,7 +116,8 @@ keep_remote (GArray *entries)
   for (guint i = 0; i < entries->len; i++)
     {
       const GbkMenuEntry *e = &g_array_index (entries, GbkMenuEntry, i);
-      if (gbk_menu_works_remote (e->kind))
+      if (gbk_menu_works_remote (e->kind)
+          || (e->kind == GBK_MENU_ACTION && e->action->remote_command != nullptr))
         add (kept, e->kind, e->action);
     }
   if (kept->len > 0 && g_array_index (kept, GbkMenuEntry, kept->len - 1).kind == GBK_MENU_SEPARATOR)

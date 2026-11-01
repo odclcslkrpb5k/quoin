@@ -183,6 +183,45 @@ test_remote_refused (void)
   g_assert_false (g_file_test (opened, G_FILE_TEST_EXISTS));
 }
 
+static char *
+joined (const GPtrArray *argv)
+{
+  GString *s = g_string_new ("");
+  for (guint i = 0; i < argv->len; i++)
+    g_string_append_printf (s, "%s%s", i > 0 ? "|" : "",
+                            (const char *) g_ptr_array_index (argv, i));
+  return g_string_free (s, false);
+}
+
+/* An action on files there: its RemoteCommand with the paths there, once per file for %f,
+ * once for them all for %F; each name one argument whatever it holds. */
+static void
+test_remote_action_runs (void)
+{
+  g_autoptr (GPtrArray) items = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_item_free);
+  const char *const names[] = { "/srv/a b.tar", "/srv/-rf;x" };
+  for (size_t i = 0; i < G_N_ELEMENTS (names); i++)
+    {
+      GbkItem *it = item ("x", "application/x-tar", false, false);
+      gbk_loc_unref (it->loc);
+      it->loc = gbk_loc_new_remote ("ws", names[i]);
+      g_ptr_array_add (items, it);
+    }
+  g_autoptr (GbkLoc) dir = gbk_loc_new_remote ("ws", "/srv");
+  g_autoptr (GPtrArray) each
+      = gbk_open_action_remote_runs (g_ptr_array_index (config->actions, 0), items, dir);
+  g_assert_cmpuint (each->len, ==, 2);
+  g_autofree char *first = joined (g_ptr_array_index (each, 0));
+  g_autofree char *second = joined (g_ptr_array_index (each, 1));
+  g_assert_cmpstr (first, ==, "tar|-xf|/srv/a b.tar");
+  g_assert_cmpstr (second, ==, "tar|-xf|/srv/-rf;x");
+  g_autoptr (GPtrArray) all
+      = gbk_open_action_remote_runs (g_ptr_array_index (config->actions, 1), items, dir);
+  g_assert_cmpuint (all->len, ==, 1);
+  g_autofree char *together = joined (g_ptr_array_index (all, 0));
+  g_assert_cmpstr (together, ==, "zip|-r|out.zip|/srv/a b.tar|/srv/-rf;x");
+}
+
 /* A terminal on another machine: TerminalRun runs ssh to a shell there; the folder travels
  * hex-encoded, so even a name made of shell syntax is only a name. %d is a local folder. */
 static void
@@ -253,7 +292,10 @@ main (int argc, char **argv)
 
   g_test_init (&argc, &argv, nullptr);
   const char conf[] = "[General]\nTerminalRun=env %c\n"
-                      "[Action touch]\nName=Touch\nTypes=*\nCommand=touch %F\n";
+                      "[Action touch]\nName=Touch\nTypes=*\nCommand=touch %F\n"
+                      "RemoteCommand=tar -xf %f\n"
+                      "[Action all]\nName=All\nTypes=*\nCommand=x\n"
+                      "RemoteCommand=zip -r out.zip %F\n";
   g_autoptr (GPtrArray) errors = g_ptr_array_new_with_free_func (g_free);
   config = gbk_config_load_data (conf, strlen (conf), errors);
   g_assert_cmpuint (errors->len, ==, 0);
@@ -264,6 +306,7 @@ main (int argc, char **argv)
   g_test_add_func ("/open/action-and-missing-program", test_action_and_missing_program);
   g_test_add_func ("/open/remote-refused", test_remote_refused);
   g_test_add_func ("/open/remote-terminal", test_remote_terminal);
+  g_test_add_func ("/open/remote-action-runs", test_remote_action_runs);
   int status = g_test_run ();
 
   gbk_config_free (config);

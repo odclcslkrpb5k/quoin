@@ -19,7 +19,7 @@
 #define GBK_PROTO_MAGIC "QUOIN-SERVE"
 /* Wire format version: both ends are always the same build (quoin-serve is pushed by the
  * laptop), so this only has to change with the format, and a mismatch is refused. */
-#define GBK_PROTO_VERSION 2
+#define GBK_PROTO_VERSION 3
 /* Largest frame body (type + channel + payload). */
 #define GBK_PROTO_FRAME_MAX (1u << 20)
 #define GBK_PROTO_MAGIC_MAX 256         /* longest acceptable magic line */
@@ -102,7 +102,14 @@ typedef struct
   GbkFileToken base;      /* UPLOAD: the file there as it was opened */
   char *name;             /* RENAME (the new name), CREATE_*: one filename; else nullptr */
   uint32_t rwx;           /* PERMISSIONS: the bits (0777 at most); else 0 */
+  GPtrArray *argv;        /* RUN (char*, `dest` the folder it runs in): see
+                    * gbk_proto_argv_fits; else nullptr */
 } GbkJobRequest;
+
+/* Can `argv` (char*) go in a RUN request: 1 to GBK_PROTO_ARGV_MAX arguments, a program
+ * named, none too long, all of them together well within a frame? */
+bool gbk_proto_argv_fits (const GPtrArray *argv);
+#define GBK_PROTO_ARGV_MAX 4096
 
 void gbk_job_request_clear (GbkJobRequest *r);
 

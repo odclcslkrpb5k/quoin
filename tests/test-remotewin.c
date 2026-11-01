@@ -1334,18 +1334,166 @@ test_drag_and_drop (void)
   g_assert_true (wait_until (no_jobs, nullptr));
   g_assert_false (g_file_test (up, G_FILE_TEST_EXISTS));
 
-  /* From yet another machine: not possible, and said before asking anything. */
+  /* From two machines at once: not possible, and said before asking anything. */
   g_autoptr (GPtrArray) far = locs_of_one (gbk_loc_new_remote ("elsewhere", "/x"));
+  g_ptr_array_add (far, gbk_loc_new_remote ("another", "/y"));
   GtkWidget *vw = GTK_WIDGET (v);
   g_autoptr (GdkEvent) t = fake_trigger (vw, 5, 2);
   g_assert_true (
       gbk_view_drop_locs_for_test (v, far, gtk_widget_get_allocated_width (vw) - 5, 2, t));
   g_assert_null (gtk_menu_get_for_attach_widget (vw));
-  g_assert_cmpstr (gbk_window_status (w), ==,
-                   "Copying between two other machines isn't possible yet");
+  g_assert_cmpstr (gbk_window_status (w), ==, "Copy or move from one machine at a time");
 
   gtk_widget_destroy (GTK_WIDGET (lw));
   gtk_widget_destroy (GTK_WIDGET (w));
+}
+
+/* ---- phase 9 ---- */
+
+static GbkLoc *
+there (const char *host, const char *rel)
+{
+  g_autofree char *p = g_build_filename (home, rel, nullptr);
+  return gbk_loc_new_remote (host, p);
+}
+
+static char *
+content_of (const char *rel)
+{
+  g_autofree char *p = g_build_filename (home, rel, nullptr);
+  char *c = nullptr;
+  return g_file_get_contents (p, &c, nullptr, nullptr) ? c : g_strdup ("(none)");
+}
+
+/* Between two other machines ("ws" and "ws2", both this one under two names): through
+ * here, copies and moves of files and folders. */
+static void
+test_between_machines (void)
+{
+  put ("data/ab.txt", "ab");
+  put ("data/mv.txt", "mv");
+  put ("data/tree/x/y.txt", "y");
+  put ("other/keep", "");
+  g_autoptr (GbkLoc) dest = there ("ws2", "other");
+
+  g_autoptr (GPtrArray) ab = locs_of_one (there ("ws", "data/ab.txt"));
+  g_autoptr (GbkJob) copy = gbk_job_new (GBK_OP_COPY, ab, dest);
+  g_autoptr (GError) e1 = run_job (copy);
+  g_assert_no_error (e1);
+  g_autofree char *got = content_of ("other/ab.txt");
+  g_assert_cmpstr (got, ==, "ab");
+  g_assert_true (exists ("data/ab.txt"));
+
+  g_autoptr (GPtrArray) tree = locs_of_one (there ("ws", "data/tree"));
+  g_autoptr (GbkJob) copy_tree = gbk_job_new (GBK_OP_COPY, tree, dest);
+  g_autoptr (GError) e2 = run_job (copy_tree);
+  g_assert_no_error (e2);
+  g_autofree char *deep = content_of ("other/tree/x/y.txt");
+  g_assert_cmpstr (deep, ==, "y");
+
+  g_autoptr (GPtrArray) mv = locs_of_one (there ("ws", "data/mv.txt"));
+  g_autoptr (GbkJob) move = gbk_job_new (GBK_OP_MOVE, mv, dest);
+  g_autoptr (GError) e3 = run_job (move);
+  g_assert_no_error (e3);
+  g_autofree char *moved = content_of ("other/mv.txt");
+  g_assert_cmpstr (moved, ==, "mv");
+  g_assert_false (exists ("data/mv.txt"));
+}
+
+static GPtrArray *
+argv_of (const char *first, ...)
+{
+  GPtrArray *a = g_ptr_array_new_with_free_func (g_free);
+  va_list ap;
+  va_start (ap, first);
+  for (const char *s = first; s != nullptr; s = va_arg (ap, const char *))
+    g_ptr_array_add (a, g_strdup (s));
+  va_end (ap);
+  return a;
+}
+
+static GPtrArray *
+one_run (GPtrArray *argv)
+{
+  GPtrArray *runs = g_ptr_array_new_with_free_func ((GDestroyNotify) g_ptr_array_unref);
+  g_ptr_array_add (runs, argv);
+  return runs;
+}
+
+/* Running, not ended (a zombie nobody reaped yet has ended). */
+static bool
+alive (int64_t pid)
+{
+  g_autofree char *stat_path = g_strdup_printf ("/proc/%" G_GINT64_FORMAT "/stat", pid);
+  g_autofree char *stat = nullptr;
+  if (!g_file_get_contents (stat_path, &stat, nullptr, nullptr))
+    return false;
+  const char *end = strrchr (stat, ')');
+  return end != nullptr && end[1] == ' ' && end[2] != 'Z' && end[2] != 'X';
+}
+
+static bool
+job_running (void *job)
+{
+  return gbk_job_running (job) && gbk_job_current (job) != nullptr;
+}
+
+/* An action's RemoteCommand runs there, in the folder, and is waited for: a failure says
+ * what it printed; Cancel ends it there. */
+static void
+test_actions_there (void)
+{
+  put ("data/a.txt", "aaa");
+  g_autoptr (GbkLoc) dir = there ("ws", "data");
+  g_autoptr (GPtrArray) a = locs_of_one (there ("ws", "data/a.txt"));
+
+  /* Run in the folder, on the file, with its name as one argument. */
+  g_autoptr (GPtrArray) ok_runs
+      = one_run (argv_of ("sh", "-c", "cp \"$1\" made.txt", "sh",
+                          gbk_loc_path (g_ptr_array_index (a, 0)), (const char *) nullptr));
+  g_autoptr (GbkJob) ok = gbk_job_new_run (dir, a, ok_runs);
+  g_autoptr (GError) e1 = run_job (ok);
+  g_assert_no_error (e1);
+  g_autofree char *made = content_of ("data/made.txt");
+  g_assert_cmpstr (made, ==, "aaa");
+
+  /* Failing: its exit status and the end of what it said. */
+  g_autoptr (GPtrArray) bad_runs = one_run (
+      argv_of ("sh", "-c", "echo first >&2; echo it broke >&2; exit 3", (const char *) nullptr));
+  g_autoptr (GbkJob) bad = gbk_job_new_run (dir, a, bad_runs);
+  g_autoptr (GError) e2 = run_job (bad);
+  g_assert_error (e2, G_IO_ERROR, G_IO_ERROR_FAILED);
+  g_assert_cmpstr (e2->message, ==, "sh failed (exit status 3):\nfirst\nit broke");
+
+  /* No such program there. */
+  g_autoptr (GPtrArray) missing_runs
+      = one_run (argv_of ("gbk-no-such-program", (const char *) nullptr));
+  g_autoptr (GbkJob) missing = gbk_job_new_run (dir, a, missing_runs);
+  g_autoptr (GError) e3 = run_job (missing);
+  g_assert_error (e3, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  g_assert_cmpstr (e3->message, ==, "Couldn't run gbk-no-such-program: No such file or directory");
+
+  /* Cancelled: it ends there, and so does what it started. */
+  g_autoptr (GPtrArray) slow_runs = one_run (
+      argv_of ("sh", "-c", "sleep 30 & echo $! > sleeper.pid; wait", (const char *) nullptr));
+  g_autoptr (GbkJob) slow = gbk_job_new_run (dir, a, slow_runs);
+  GError *e4 = nullptr;
+  gbk_connect (G_OBJECT (slow), slow, "finished", G_CALLBACK (on_finished_keep), &e4);
+  gbk_job_start (slow);
+  char pid_rel[] = "data/sleeper.pid";
+  g_assert_true (wait_until (there_rel, pid_rel));
+  g_assert_true (wait_until (job_running, slow));
+  gbk_job_cancel (slow);
+  g_assert_true (wait_until (no_jobs, nullptr));
+  g_assert_true (g_error_matches (e4, G_IO_ERROR, G_IO_ERROR_CANCELLED));
+  g_clear_error (&e4);
+  g_autofree char *pid_text = content_of (pid_rel);
+  int64_t pid = g_ascii_strtoll (pid_text, nullptr, 10);
+  g_assert_cmpint (pid, >, 0);
+  int64_t deadline = g_get_monotonic_time () + INT64_C (5) * G_USEC_PER_SEC;
+  while (alive (pid) && g_get_monotonic_time () < deadline)
+    g_usleep (10000);
+  g_assert_false (alive (pid));
 }
 
 static bool
@@ -1418,6 +1566,8 @@ main (int argc, char **argv)
   g_test_add_func ("/remotewin/open-names-app", test_open_names_app);
   g_test_add_func ("/remotewin/choose-app", test_choose_app);
   g_test_add_func ("/remotewin/drag-and-drop", test_drag_and_drop);
+  g_test_add_func ("/remotewin/between-machines", test_between_machines);
+  g_test_add_func ("/remotewin/actions-there", test_actions_there);
   int status = g_test_run ();
 
   while (gtk_events_pending ())

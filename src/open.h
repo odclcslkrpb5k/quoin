@@ -71,6 +71,12 @@ bool gbk_open_can_execute (const GbkItem *it);
 [[nodiscard]] bool gbk_open_action (const GbkAction *a, GPtrArray *items, const GbkLoc *cwd,
                                     GError **error);
 
+/* For items on another machine (in `cwd` there): the action's RemoteCommand, expanded with
+ * the paths there, as the commands to run there in turn (GPtrArray* of char*: one, or one
+ * per item for %f). The action must have a RemoteCommand. */
+[[nodiscard]] GPtrArray *gbk_open_action_remote_runs (const GbkAction *a, const GPtrArray *items,
+                                                      const GbkLoc *cwd);
+
 /* F4 / "Open Terminal Here". On another machine: the configured TerminalRun runs ssh to a
  * shell in that folder there. */
 [[nodiscard]] bool gbk_open_terminal (const GbkConfig *config, const GbkLoc *dir, GError **error);

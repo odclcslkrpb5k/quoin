@@ -466,7 +466,33 @@ gbk_proto_put_job (GByteArray *out, uint64_t channel, const GbkJobRequest *r,
   put_token (out, &r->base);
   put_str16 (out, r->name != nullptr ? r->name : "", NAME_MAX_BYTES);
   put_u32 (out, r->rwx);
+  guint n = r->argv != nullptr ? r->argv->len : 0;
+  if (n > 0 && !gbk_proto_argv_fits (r->argv))
+    gbk_fatal ("protocol: a command that doesn't fit (check gbk_proto_argv_fits first)");
+  put_u16 (out, (uint16_t) n);
+  for (guint i = 0; i < n; i++)
+    put_str16 (out, g_ptr_array_index (r->argv, i), PATH_MAX_BYTES);
   end_frame (out, f);
+}
+
+/* All of a RUN's arguments, as encoded: half a frame, leaving room for the rest. */
+#define ARGV_BYTES_MAX (GBK_PROTO_FRAME_MAX / 2)
+
+bool
+gbk_proto_argv_fits (const GPtrArray *argv)
+{
+  if (argv->len == 0 || argv->len > GBK_PROTO_ARGV_MAX
+      || ((const char *) g_ptr_array_index (argv, 0))[0] == '\0')
+    return false;
+  size_t total = 0;
+  for (guint i = 0; i < argv->len; i++)
+    {
+      size_t len = strlen (g_ptr_array_index (argv, i));
+      if (len > PATH_MAX_BYTES)
+        return false;
+      total += 2 + len;
+    }
+  return total <= ARGV_BYTES_MAX;
 }
 
 void
@@ -682,6 +708,12 @@ static uint8_t
 get_u8 (Reader *r)
 {
   return (uint8_t) get_le (r, 1);
+}
+
+static uint16_t
+get_u16 (Reader *r)
+{
+  return (uint16_t) get_le (r, 2);
 }
 
 static uint32_t
@@ -1177,6 +1209,9 @@ gbk_job_request_clear (GbkJobRequest *r)
   r->dest = nullptr;
   g_free (r->name);
   r->name = nullptr;
+  if (r->argv != nullptr)
+    g_ptr_array_unref (r->argv);
+  r->argv = nullptr;
 }
 
 bool
@@ -1193,10 +1228,23 @@ gbk_proto_get_job (const GbkFrame *f, GbkJobRequest *r)
   GbkFileToken base = get_token (&rd);
   g_autofree char *name = get_str (&rd, NAME_MAX_BYTES);
   uint32_t rwx = get_u32 (&rd);
-  if (!done (&rd) || kind > GBK_OP_PERMISSIONS || here > 1)
+  uint16_t argc = get_u16 (&rd);
+  g_autoptr (GPtrArray) argv = g_ptr_array_new_with_free_func (g_free);
+  for (uint16_t i = 0; rd.ok && i < argc; i++)
+    {
+      char *arg = get_str (&rd, PATH_MAX_BYTES);
+      if (arg == nullptr)
+        return false;
+      g_ptr_array_add (argv, arg);
+    }
+  if (!done (&rd) || kind > GBK_OP_RUN || here > 1)
+    return false;
+  /* RUN: a command that fits, run in a folder; nothing else carries one. */
+  if (kind == GBK_OP_RUN ? !gbk_proto_argv_fits (argv) : argc != 0)
     return false;
   bool creates = kind == GBK_OP_CREATE_FILE || kind == GBK_OP_CREATE_FOLDER;
-  bool needs_dest = kind == GBK_OP_COPY || kind == GBK_OP_MOVE || kind == GBK_OP_UPLOAD || creates;
+  bool needs_dest = kind == GBK_OP_COPY || kind == GBK_OP_MOVE || kind == GBK_OP_UPLOAD || creates
+                    || kind == GBK_OP_RUN;
   bool needs_name = kind == GBK_OP_RENAME || creates;
   /* Only copies, moves and uploads read the asking machine's files. */
   bool may_read_here = kind == GBK_OP_COPY || kind == GBK_OP_MOVE || kind == GBK_OP_UPLOAD;
@@ -1211,6 +1259,7 @@ gbk_proto_get_job (const GbkFrame *f, GbkJobRequest *r)
   r->base = base;
   r->name = needs_name ? g_steal_pointer (&name) : nullptr;
   r->rwx = rwx;
+  r->argv = kind == GBK_OP_RUN ? g_steal_pointer (&argv) : nullptr;
   return true;
 }
 

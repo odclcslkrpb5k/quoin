@@ -16,6 +16,9 @@ typedef struct
   char **types; /* MIME patterns (e.g. image/png, image/<any>, or a lone star); may be empty */
   bool directories; /* also offered for folders */
   GbkCommand *command; /* placeholders: d f F */
+  /* For files on another machine, run there (no display there, so not a GUI program);
+   * nullptr: the action isn't offered for them. Placeholders: d f F, as paths there. */
+  GbkCommand *remote_command;
 } GbkAction;
 
 typedef struct
