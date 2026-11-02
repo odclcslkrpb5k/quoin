@@ -187,6 +187,168 @@ test_info (void)
   g_assert_cmpint (got->btime_ns, ==, 4);
 }
 
+/* Git details ride on INFO, and are checked like everything else. */
+static void
+test_info_git (void)
+{
+  char branch[] = "main ↑1", hash[] = "1a2b3c4", author[] = "Test", subject[] = "first";
+  GbkFileInfo in = { .mode = 0100644 };
+  in.git = (GbkGitFileInfo) {
+    .known = true,
+    .state = GBK_GIT_MODIFIED,
+    .branch = branch,
+    .commit = { .hash = hash, .author = author, .time = 1700000000, .subject = subject }
+  };
+  g_autoptr (GByteArray) out = g_byte_array_new ();
+  gbk_proto_put_info (out, 3, &in);
+  g_autoptr (GArray) keep = nullptr;
+  g_autoptr (GbkFileInfo) got = gbk_proto_get_info (only_frame (out, &keep));
+  g_assert_nonnull (got);
+  g_assert_true (got->git.known);
+  g_assert_null (got->git.error);
+  g_assert_cmpint (got->git.state, ==, GBK_GIT_MODIFIED);
+  g_assert_cmpstr (got->git.branch, ==, "main ↑1");
+  g_assert_cmpstr (got->git.commit.hash, ==, "1a2b3c4");
+  g_assert_cmpint (got->git.commit.time, ==, 1700000000);
+  g_assert_cmpstr (got->git.commit.subject, ==, "first");
+
+  char why[] = "git took more than 5 s";
+  GbkFileInfo failed = { .mode = 0100644 };
+  failed.git = (GbkGitFileInfo) { .known = true, .error = why };
+  g_autoptr (GByteArray) out2 = g_byte_array_new ();
+  gbk_proto_put_info (out2, 3, &failed);
+  g_autoptr (GArray) keep2 = nullptr;
+  g_autoptr (GbkFileInfo) got2 = gbk_proto_get_info (only_frame (out2, &keep2));
+  g_assert_nonnull (got2);
+  g_assert_cmpstr (got2->git.error, ==, why);
+  g_assert_null (got2->git.branch);
+
+  /* A state out of range, or both an error and a commit, is refused. */
+  GbkFileInfo plain = { .mode = 0100644 };
+  g_autoptr (GByteArray) base = g_byte_array_new ();
+  gbk_proto_put_info (base, 3, &plain);
+  g_autoptr (GArray) frames = frames_of (base);
+  const GbkFrame *bf = &g_array_index (frames, GbkFrame, 0);
+  const uint8_t tails[][2] = { { 0, GBK_GIT_N_STATES }, { 3, 0 } };
+  for (size_t i = 0; i < G_N_ELEMENTS (tails); i++)
+    {
+      g_autoptr (GByteArray) p = g_byte_array_new ();
+      g_byte_array_append (p, bf->payload, (guint) bf->len);
+      p->data[0] |= 1 << 6;                       /* INFO_HAS_GIT */
+      g_byte_array_append (p, tails[i], 2);       /* flags, state (and nothing more) */
+      GbkFrame f = { GBK_MSG_INFO, 3, p->data, p->len };
+      g_autoptr (GbkFileInfo) bad = gbk_proto_get_info (&f);
+      g_assert_null (bad);
+    }
+}
+
+static GbkGitResult *
+git_result_of (const GByteArray *out, guint *pieces)
+{
+  g_autoptr (GArray) frames = frames_of (out);
+  *pieces = frames->len;
+  GbkGitResult *all = nullptr;
+  for (guint i = 0; i < frames->len; i++)
+    {
+      bool more;
+      GbkGitResult *g = gbk_proto_get_git (&g_array_index (frames, GbkFrame, i), &more);
+      g_assert_nonnull (g);
+      g_assert_true (more == (i + 1 < frames->len));
+      if (all == nullptr)
+        all = g;
+      else
+        {
+          GHashTableIter it;
+          void *name, *state;
+          g_hash_table_iter_init (&it, g->names);
+          while (g_hash_table_iter_next (&it, &name, &state))
+            g_hash_table_insert (all->names, g_strdup (name), state);
+          gbk_git_result_free (g);
+        }
+    }
+  if (all == nullptr)
+    gbk_fatal ("no GIT frames");
+  return all;
+}
+
+/* A folder's git status: small in one frame, huge in several under the cap. */
+static void
+test_git_round_trip (void)
+{
+  g_autoptr (GbkGitResult) in = gbk_git_result_new (true);
+  in->summary = g_strdup ("main · 2 modified");
+  in->upstream = g_strdup ("origin/main");
+  in->inherit = GBK_GIT_NONE;
+  g_hash_table_insert (in->names, g_strdup ("a.c"), GUINT_TO_POINTER (GBK_GIT_MODIFIED));
+  g_hash_table_insert (in->names, g_strdup ("b"), GUINT_TO_POINTER (GBK_GIT_IGNORED));
+  g_autoptr (GByteArray) out = g_byte_array_new ();
+  gbk_proto_put_git (out, 5, in);
+  guint pieces;
+  g_autoptr (GbkGitResult) got = git_result_of (out, &pieces);
+  g_assert_cmpuint (pieces, ==, 1);
+  g_assert_true (got->repo);
+  g_assert_cmpstr (got->summary, ==, "main · 2 modified");
+  g_assert_cmpstr (got->upstream, ==, "origin/main");
+  g_assert_null (got->error);
+  g_assert_cmpint (gbk_git_state_in (got->names, "a.c", GBK_GIT_NONE), ==, GBK_GIT_MODIFIED);
+  g_assert_cmpint (gbk_git_state_in (got->names, "b", GBK_GIT_NONE), ==, GBK_GIT_IGNORED);
+
+  g_autoptr (GbkGitResult) big = gbk_git_result_new (true);
+  big->inherit = GBK_GIT_UNTRACKED;
+  for (int i = 0; i < 20000; i++)
+    {
+      char name[256];
+      memset (name, 'n', 200);
+      g_snprintf (name + 200, 56, "%d", i);
+      g_hash_table_insert (big->names, g_strdup (name), GUINT_TO_POINTER (GBK_GIT_ADDED));
+    }
+  g_autoptr (GByteArray) bout = g_byte_array_new ();
+  gbk_proto_put_git (bout, 5, big);
+  g_autoptr (GbkGitResult) bgot = git_result_of (bout, &pieces);
+  g_assert_cmpuint (pieces, >, 1);
+  g_assert_cmpuint (g_hash_table_size (bgot->names), ==, 20000);
+  g_assert_cmpint (bgot->inherit, ==, GBK_GIT_UNTRACKED);
+
+  /* Outside a work tree: nothing else may be said. */
+  g_autoptr (GbkGitResult) none = gbk_git_result_new (false);
+  g_autoptr (GByteArray) nout = g_byte_array_new ();
+  gbk_proto_put_git (nout, 5, none);
+  g_autoptr (GbkGitResult) ngot = git_result_of (nout, &pieces);
+  g_assert_false (ngot->repo);
+}
+
+/* A hostile server's git status: each refused. */
+static void
+test_git_refused (void)
+{
+  struct
+  {
+    const char *what;
+    uint8_t bytes[16];
+    size_t len;
+  } cases[] = {
+    { "unknown flag", { 0x80, 0, 0, 0, 0, 0 }, 6 },
+    { "inherit out of range", { 0x04, GBK_GIT_N_STATES, 0, 0, 0, 0 }, 6 },
+    { "not a repo, yet inherits", { 0x00, GBK_GIT_UNTRACKED, 0, 0, 0, 0 }, 6 },
+    { "a name with a slash", { 0x04, 0, 1, 0, 0, 0, 3, 0, 'a', '/', 'b', GBK_GIT_ADDED }, 12 },
+    { "unchanged listed", { 0x04, 0, 1, 0, 0, 0, 1, 0, 'a', GBK_GIT_NONE }, 10 },
+    { "state out of range", { 0x04, 0, 1, 0, 0, 0, 1, 0, 'a', GBK_GIT_N_STATES }, 10 },
+    { "the same name twice",
+      { 0x04, 0, 2, 0, 0, 0, 1, 0, 'a', GBK_GIT_ADDED, 1, 0, 'a', GBK_GIT_ADDED },
+      14 },
+    { "trailing bytes", { 0x04, 0, 0, 0, 0, 0, 9 }, 7 },
+    { "short", { 0x04, 0, 1, 0 }, 4 },
+  };
+  for (size_t i = 0; i < G_N_ELEMENTS (cases); i++)
+    {
+      GbkFrame f = { GBK_MSG_GIT, 5, cases[i].bytes, cases[i].len };
+      bool more;
+      g_autoptr (GbkGitResult) g = gbk_proto_get_git (&f, &more);
+      if (g != nullptr)
+        gbk_fatal ("accepted: %s", cases[i].what);
+    }
+}
+
 /* Apply every SCAN frame in `out` to `m`. */
 static void
 apply_all (GbkDirModel *m, const GByteArray *out)
@@ -621,6 +783,9 @@ main (int argc, char **argv)
   g_test_add_func ("/proto/framing", test_framing);
   g_test_add_func ("/proto/hello-path-failed", test_hello_path_failed);
   g_test_add_func ("/proto/info", test_info);
+  g_test_add_func ("/proto/info-git", test_info_git);
+  g_test_add_func ("/proto/git-round-trip", test_git_round_trip);
+  g_test_add_func ("/proto/git-refused", test_git_refused);
   g_test_add_func ("/proto/scan-round-trip", test_scan_round_trip);
   g_test_add_func ("/proto/scan-split", test_scan_split);
   g_test_add_func ("/proto/scan-refused", test_scan_refused);

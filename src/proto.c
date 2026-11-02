@@ -38,9 +38,25 @@ enum : uint8_t
   INFO_HAS_OWNER = 1 << 3,
   INFO_HAS_GROUP = 1 << 4,
   INFO_HAS_TARGET = 1 << 5,
+  INFO_HAS_GIT = 1 << 6,
   INFO_FLAGS = INFO_SYMLINK | INFO_DANGLING | INFO_HAS_BTIME | INFO_HAS_OWNER | INFO_HAS_GROUP
-               | INFO_HAS_TARGET,
+               | INFO_HAS_TARGET | INFO_HAS_GIT,
 };
+
+enum : uint8_t
+{
+  GIT_ERROR = 1 << 0,     /* INFO: git failed; GIT: also */
+  GIT_COMMIT = 1 << 1,    /* INFO: the last commit follows */
+  GIT_INFO_FLAGS = GIT_ERROR | GIT_COMMIT,
+  GIT_REPO = 1 << 2,      /* GIT: in a work tree */
+  GIT_SUMMARY = 1 << 3,   /* GIT: a summary follows */
+  GIT_UPSTREAM = 1 << 4,  /* GIT: an upstream follows */
+  GIT_MORE = 1 << 5,      /* GIT: more pieces follow */
+  GIT_FLAGS = GIT_ERROR | GIT_REPO | GIT_SUMMARY | GIT_UPSTREAM | GIT_MORE,
+};
+
+/* Latest commit time accepted: the year 9999 (shown as a date; no overflow in ns). */
+#define GIT_TIME_MAX INT64_C (253402300799)
 
 void
 gbk_hello_clear (GbkHello *h)
@@ -187,6 +203,28 @@ gbk_proto_put_failed (GByteArray *out, uint64_t channel, const GError *error)
   end_frame (out, f);
 }
 
+/* Git's part of the details: why git failed, or the state, branch and last commit. */
+static void
+put_git_info (GByteArray *out, const GbkGitFileInfo *g)
+{
+  bool commit = g->error == nullptr && g->commit.hash != nullptr;
+  put_u8 (out, (g->error != nullptr ? GIT_ERROR : 0) | (commit ? GIT_COMMIT : 0));
+  if (g->error != nullptr)
+    {
+      put_message (out, g->error);
+      return;
+    }
+  put_u8 (out, (uint8_t) g->state);
+  put_message (out, g->branch);
+  if (commit)
+    {
+      put_message (out, g->commit.hash);
+      put_message (out, g->commit.author);
+      put_i64 (out, g->commit.time);
+      put_message (out, g->commit.subject);
+    }
+}
+
 void
 gbk_proto_put_info (GByteArray *out, uint64_t channel, const GbkFileInfo *info)
 {
@@ -195,7 +233,8 @@ gbk_proto_put_info (GByteArray *out, uint64_t channel, const GbkFileInfo *info)
                   | (info->has_btime ? INFO_HAS_BTIME : 0)
                   | (info->owner != nullptr ? INFO_HAS_OWNER : 0)
                   | (info->group != nullptr ? INFO_HAS_GROUP : 0)
-                  | (info->link_target != nullptr ? INFO_HAS_TARGET : 0);
+                  | (info->link_target != nullptr ? INFO_HAS_TARGET : 0)
+                  | (info->git.known ? INFO_HAS_GIT : 0);
   put_u8 (out, flags);
   put_u32 (out, info->mode);
   put_u64 (out, info->size);
@@ -211,7 +250,59 @@ gbk_proto_put_info (GByteArray *out, uint64_t channel, const GbkFileInfo *info)
     put_str16 (out, info->group, USER_NAME_MAX);
   if (info->link_target != nullptr)
     put_str16 (out, info->link_target, PATH_MAX_BYTES);
+  if (info->git.known)
+    put_git_info (out, &info->git);
   end_frame (out, f);
+}
+
+/* GIT: the fixed part, then each piece's names, as many as fit. */
+static void
+put_git_piece (GByteArray *out, uint64_t channel, const GbkGitResult *r, const GPtrArray *names,
+               guint n0, guint n1, bool more)
+{
+  size_t f = begin_frame (out, GBK_MSG_GIT, channel);
+  put_u8 (out, (r->repo ? GIT_REPO : 0) | (r->error != nullptr ? GIT_ERROR : 0)
+                   | (r->summary != nullptr ? GIT_SUMMARY : 0)
+                   | (r->upstream != nullptr ? GIT_UPSTREAM : 0) | (more ? GIT_MORE : 0));
+  put_u8 (out, (uint8_t) r->inherit);
+  if (r->error != nullptr)
+    put_message (out, r->error);
+  if (r->summary != nullptr)
+    put_message (out, r->summary);
+  if (r->upstream != nullptr)
+    put_message (out, r->upstream);
+  put_u32 (out, n1 - n0);
+  for (guint i = n0; i < n1; i++)
+    {
+      const char *name = g_ptr_array_index (names, i);
+      put_str16 (out, name, NAME_MAX_BYTES);
+      put_u8 (out, (uint8_t) gbk_git_state_in (r->names, name, GBK_GIT_NONE));
+    }
+  end_frame (out, f);
+}
+
+void
+gbk_proto_put_git (GByteArray *out, uint64_t channel, const GbkGitResult *r)
+{
+  g_autoptr (GPtrArray) names = g_hash_table_get_keys_as_ptr_array (r->names);
+  /* The fixed part is at most three messages and a few bytes: the rest is for names. */
+  const size_t budget = GBK_PROTO_FRAME_MAX - HEADER_BODY - 2u - 3u * (2u + MESSAGE_MAX) - 4u;
+  guint i = 0;
+  do
+    {
+      guint n0 = i;
+      size_t used = 0;
+      while (i < names->len)
+        {
+          size_t need = 2u + strlen (g_ptr_array_index (names, i)) + 1u;
+          if (used + need > budget)
+            break;
+          used += need;
+          i++;
+        }
+      put_git_piece (out, channel, r, names, n0, i, i < names->len);
+    }
+  while (i < names->len);
 }
 
 static size_t
@@ -598,7 +689,8 @@ known_type (uint8_t t)
     case GBK_MSG_ANSWER:
     case GBK_MSG_RESOLVE:
     case GBK_MSG_RESOLVED:
-    case GBK_MSG_UPLOADED: return true;
+    case GBK_MSG_UPLOADED:
+    case GBK_MSG_GIT: return true;
     default: return false;
     }
 }
@@ -842,6 +934,43 @@ get_user_name (Reader *r)
   return raw != nullptr ? g_utf8_make_valid (raw, -1) : nullptr;
 }
 
+/* Text for showing (a message, a branch, a commit's subject): made valid UTF-8. */
+static char *
+get_message (Reader *r)
+{
+  g_autofree char *raw = get_str (r, MESSAGE_MAX);
+  return raw != nullptr ? g_utf8_make_valid (raw, -1) : nullptr;
+}
+
+[[nodiscard]] static bool
+get_git_info (Reader *r, GbkGitFileInfo *g)
+{
+  uint8_t flags = get_u8 (r);
+  if (!r->ok || (flags & ~GIT_INFO_FLAGS) != 0 || flags == (GIT_ERROR | GIT_COMMIT))
+    return false;
+  g->known = true;
+  if (flags & GIT_ERROR)
+    {
+      g->error = get_message (r);
+      return r->ok;
+    }
+  uint8_t state = get_u8 (r);
+  if (state >= GBK_GIT_N_STATES)
+    return false;
+  g->state = (GbkGitState) state;
+  g->branch = get_message (r);
+  if (flags & GIT_COMMIT)
+    {
+      g->commit.hash = get_message (r);
+      g->commit.author = get_message (r);
+      g->commit.time = get_i64 (r);
+      g->commit.subject = get_message (r);
+      if (g->commit.time < 0 || g->commit.time > GIT_TIME_MAX)
+        return false;
+    }
+  return r->ok;
+}
+
 GbkFileInfo *
 gbk_proto_get_info (const GbkFrame *f)
 {
@@ -867,9 +996,50 @@ gbk_proto_get_info (const GbkFrame *f)
     info->group = get_user_name (&r);
   if (flags & INFO_HAS_TARGET)
     info->link_target = get_str (&r, PATH_MAX_BYTES);
+  if ((flags & INFO_HAS_GIT) && !get_git_info (&r, &info->git))
+    return nullptr;
   if (!done (&r) || (flags & ~INFO_FLAGS) != 0)
     return nullptr;
   return g_steal_pointer (&info);
+}
+
+GbkGitResult *
+gbk_proto_get_git (const GbkFrame *f, bool *more)
+{
+  if (f->type != GBK_MSG_GIT)
+    return nullptr;
+  Reader r = reader (f);
+  uint8_t flags = get_u8 (&r);
+  uint8_t inherit = get_u8 (&r);
+  if (!r.ok || (flags & ~GIT_FLAGS) != 0 || inherit >= GBK_GIT_N_STATES)
+    return nullptr;
+  g_autoptr (GbkGitResult) g = gbk_git_result_new ((flags & GIT_REPO) != 0);
+  g->inherit = (GbkGitState) inherit;
+  if (flags & GIT_ERROR)
+    g->error = get_message (&r);
+  if (flags & GIT_SUMMARY)
+    g->summary = get_message (&r);
+  if (flags & GIT_UPSTREAM)
+    g->upstream = get_message (&r);
+  uint32_t n = get_u32 (&r);
+  for (uint32_t i = 0; r.ok && i < n; i++)
+    {
+      size_t len;
+      const char *name = get_bytes (&r, NAME_MAX_BYTES, &len);
+      uint8_t state = get_u8 (&r);
+      if (name == nullptr || !gbk_entry_name_valid (name, len) || state == GBK_GIT_NONE
+          || state >= GBK_GIT_N_STATES)
+        return nullptr;
+      g_autofree char *key = g_strndup (name, len);
+      if (g_hash_table_contains (g->names, key))
+        return nullptr;
+      g_hash_table_insert (g->names, g_steal_pointer (&key), GUINT_TO_POINTER (state));
+    }
+  /* Nothing but "not in a work tree" outside one. */
+  if (!done (&r) || (!g->repo && (flags != 0 || n > 0 || inherit != GBK_GIT_NONE)))
+    return nullptr;
+  *more = (flags & GIT_MORE) != 0;
+  return g_steal_pointer (&g);
 }
 
 static GbkEntry *

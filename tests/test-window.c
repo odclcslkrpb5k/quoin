@@ -6,6 +6,7 @@
 #include "cliptext.h"
 #include "job.h"
 #include "props.h"
+#include "testgit.h"
 #include "window.h"
 
 /* Windows and tabs on local folders, by path. */
@@ -1679,39 +1680,6 @@ test_close_with_selections (void)
 }
 
 /* ---- git ---- */
-
-static void
-git_in (const char *dir, ...)
-{
-  g_autoptr (GPtrArray) argv = g_ptr_array_new_with_free_func (g_free);
-  const char *const fixed[] = { "git",
-                                "-c",
-                                "user.name=Test",
-                                "-c",
-                                "user.email=test@example.com",
-                                "-c",
-                                "init.defaultBranch=main",
-                                "-c",
-                                "commit.gpgsign=false" };
-  for (size_t i = 0; i < G_N_ELEMENTS (fixed); i++)
-    g_ptr_array_add (argv, g_strdup (fixed[i]));
-  va_list ap;
-  va_start (ap, dir);
-  const char *arg;
-  while ((arg = va_arg (ap, const char *)) != nullptr)
-    g_ptr_array_add (argv, g_strdup (arg));
-  va_end (ap);
-  g_ptr_array_add (argv, nullptr);
-  int status;
-  g_autoptr (GError) error = nullptr;
-  g_autofree char *err = nullptr;
-  if (!g_spawn_sync (dir, (char **) argv->pdata, nullptr, G_SPAWN_SEARCH_PATH, nullptr, nullptr,
-                     nullptr, &err, &status, &error)
-      || !g_spawn_check_wait_status (status, nullptr))
-    gbk_fatal ("git failed: %s", err != nullptr ? err : error->message);
-}
-
-#define GIT(dir, ...) git_in (dir, __VA_ARGS__, (const char *) nullptr)
 
 typedef struct
 {

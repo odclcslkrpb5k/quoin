@@ -2,6 +2,7 @@
  * with the git program (finding them, every state, the live watcher). */
 #include "gitwatch.h"
 #include "inotify-hub.h"
+#include "testgit.h"
 
 /* ---- fixed output ---- */
 
@@ -189,42 +190,6 @@ test_fs_rules (void)
 static char *tmp;
 
 static void
-git_in (bool must_work, const char *dir, ...)
-{
-  g_autoptr (GPtrArray) argv = g_ptr_array_new_with_free_func (g_free);
-  const char *const fixed[] = { "git",
-                                "-c",
-                                "user.name=Test",
-                                "-c",
-                                "user.email=test@example.com",
-                                "-c",
-                                "init.defaultBranch=main",
-                                "-c",
-                                "commit.gpgsign=false",
-                                "-c",
-                                "advice.detachedHead=false" };
-  for (size_t i = 0; i < G_N_ELEMENTS (fixed); i++)
-    g_ptr_array_add (argv, g_strdup (fixed[i]));
-  va_list ap;
-  va_start (ap, dir);
-  const char *arg;
-  while ((arg = va_arg (ap, const char *)) != nullptr)
-    g_ptr_array_add (argv, g_strdup (arg));
-  va_end (ap);
-  g_ptr_array_add (argv, nullptr);
-  int status;
-  g_autoptr (GError) error = nullptr;
-  g_autofree char *out = nullptr, *err = nullptr;
-  if (!g_spawn_sync (dir, (char **) argv->pdata, nullptr, G_SPAWN_SEARCH_PATH, nullptr, nullptr,
-                     &out, &err, &status, &error))
-    gbk_fatal ("git: %s", error->message);
-  if (must_work && !g_spawn_check_wait_status (status, nullptr))
-    gbk_fatal ("git %s failed: %s", (const char *) g_ptr_array_index (argv, 11), err);
-}
-
-#define GIT(dir, ...) git_in (true, dir, __VA_ARGS__, (const char *) nullptr)
-
-static void
 write_file (const char *dir, const char *name, const char *text)
 {
   g_autofree char *path = g_build_filename (dir, name, nullptr);
@@ -257,7 +222,7 @@ make_repo (const char *name)
   GIT (top, "checkout", "-q", "main");
   write_file (top, "conflict.txt", "ours\n");
   GIT (top, "commit", "-q", "-am", "ours");
-  git_in (false, top, "merge", "-q", "other", (const char *) nullptr);   /* conflicts */
+  GIT_MAY_FAIL (top, "merge", "-q", "other");   /* conflicts */
   write_file (top, "modified.txt", "two\n");
   write_file (top, "staged.txt", "two\n");
   GIT (top, "add", "staged.txt");

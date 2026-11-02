@@ -31,6 +31,15 @@ gbk_git_watch_runs (void)
   return g_atomic_int_get (&runs);
 }
 
+GbkGitResult *
+gbk_git_result_new (bool repo)
+{
+  GbkGitResult *r = g_new0 (GbkGitResult, 1);
+  r->repo = repo;
+  r->names = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, nullptr);
+  return r;
+}
+
 void
 gbk_git_result_free (GbkGitResult *r)
 {
@@ -46,10 +55,7 @@ gbk_git_result_free (GbkGitResult *r)
 static GbkGitResult *
 result_new (bool repo)
 {
-  GbkGitResult *r = g_new0 (GbkGitResult, 1);
-  r->repo = repo;
-  r->names = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, nullptr);
-  return r;
+  return gbk_git_result_new (repo);
 }
 
 static void
@@ -108,17 +114,21 @@ look (const GbkGitWatch *w, const char *dir, const char *top)
   g_autoptr (GError) error = nullptr;
   g_autoptr (GbkGitStatus) s
       = gbk_git_status (top, nullptr, w->cancel_fd, GBK_GIT_TIMEOUT_MS, &error);
-  if (s == nullptr)
+  if (s == nullptr && g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))
     {
       /* No git on this machine: nothing to show, rather than the same complaint everywhere. */
-      r->repo = !g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+      gbk_git_result_free (r);
+      return result_new (false);
+    }
+  if (s == nullptr)
+    {
       r->error = g_strdup (error->message);
       return r;
     }
   g_hash_table_unref (r->names);
   r->names = gbk_git_folder_states (s, gbk_git_relative (dir, top), &r->inherit);
   r->summary = gbk_git_summary (s);
-  r->upstream = g_strdup (s->upstream);
+  r->upstream = s->upstream != nullptr ? g_utf8_make_valid (s->upstream, -1) : nullptr;
   return r;
 }
 

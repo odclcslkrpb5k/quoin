@@ -14,12 +14,13 @@
  * and the caller ends the connection; nothing is guessed. */
 #pragma once
 #include "fileops.h"
+#include "gitwatch.h"
 #include "scanner.h"
 
 #define GBK_PROTO_MAGIC "QUOIN-SERVE"
 /* Wire format version: both ends are always the same build (quoin-serve is pushed by the
  * laptop), so this only has to change with the format, and a mismatch is refused. */
-#define GBK_PROTO_VERSION 3
+#define GBK_PROTO_VERSION 4
 /* Largest frame body (type + channel + payload). */
 #define GBK_PROTO_FRAME_MAX (1u << 20)
 #define GBK_PROTO_MAGIC_MAX 256         /* longest acceptable magic line */
@@ -43,6 +44,8 @@ typedef enum : uint8_t
   GBK_MSG_DONE = 14,      /* a JOB finished (its failure is a FAILED instead) */
   GBK_MSG_RESOLVED = 15,  /* answer to RESOLVE: the path, links resolved */
   GBK_MSG_UPLOADED = 16,  /* an UPLOAD job's new file: its state (before DONE) */
+  GBK_MSG_GIT = 17,       /* a WATCH's git status (GbkGitResult; a big one comes as several,
+                     * all but the last marked `more`) */
   /* client -> server */
   GBK_MSG_WATCH = 64,     /* start watching a folder (path) on this channel */
   GBK_MSG_UNWATCH = 65,   /* stop it */
@@ -156,6 +159,8 @@ void gbk_proto_put_path (GByteArray *out, GbkMsgType type, uint64_t channel, con
 void gbk_proto_put_empty (GByteArray *out, GbkMsgType type, uint64_t channel);
 void gbk_proto_put_failed (GByteArray *out, uint64_t channel, const GError *error);
 void gbk_proto_put_info (GByteArray *out, uint64_t channel, const GbkFileInfo *info);
+/* One or more GIT frames, each under GBK_PROTO_FRAME_MAX. */
+void gbk_proto_put_git (GByteArray *out, uint64_t channel, const GbkGitResult *r);
 /* One or more SCAN frames, each under GBK_PROTO_FRAME_MAX. A split snapshot chunk keeps
  * `first` on its first piece and `last` (and free space) on its last; a split delta sends
  * its removals before its additions, as the model applies them. */
@@ -224,6 +229,9 @@ void gbk_proto_put_credit (GByteArray *out, uint64_t channel, uint32_t bytes);
 /* The failure as a G_IO_ERROR in *error (its message made valid UTF-8). */
 [[nodiscard]] bool gbk_proto_get_failed (const GbkFrame *f, GError **error);
 [[nodiscard]] GbkFileInfo *gbk_proto_get_info (const GbkFrame *f);
+/* GIT: one piece (names valid filenames, states in range, text valid UTF-8); *more: pieces
+ * follow, whose names add to this one's. */
+[[nodiscard]] GbkGitResult *gbk_proto_get_git (const GbkFrame *f, bool *more);
 /* Entries are built here with the caller's type table, so the remote never decides types,
  * and every name passes gbk_entry_name_valid. */
 [[nodiscard]] GbkScanMsg *gbk_proto_get_scan (const GbkFrame *f, const GbkTypeTable *types);

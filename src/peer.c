@@ -216,6 +216,7 @@ gbk_asker_answer_type (GbkMsgType type)
     case GBK_MSG_RESOLVE:
     case GBK_MSG_HELLO:
     case GBK_MSG_SCAN:
+    case GBK_MSG_GIT:
     case GBK_MSG_INFO:
     case GBK_MSG_PONG:
     case GBK_MSG_WATCH:
@@ -778,6 +779,7 @@ job_frame (const Call *call, const GbkFrame *f, const GbkOpsHooks *h, Outcome *o
       return true;
     case GBK_MSG_HELLO:
     case GBK_MSG_SCAN:
+    case GBK_MSG_GIT:
     case GBK_MSG_INFO:
     case GBK_MSG_PONG:
     case GBK_MSG_LISTING:
@@ -1025,6 +1027,7 @@ gbk_answerer_takes (GbkMsgType type)
     case GBK_MSG_UPLOADED:
     case GBK_MSG_HELLO:
     case GBK_MSG_SCAN:
+    case GBK_MSG_GIT:
     case GBK_MSG_INFO:
     case GBK_MSG_FAILED:
     case GBK_MSG_PONG:
@@ -1771,6 +1774,7 @@ gbk_answerer_handle (GbkAnswerer *a, const GbkFrame *f)
       return true;
     case GBK_MSG_HELLO:
     case GBK_MSG_SCAN:
+    case GBK_MSG_GIT:
     case GBK_MSG_INFO:
     case GBK_MSG_FAILED:
     case GBK_MSG_PONG:
@@ -2244,6 +2248,7 @@ gbk_job_runner_handle (GbkJobRunner *r, const GbkFrame *f)
       return true;
     case GBK_MSG_HELLO:
     case GBK_MSG_SCAN:
+    case GBK_MSG_GIT:
     case GBK_MSG_INFO:
     case GBK_MSG_FAILED:
     case GBK_MSG_PONG:

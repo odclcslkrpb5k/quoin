@@ -63,6 +63,10 @@ typedef struct GbkConnWatch GbkConnWatch;
                                             GbkConnScanFn fn, void *data);
 /* Stop it and free it (also after the connection died). `fn` isn't called again. */
 void gbk_conn_unwatch (GbkConnWatch *w);
+/* The folder's git status (gitwatch.h; owned) whenever the other machine has a new one, to
+ * `fn` with the watch's data, on the main thread while the owner is alive. */
+typedef void (*GbkConnGitFn) (GbkGitResult *r, void *data);
+void gbk_conn_watch_git (GbkConnWatch *w, GbkConnGitFn fn);
 
 /* A file's details: `fn` is called exactly once, on the main thread, if `owner` is still
  * alive then: with the details, or with nullptr and why (a lost connection included). */

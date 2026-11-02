@@ -34,7 +34,15 @@ typedef struct
 {
   uint64_t channel;
   GbkScanner *scanner;
+  GbkGitWatch *git;       /* the folder's git status, sent on the same channel */
 } Watch;
+
+/* What a polled descriptor belongs to. */
+typedef struct
+{
+  uint64_t channel;
+  bool git;               /* the git watch's, not the scanner's */
+} Polled;
 
 typedef struct
 {
@@ -51,6 +59,7 @@ static void
 watch_free (Watch *w)
 {
   gbk_scanner_stop (w->scanner);
+  gbk_git_watch_stop (w->git);
   g_free (w);
 }
 
@@ -92,6 +101,7 @@ handle (Server *sv, const GbkFrame *f)
         Watch *w = g_new0 (Watch, 1);
         w->channel = f->channel;
         w->scanner = gbk_scanner_start (path, sv->types);
+        w->git = gbk_git_watch_start (path);
         g_hash_table_insert (sv->watches, &w->channel, w);
         break;
       }
@@ -114,6 +124,7 @@ handle (Server *sv, const GbkFrame *f)
     case GBK_MSG_FAILED: break;
     case GBK_MSG_HELLO:
     case GBK_MSG_SCAN:
+    case GBK_MSG_GIT:
     case GBK_MSG_INFO:
     case GBK_MSG_PONG:
     case GBK_MSG_QUESTION:
@@ -192,6 +203,8 @@ drain_scanner (Server *sv, Watch *w)
         return;
       gbk_proto_put_scan (gbk_outbox_begin (sv->out), w->channel, m);
       gbk_outbox_end (sv->out);
+      if (m->type == GBK_SCAN_DELTA)
+        gbk_git_watch_poke (w->git);     /* the folder changed: so may its git status */
       if (m->type == GBK_SCAN_ERROR || m->type == GBK_SCAN_GONE)
         {
           g_hash_table_remove (sv->watches, &w->channel);   /* final: frees `w` */
@@ -199,6 +212,16 @@ drain_scanner (Server *sv, Watch *w)
         }
     }
   gbk_scanner_rearm (w->scanner);        /* more waiting: come back next round */
+}
+
+static void
+drain_git (Server *sv, const Watch *w)
+{
+  g_autoptr (GbkGitResult) r = gbk_git_watch_take (w->git);
+  if (r == nullptr)
+    return;
+  gbk_proto_put_git (gbk_outbox_begin (sv->out), w->channel, r);
+  gbk_outbox_end (sv->out);
 }
 
 static void
@@ -270,8 +293,7 @@ serve (void)
   gbk_hello_clear (&hello);
 
   g_autoptr (GArray) fds = g_array_new (false, false, sizeof (struct pollfd));
-  g_autoptr (GArray) polled
-      = g_array_new (false, false, sizeof (uint64_t)); /* channels of fds[3..] */
+  g_autoptr (GArray) polled = g_array_new (false, false, sizeof (Polled)); /* of fds[3..] */
   for (;;)
     {
       g_array_set_size (fds, 0);
@@ -290,9 +312,14 @@ serve (void)
           g_hash_table_iter_init (&it, sv.watches);
           while (g_hash_table_iter_next (&it, nullptr, &w))
             {
-              struct pollfd p = { gbk_scanner_wake_fd (((Watch *) w)->scanner), POLLIN, 0 };
+              const Watch *watch = w;
+              struct pollfd p = { gbk_scanner_wake_fd (watch->scanner), POLLIN, 0 };
+              struct pollfd g = { gbk_git_watch_wake_fd (watch->git), POLLIN, 0 };
+              Polled ps = { watch->channel, false }, pg = { watch->channel, true };
               g_array_append_val (fds, p);
-              g_array_append_val (polled, ((Watch *) w)->channel);
+              g_array_append_val (polled, ps);
+              g_array_append_val (fds, g);
+              g_array_append_val (polled, pg);
             }
         }
       int64_t left_us = last_input + idle_us - g_get_monotonic_time ();
@@ -324,9 +351,11 @@ serve (void)
         {
           if (!(p[3 + i].revents & POLLIN))
             continue;
-          uint64_t channel = g_array_index (polled, uint64_t, i);
-          Watch *w = g_hash_table_lookup (sv.watches, &channel);
-          if (w != nullptr)
+          Polled pd = g_array_index (polled, Polled, i);
+          Watch *w = g_hash_table_lookup (sv.watches, &pd.channel);
+          if (w != nullptr && pd.git)
+            drain_git (&sv, w);
+          else if (w != nullptr)
             drain_scanner (&sv, w);
         }
       if (!write_output (&sv))

@@ -21,6 +21,8 @@ typedef struct
   GbkGitState inherit;  /* the state of anything not in `names` */
 } GbkGitResult;
 
+/* Empty: no names, nothing inherited, no text. */
+[[nodiscard]] GbkGitResult *gbk_git_result_new (bool repo);
 void gbk_git_result_free (GbkGitResult *r);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (GbkGitResult, gbk_git_result_free)
 

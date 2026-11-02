@@ -110,9 +110,12 @@ program that won't start. On anything else, [build from source](#building).
   commit that changed it. It follows git as you use it, in a terminal or anywhere else
   (commits, `git add`, checkouts, fetches) with no refresh. Quoin only *reads* status, by
   running the `git` program in the background: a slow repository never holds up the
-  folder. For safety it does this only in repositories you own on this machine's own
+  folder. For safety it does this only in repositories you own on that machine's own
   disks (not network shares, FUSE mounts or removable media), with git's fsmonitor
   turned off, since a repository's own settings can make `git status` run commands.
+  Folders on other machines (`ws1:`) show their git status too: git runs there, through
+  quoin-serve, and only the results travel. That machine needs git installed; without
+  it, nothing is shown.
 - **Properties** (right-click menu or Alt+Enter): dates (modified, accessed, changed,
   created), size, owner, group, link target, and read / write / execute permissions you can
   change with Apply. For files, the right-click menu also has an **Executable** check

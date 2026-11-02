@@ -8,6 +8,7 @@
 
 #include "entry.h"
 #include "loc.h"
+#include "gitwatch.h"
 #include "scanner.h"
 
 typedef uint64_t GbkHandle;
@@ -38,7 +39,8 @@ G_DECLARE_FINAL_TYPE (GbkDirModel, gbk_dir_model, GBK, DIR_MODEL, GObject)
 
 /* Signals:
  *   "changed"        the visible list or some entry changed
- *   "state-changed"  gbk_dir_model_state() changed */
+ *   "state-changed"  gbk_dir_model_state() changed
+ *   "git-changed"    gbk_dir_model_git() changed */
 [[nodiscard]] GbkDirModel *gbk_dir_model_new (GbkLoc *loc, GbkTypeTable *types);
 
 const GbkLoc *gbk_dir_model_loc (const GbkDirModel *m); /* nullptr when detached */
@@ -52,6 +54,10 @@ const char *gbk_dir_model_conn_error (const GbkDirModel *m);
 bool gbk_dir_model_needs_login (const GbkDirModel *m);
 /* Still connecting to the folder's machine. */
 bool gbk_dir_model_connecting (const GbkDirModel *m);
+/* Its git status (gitwatch.h), from this machine or the folder's own; nullptr until known. */
+const GbkGitResult *gbk_dir_model_git (const GbkDirModel *m);
+/* Look at the git status again soon (the window is back in use). */
+void gbk_dir_model_refresh_git (const GbkDirModel *m);
 /* Free space on the directory's filesystem, if known yet. */
 bool gbk_dir_model_free_space (const GbkDirModel *m, uint64_t *bytes);
 

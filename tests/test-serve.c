@@ -2,6 +2,7 @@
  * protocol, as the laptop will drive it over ssh. */
 #include "dirmodel.h"
 #include "proto.h"
+#include "testgit.h"
 
 static GbkTypeTable *types;
 static char *root;
@@ -174,8 +175,15 @@ scan_until (Server *s, uint64_t channel, GbkDirModel *m, bool (*done) (GbkDirMod
     {
       g_autoptr (GByteArray) keep = nullptr;
       GbkFrame f = next (s, &keep);
-      g_assert_cmpint (f.type, ==, GBK_MSG_SCAN);
       g_assert_cmpuint (f.channel, ==, channel);
+      if (f.type == GBK_MSG_GIT)
+        {
+          bool more;
+          g_autoptr (GbkGitResult) g = gbk_proto_get_git (&f, &more);   /* the watch's git */
+          g_assert_nonnull (g);
+          continue;
+        }
+      g_assert_cmpint (f.type, ==, GBK_MSG_SCAN);
       GbkScanMsg *msg = gbk_proto_get_scan (&f, types);
       g_assert_nonnull (msg);
       gbk_dir_model_apply_for_test (m, msg);
@@ -679,6 +687,76 @@ test_shell_at (void)
   g_assert_true (g_str_has_prefix (version, "quoin-serve " GBK_VERSION));
 }
 
+/* The next git status for `channel` (scan frames on the way are skipped). */
+static GbkGitResult *
+next_git (Server *s, uint64_t channel)
+{
+  for (;;)
+    {
+      g_autoptr (GByteArray) keep = nullptr;
+      GbkFrame f = next (s, &keep);
+      g_assert_cmpuint (f.channel, ==, channel);
+      if (f.type == GBK_MSG_SCAN)
+        continue;
+      g_assert_cmpint (f.type, ==, GBK_MSG_GIT);
+      bool more;
+      GbkGitResult *g = gbk_proto_get_git (&f, &more);
+      g_assert_nonnull (g);
+      g_assert_false (more);
+      return g;
+    }
+}
+
+/* A watched folder's git status comes with it, and follows git's own changes there. */
+static void
+test_git (void)
+{
+  put ("g/clean.txt", "c");
+  put ("g/changed.txt", "one");
+  g_autofree char *dir = in_root ("g");
+  GIT (dir, "init", "-q");
+  GIT (dir, "add", "-A");
+  GIT (dir, "commit", "-q", "-m", "first");
+  put ("g/changed.txt", "two");
+  put ("g/new.txt", "n");
+
+  Server *s = server_start ();
+  expect_hello (s);
+  send_path (s, GBK_MSG_WATCH, 1, dir);
+  g_autoptr (GbkGitResult) first = next_git (s, 1);
+  g_assert_true (first->repo);
+  g_assert_cmpstr (first->summary, ==, "main · 1 modified · 1 untracked");
+  g_assert_cmpint (gbk_git_state_in (first->names, "changed.txt", GBK_GIT_NONE), ==,
+                   GBK_GIT_MODIFIED);
+  g_assert_cmpint (gbk_git_state_in (first->names, "new.txt", GBK_GIT_NONE), ==, GBK_GIT_UNTRACKED);
+  GIT (dir, "add", "new.txt");
+  g_autoptr (GbkGitResult) staged = next_git (s, 1);
+  g_assert_cmpint (gbk_git_state_in (staged->names, "new.txt", GBK_GIT_NONE), ==, GBK_GIT_ADDED);
+
+  /* A file's details carry its git state and last commit. */
+  g_autofree char *changed = in_root ("g/changed.txt");
+  send_path (s, GBK_MSG_GET_INFO, 2, changed);
+  for (;;)
+    {
+      g_autoptr (GByteArray) keep = nullptr;
+      GbkFrame f = next (s, &keep);
+      if (f.channel == 1)
+        continue;                        /* more about the watch */
+      g_assert_cmpint (f.type, ==, GBK_MSG_INFO);
+      g_autoptr (GbkFileInfo) info = gbk_proto_get_info (&f);
+      g_assert_nonnull (info);
+      g_assert_true (info->git.known);
+      g_assert_cmpint (info->git.state, ==, GBK_GIT_MODIFIED);
+      g_assert_cmpstr (info->git.branch, ==, "main");
+      g_assert_cmpstr (info->git.commit.subject, ==, "first");
+      break;
+    }
+  close (s->in);
+  s->in = -1;
+  g_assert_cmpint (server_wait (s), ==, 0);
+  server_free (s);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -687,6 +765,7 @@ main (int argc, char **argv)
   types = gbk_type_builder_finish (gbk_type_builder_new ());
   g_test_init (&argc, &argv, nullptr);
   g_test_add_func ("/serve/watch", test_watch);
+  g_test_add_func ("/serve/git", test_git);
   g_test_add_func ("/serve/info-and-ping", test_info_and_ping);
   g_test_add_func ("/serve/protocol-errors", test_protocol_errors);
   g_test_add_func ("/serve/shell-at", test_shell_at);

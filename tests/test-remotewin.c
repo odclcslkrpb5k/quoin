@@ -11,6 +11,7 @@
 #include "job.h"
 #include "lifetime.h"
 #include "props.h"
+#include "testgit.h"
 #include "window.h"
 
 static GtkApplication *app;
@@ -1117,6 +1118,75 @@ test_properties (void)
   gtk_widget_destroy (GTK_WIDGET (w));
 }
 
+typedef struct
+{
+  GbkWindow *w;
+  const char *name;
+  GbkGitState state;
+} GitIs;
+
+static bool
+git_is (void *data)
+{
+  const GitIs *g = data;
+  GbkDirModel *m = model_of (g->w);
+  GbkHandle h = m != nullptr ? gbk_dir_model_find (m, g->name) : GBK_HANDLE_NONE;
+  return h != GBK_HANDLE_NONE && gbk_view_git_state (gbk_window_view (g->w), h) == g->state;
+}
+
+static bool
+git_text_is (void *data)
+{
+  const Named *n = data;
+  return g_str_equal (gbk_window_git (n->w), n->name);
+}
+
+/* A folder there in a git work tree: its states, the status bar and Properties, from git
+ * run on that machine; and they follow git used there. */
+static void
+test_git_there (void)
+{
+  put ("repo/clean.txt", "c");
+  put ("repo/changed.txt", "one");
+  g_autofree char *repo = g_build_filename (home, "repo", nullptr);
+  GIT (repo, "init", "-q");
+  GIT (repo, "add", "-A");
+  GIT (repo, "commit", "-q", "-m", "first");
+  put ("repo/changed.txt", "two");
+  put ("repo/new.txt", "n");
+
+  g_autoptr (GbkLoc) start = gbk_loc_new_local ("/tmp");
+  GbkWindow *w = gbk_window_new (app, ctx, start);
+  gtk_widget_show_all (GTK_WIDGET (w));
+  GbkAddress a;
+  g_assert_true (gbk_address_parse ("ws:repo", &a));
+  gbk_window_open_address (w, &a);
+  gbk_address_clear (&a);
+  At at = { w, "ws", repo };
+  g_assert_true (wait_until (remote_ready, &at));
+  GitIs changed = { w, "changed.txt", GBK_GIT_MODIFIED };
+  g_assert_true (wait_until (git_is, &changed));
+  GitIs fresh = { w, "new.txt", GBK_GIT_UNTRACKED };
+  g_assert_true (git_is (&fresh));
+  Named summary = { w, "main · 1 modified · 1 untracked" };
+  if (!wait_until (git_text_is, &summary))
+    gbk_fatal ("git status bar: \"%s\"", gbk_window_git (w));
+
+  GIT (repo, "add", "new.txt");
+  GitIs staged = { w, "new.txt", GBK_GIT_ADDED };
+  g_assert_true (wait_until (git_is, &staged));
+
+  g_autofree char *path = g_build_filename (repo, "changed.txt", nullptr);
+  g_autoptr (GbkLoc) loc = gbk_loc_new_remote ("ws", path);
+  GbkProps *p = gbk_props_new (GTK_WINDOW (w), loc, "text/plain");
+  g_assert_true (wait_until (props_loaded, p));
+  g_assert_cmpstr (gbk_props_value (p, "Git"), ==, "Changes not staged");
+  g_assert_cmpstr (gbk_props_value (p, "Branch"), ==, "main");
+  g_assert_nonnull (gbk_props_value (p, "Last commit"));
+  gtk_widget_destroy (GTK_WIDGET (p));
+  gtk_widget_destroy (GTK_WIDGET (w));
+}
+
 static pid_t
 server_pid (void)
 {
@@ -1568,6 +1638,7 @@ main (int argc, char **argv)
   g_test_add_func ("/remotewin/drag-and-drop", test_drag_and_drop);
   g_test_add_func ("/remotewin/between-machines", test_between_machines);
   g_test_add_func ("/remotewin/actions-there", test_actions_there);
+  g_test_add_func ("/remotewin/git-there", test_git_there);
   int status = g_test_run ();
 
   while (gtk_events_pending ())

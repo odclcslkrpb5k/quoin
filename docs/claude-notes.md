@@ -411,8 +411,15 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   conflict + linked worktree), test-window /window/git (pixel colours, live `git add`,
   props); mutation-checked: ignoring gitdir events, not drawing the colour. Fuzzing found
   "? x//" accepted (empty name in roll-up) in 20 s: seed crash-double-slash.
-  NEXT (user: "immediately after"): git status on other machines via quoin-serve (run
-  GbkGitWatch there, new proto messages; GbkFileInfo.git over the INFO message).
+  REMOTE (built 2026-11-01, proto v4): serve.c runs a GbkGitWatch beside each WATCH's
+  scanner (poked on DELTA), sends GBK_MSG_GIT on the watch channel (split by name budget,
+  GIT_MORE on all but the last; conn.c joins pieces per watch on the main thread).
+  INFO carries GbkFileInfo.git (INFO_HAS_GIT). Not-a-repo results carry nothing else (the
+  decoder refuses otherwise), so "git not installed" is repo=false WITHOUT an error.
+  GbkDirModel now owns git for both kinds ("git-changed", gbk_dir_model_git, local poke on
+  its own DELTAs); browser only displays. tests/testgit.h = the one git helper for tests.
+  Tests: test-proto git round trip/split/refused + info-git, test-serve /serve/git,
+  test-remotewin /remotewin/git-there (mutation: server never sending GIT fails it).
 - DEVICES (user, 2026-10-15: Thunar's sidebar Devices list, in the ☰ menu; user chose ONE
   "Devices" submenu, each device a submenu Open / Unmount / Eject|Safely Remove). devices.{h,c}
   (core, GIO only): GbkDevices per window wraps GVolumeMonitor (gvfs udisks2 if installed,

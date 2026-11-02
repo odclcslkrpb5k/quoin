@@ -43,6 +43,28 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
               }
             break;
           }
+        case GBK_MSG_GIT:
+          {
+            bool more;
+            g_autoptr (GbkGitResult) g = gbk_proto_get_git (&f, &more);
+            if (g != nullptr)
+              {
+                g_assert (g->inherit < GBK_GIT_N_STATES);
+                g_assert (g->repo
+                          || (g->error == nullptr && g->summary == nullptr
+                              && g_hash_table_size (g->names) == 0));
+                g_assert (g->summary == nullptr || g_utf8_validate (g->summary, -1, nullptr));
+                GHashTableIter it;
+                void *name, *state;
+                g_hash_table_iter_init (&it, g->names);
+                while (g_hash_table_iter_next (&it, &name, &state))
+                  {
+                    g_assert (gbk_entry_name_valid (name, strlen (name)));
+                    g_assert (gbk_git_state_in (g->names, name, GBK_GIT_NONE) > GBK_GIT_NONE);
+                  }
+              }
+            break;
+          }
         case GBK_MSG_HELLO:
           {
             GbkHello h;
@@ -58,6 +80,13 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
             g_autoptr (GbkFileInfo) info = gbk_proto_get_info (&f);
             if (info != nullptr && info->owner != nullptr)
               g_assert (g_utf8_validate (info->owner, -1, nullptr));
+            if (info != nullptr && info->git.known && info->git.error == nullptr)
+              {
+                g_assert (info->git.state < GBK_GIT_N_STATES);
+                g_assert (g_utf8_validate (info->git.branch, -1, nullptr));
+                g_assert (info->git.commit.time >= 0
+                          && info->git.commit.time <= INT64_C (253402300799));
+              }
             break;
           }
         case GBK_MSG_FAILED:

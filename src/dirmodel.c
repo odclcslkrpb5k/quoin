@@ -32,6 +32,9 @@ struct _GbkDirModel
   GbkTypeTable *types;
   GbkScanner *scanner;   /* nullptr once finished, failed, or detached */
   guint watch_id;
+  GbkGitWatch *git;      /* a local folder's git status */
+  guint git_watch_id;
+  GbkGitResult *git_result; /* the newest, from either kind of folder; nullptr: none yet */
 
   /* A folder on another machine: its listing comes through a connection instead. */
   GbkRemote *remote;     /* referenced; nullptr for a local folder */
@@ -72,6 +75,7 @@ enum
 {
   SIGNAL_CHANGED,
   SIGNAL_STATE_CHANGED,
+  SIGNAL_GIT_CHANGED,
   N_SIGNALS
 };
 static guint signals[N_SIGNALS];
@@ -443,6 +447,8 @@ handle_message (GbkDirModel *m, GbkScanMsg *msg, bool *changed, GbkDirState *nex
 {
   *changed |= apply (m, msg);
   *next = state_after (msg, *next);
+  if (msg->type == GBK_SCAN_DELTA && m->git != nullptr)
+    gbk_git_watch_poke (m->git);         /* the folder changed: so may its git status */
   bool final = msg->type == GBK_SCAN_ERROR || msg->type == GBK_SCAN_GONE;
   gbk_scan_msg_free (msg);
   if (final)
@@ -480,6 +486,45 @@ on_scanner_wake (int fd G_GNUC_UNUSED, GIOCondition condition G_GNUC_UNUSED, voi
   return alive;
 }
 
+/* ---- git ---- */
+
+static void
+set_git (GbkDirModel *m, GbkGitResult *r)
+{
+  gbk_git_result_free (m->git_result);
+  m->git_result = r;
+  g_signal_emit (m, signals[SIGNAL_GIT_CHANGED], 0);
+}
+
+static bool
+on_git_wake (int fd G_GNUC_UNUSED, GIOCondition condition G_GNUC_UNUSED, void *data)
+{
+  GbkDirModel *m = data;
+  GbkGitResult *r = gbk_git_watch_take (m->git);
+  if (r != nullptr)
+    set_git (m, r);
+  return true;
+}
+
+static void
+on_remote_git (GbkGitResult *r, void *data)
+{
+  set_git (data, r);
+}
+
+const GbkGitResult *
+gbk_dir_model_git (const GbkDirModel *m)
+{
+  return m->git_result;
+}
+
+void
+gbk_dir_model_refresh_git (const GbkDirModel *m)
+{
+  if (m->git != nullptr)
+    gbk_git_watch_poke (m->git);
+}
+
 /* ---- GObject ---- */
 
 static void
@@ -487,6 +532,8 @@ gbk_dir_model_dispose (GObject *object)
 {
   GbkDirModel *m = GBK_DIR_MODEL (object);
   stop_scanner (m);
+  gbk_source_cancel (&m->git_watch_id);
+  g_clear_pointer (&m->git, gbk_git_watch_stop);
   gbk_source_cancel (&m->retry_id);
   g_clear_object (&m->remote);
   G_OBJECT_CLASS (gbk_dir_model_parent_class)->dispose (object);
@@ -506,6 +553,7 @@ gbk_dir_model_finalize (GObject *object)
   gbk_type_table_unref (m->types);
   g_clear_pointer (&m->loc, gbk_loc_unref);
   g_free (m->conn_error);
+  gbk_git_result_free (m->git_result);
   G_OBJECT_CLASS (gbk_dir_model_parent_class)->finalize (object);
 }
 
@@ -520,6 +568,9 @@ gbk_dir_model_class_init (GbkDirModelClass *klass)
                                           0, nullptr, nullptr, nullptr, G_TYPE_NONE, 0);
   signals[SIGNAL_STATE_CHANGED]
       = g_signal_new ("state-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, nullptr,
+                      nullptr, nullptr, G_TYPE_NONE, 0);
+  signals[SIGNAL_GIT_CHANGED]
+      = g_signal_new ("git-changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, nullptr,
                       nullptr, nullptr, G_TYPE_NONE, 0);
 }
 
@@ -598,6 +649,7 @@ start_remote (GbkDirModel *m)
       return;
     }
   m->cwatch = gbk_conn_watch (m->conn, gbk_loc_path (m->loc), G_OBJECT (m), on_remote_scan, m);
+  gbk_conn_watch_git (m->cwatch, on_remote_git);
 }
 
 static void
@@ -665,6 +717,9 @@ gbk_dir_model_new (GbkLoc *loc, GbkTypeTable *types)
   m->scanner = gbk_scanner_start (path, types);
   m->watch_id
       = gbk_fd_watch (G_OBJECT (m), gbk_scanner_wake_fd (m->scanner), G_IO_IN, on_scanner_wake, m);
+  m->git = gbk_git_watch_start (path);
+  m->git_watch_id
+      = gbk_fd_watch (G_OBJECT (m), gbk_git_watch_wake_fd (m->git), G_IO_IN, on_git_wake, m);
   return m;
 }
 

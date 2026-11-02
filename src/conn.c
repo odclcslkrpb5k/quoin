@@ -45,6 +45,7 @@ typedef enum
 {
   EV_READY,
   EV_SCAN,
+  EV_GIT,
   EV_INFO,
   EV_FAILED,
   EV_DEAD,
@@ -56,6 +57,8 @@ typedef struct
   uint64_t channel;
   GbkHello hello;          /* READY */
   GbkScanMsg *scan;        /* SCAN */
+  GbkGitResult *git;       /* GIT: one piece */
+  bool more;               /* GIT: pieces follow */
   GbkFileInfo *info;       /* INFO */
   GError *error;           /* FAILED, DEAD */
   bool needs_login;        /* DEAD */
@@ -66,6 +69,7 @@ event_free (Event *e)
 {
   gbk_hello_clear (&e->hello);
   g_clear_pointer (&e->scan, gbk_scan_msg_free);
+  g_clear_pointer (&e->git, gbk_git_result_free);
   g_clear_pointer (&e->info, gbk_file_info_free);
   g_clear_error (&e->error);
   g_free (e);
@@ -681,6 +685,13 @@ on_frame (Live *l, const GbkFrame *f)
         break;
       post (l->s, e);
       return true;
+    case GBK_MSG_GIT:
+      e->type = EV_GIT;
+      e->git = gbk_proto_get_git (f, &e->more);
+      if (e->git == nullptr || f->channel == 0)
+        break;
+      post (l->s, e);
+      return true;
     case GBK_MSG_INFO:
       e->type = EV_INFO;
       e->info = gbk_proto_get_info (f);
@@ -909,10 +920,14 @@ struct GbkConnWatch
   uint64_t channel;
   GWeakRef owner;
   GbkConnScanFn fn;
+  GbkConnGitFn git_fn;
   void *data;
+  GbkGitResult *git; /* pieces of a git status that came split, until the last */
   bool ended; /* told the connection died */
   guint idle; /* the "died" notice for a watch made on a dead connection */
 };
+
+static void git_piece (GbkConnWatch *w, GbkGitResult *piece, bool more);
 
 typedef struct
 {
@@ -1056,6 +1071,13 @@ dispatch (GbkConn *c, Event *e)
           w->fn (g_steal_pointer (&e->scan), w->data);
         break;
       }
+    case EV_GIT:
+      {
+        GbkConnWatch *w = g_hash_table_lookup (c->watches, &e->channel);
+        if (w != nullptr)
+          git_piece (w, g_steal_pointer (&e->git), e->more);
+        break;
+      }
     case EV_INFO:
     case EV_FAILED:
       {
@@ -1164,8 +1186,40 @@ gbk_conn_unwatch (GbkConnWatch *w)
     }
   note_use (c);
   g_weak_ref_clear (&w->owner);
+  g_clear_pointer (&w->git, gbk_git_result_free);
   g_object_unref (c);
   g_free (w);
+}
+
+void
+gbk_conn_watch_git (GbkConnWatch *w, GbkConnGitFn fn)
+{
+  w->git_fn = fn;
+}
+
+/* One piece of a watch's git status: the names add up until the last piece. */
+static void
+git_piece (GbkConnWatch *w, GbkGitResult *piece, bool more)
+{
+  if (w->git == nullptr)
+    w->git = piece;
+  else
+    {
+      GHashTableIter it;
+      void *name, *state;
+      g_hash_table_iter_init (&it, piece->names);
+      while (g_hash_table_iter_next (&it, &name, &state))
+        g_hash_table_insert (w->git->names, g_strdup (name), state);
+      gbk_git_result_free (piece);
+    }
+  if (more)
+    return;
+  GbkGitResult *r = g_steal_pointer (&w->git);
+  g_autoptr (GObject) owner = g_weak_ref_get (&w->owner);
+  if (owner != nullptr && w->git_fn != nullptr)
+    w->git_fn (r, w->data);
+  else
+    gbk_git_result_free (r);
 }
 
 typedef struct
