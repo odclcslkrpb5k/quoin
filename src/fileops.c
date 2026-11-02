@@ -1699,6 +1699,7 @@ gbk_ops_info (const char *path, GError **error)
   info->ctime_ns = ts_ns (&st.stx_ctime);
   info->has_btime = (st.stx_mask & STATX_BTIME) != 0;
   info->btime_ns = info->has_btime ? ts_ns (&st.stx_btime) : 0;
+  gbk_git_file_info (path, S_ISDIR (info->mode) && !info->dangling, &info->git);
   return info;
 }
 
@@ -1710,5 +1711,6 @@ gbk_file_info_free (GbkFileInfo *info)
   g_free (info->link_target);
   g_free (info->owner);
   g_free (info->group);
+  gbk_git_file_info_clear (&info->git);
   g_free (info);
 }

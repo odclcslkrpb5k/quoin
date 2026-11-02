@@ -7,6 +7,7 @@
 
 #include "dirmodel.h"
 #include "dnd.h"
+#include "git.h"
 
 #define GBK_TYPE_VIEW (gbk_view_get_type ())
 G_DECLARE_FINAL_TYPE (GbkView, gbk_view, GBK, VIEW, GtkWidget)
@@ -43,6 +44,10 @@ bool gbk_view_is_selected (GbkView *v, GbkHandle h);
  * with an emblem and a bold name. A set of char* (referenced); nullptr: none. */
 void gbk_view_set_marked (GbkView *v, GHashTable *names);
 bool gbk_view_is_marked (const GbkView *v, GbkHandle h);
+/* Git states of names in this folder (git.h: raw name -> state, referenced; nullptr: none),
+ * and of names not in it: drawn on a coloured background, bold, or italic when ignored. */
+void gbk_view_set_git (GbkView *v, GHashTable *names, GbkGitState inherit);
+GbkGitState gbk_view_git_state (const GbkView *v, GbkHandle h);
 
 /* Keyboard-style cursor movement, used by the key handler and by tests. */
 typedef enum

@@ -11,6 +11,7 @@
 #define EMBLEM_SIZE 10
 #define MIN_COL_W 48
 #define TEXT_SLACK 3            /* px added to estimated widths (kerning can widen a bit) */
+#define GIT_BOX_PAD 2           /* the git colour reaches this far either side of a name */
 #define SEARCH_TIMEOUT_MS 1000
 #define WHEEL_STEP_PX 64
 #define DND_EDGE_PX 24          /* hovering a drag this close to a side scrolls that way */
@@ -24,6 +25,17 @@ typedef struct
   uint32_t gen;                 /* 0: not measured */
   uint16_t width;
 } WidthCache;
+
+/* How a name is drawn: bold when it's being edited elsewhere or has git changes, italic
+ * when git ignores it. */
+typedef enum
+{
+  STYLE_PLAIN,
+  STYLE_BOLD,
+  STYLE_ITALIC,
+  STYLE_BOLD_ITALIC,
+  N_STYLES
+} Style;
 
 struct _GbkView
 {
@@ -48,8 +60,8 @@ struct _GbkView
 
   /* Metrics (style_updated). */
   PangoLayout *layout;
-  PangoAttrList *bold;          /* for marked items' names */
-  int ascii_adv[128];           /* Pango units; 0 for control chars */
+  PangoAttrList *styles[N_STYLES]; /* name attributes per Style; [STYLE_PLAIN] is nullptr */
+  int ascii_adv[N_STYLES][128];    /* Pango units per Style; 0 for control chars */
   int text_h, row_h;
 
   /* Layout (relayout). */
@@ -87,6 +99,8 @@ struct _GbkView
   GArray *icons_tried;          /* bool */
   GHashTable *marked; /* names (char*) open for editing elsewhere (edits.h); may be nullptr */
   cairo_surface_t *emblem; /* drawn on a marked item's icon */
+  GHashTable *git;         /* git states of names (git.h); nullptr: not in a work tree */
+  GbkGitState git_inherit; /* the state of names not in `git` */
   bool emblem_tried;
   int icon_scale;
 };
@@ -165,25 +179,35 @@ update_metrics (GbkView *v)
 {
   g_clear_object (&v->layout);
   v->layout = gtk_widget_create_pango_layout (GTK_WIDGET (v), nullptr);
-  if (v->bold == nullptr)
-    {
-      v->bold = pango_attr_list_new ();
-      pango_attr_list_insert (v->bold, pango_attr_weight_new (PANGO_WEIGHT_BOLD));
-    }
+  if (v->styles[STYLE_BOLD] == nullptr)
+    for (int s = STYLE_BOLD; s < N_STYLES; s++)
+      {
+        v->styles[s] = pango_attr_list_new ();
+        if (s != STYLE_ITALIC)
+          pango_attr_list_insert (v->styles[s], pango_attr_weight_new (PANGO_WEIGHT_BOLD));
+        if (s != STYLE_BOLD)
+          pango_attr_list_insert (v->styles[s], pango_attr_style_new (PANGO_STYLE_ITALIC));
+      }
   /* Filenames may contain newlines: never let them break the line. */
   pango_layout_set_single_paragraph_mode (v->layout, true);
 
-  for (int c = 0; c < 128; c++)
+  /* ASCII advances in every style, so names of any style are measured without shaping. */
+  for (int s = 0; s < N_STYLES; s++)
     {
-      v->ascii_adv[c] = 0;
-      if (c < 32 || c == 127)
-        continue;
-      char s[2] = { (char) c, '\0' };
-      pango_layout_set_text (v->layout, s, 1);
-      PangoRectangle logical;
-      pango_layout_get_extents (v->layout, nullptr, &logical);
-      v->ascii_adv[c] = logical.width;
+      pango_layout_set_attributes (v->layout, v->styles[s]);
+      for (int c = 0; c < 128; c++)
+        {
+          v->ascii_adv[s][c] = 0;
+          if (c < 32 || c == 127)
+            continue;
+          char text[2] = { (char) c, '\0' };
+          pango_layout_set_text (v->layout, text, 1);
+          PangoRectangle logical;
+          pango_layout_get_extents (v->layout, nullptr, &logical);
+          v->ascii_adv[s][c] = logical.width;
+        }
     }
+  pango_layout_set_attributes (v->layout, nullptr);
   pango_layout_set_text (v->layout, "Xg", -1);
   int w, h;
   pango_layout_get_pixel_size (v->layout, &w, &h);
@@ -200,32 +224,45 @@ marked (const GbkView *v, const GbkEntry *e)
   return v->marked != nullptr && g_hash_table_contains (v->marked, gbk_entry_name (e));
 }
 
+static GbkGitState
+git_state (const GbkView *v, const GbkEntry *e)
+{
+  return v->git != nullptr ? gbk_git_state_in (v->git, gbk_entry_name (e), v->git_inherit)
+                           : GBK_GIT_NONE;
+}
+
+static Style
+style_of (const GbkView *v, const GbkEntry *e)
+{
+  GbkGitState g = git_state (v, e);
+  bool bold = marked (v, e) || g > GBK_GIT_IGNORED;
+  bool italic = g == GBK_GIT_IGNORED;
+  return bold && italic ? STYLE_BOLD_ITALIC
+         : bold         ? STYLE_BOLD
+         : italic       ? STYLE_ITALIC
+                        : STYLE_PLAIN;
+}
+
 static int
 measure_text (GbkView *v, const GbkEntry *e)
 {
   const char *s = gbk_entry_display (e);
-  if (marked (v, e))
-    {
-      /* Bold (few of these): shaped for real. */
-      int w, h;
-      pango_layout_set_attributes (v->layout, v->bold);
-      pango_layout_set_text (v->layout, s, -1);
-      pango_layout_get_pixel_size (v->layout, &w, &h);
-      pango_layout_set_attributes (v->layout, nullptr);
-      return w + TEXT_SLACK;
-    }
+  Style style = style_of (v, e);
+  const int *adv = v->ascii_adv[style];
   int64_t units = 0;
   for (const unsigned char *p = (const unsigned char *) s; *p != '\0'; p++)
     {
-      if (*p >= 128 || v->ascii_adv[*p] == 0)
+      if (*p >= 128 || adv[*p] == 0)
         {
           /* Non-ASCII or control characters: let Pango shape it for real. */
           int w, h;
+          pango_layout_set_attributes (v->layout, v->styles[style]);
           pango_layout_set_text (v->layout, s, -1);
           pango_layout_get_pixel_size (v->layout, &w, &h);
+          pango_layout_set_attributes (v->layout, nullptr);
           return w + TEXT_SLACK;
         }
-      units += v->ascii_adv[*p];
+      units += adv[*p];
     }
   return (int) MIN (PANGO_PIXELS_CEIL (units), G_MAXINT / 2) + TEXT_SLACK;
 }
@@ -447,6 +484,47 @@ gbk_view_set_marked (GbkView *v, GHashTable *names)
       relayout (v);
     }
   gtk_widget_queue_draw (GTK_WIDGET (v));
+}
+
+/* Same states for the same names (nullptr and an empty table with no inherited state are
+ * both "nothing to show"). */
+static bool
+same_git (GHashTable *a, GbkGitState a_inherit, GHashTable *b, GbkGitState b_inherit)
+{
+  guint na = a != nullptr ? g_hash_table_size (a) : 0;
+  guint nb = b != nullptr ? g_hash_table_size (b) : 0;
+  if (na != nb || a_inherit != b_inherit)
+    return false;
+  if (na == 0)
+    return true;
+  GHashTableIter it;
+  void *name, *state;
+  g_hash_table_iter_init (&it, a);
+  while (g_hash_table_iter_next (&it, &name, &state))
+    if (gbk_git_state_in (b, name, GBK_GIT_N_STATES) != (GbkGitState) GPOINTER_TO_UINT (state))
+      return false;
+  return true;
+}
+
+void
+gbk_view_set_git (GbkView *v, GHashTable *names, GbkGitState inherit)
+{
+  if (same_git (v->git, v->git_inherit, names, inherit))
+    return;
+  g_clear_pointer (&v->git, g_hash_table_unref);
+  v->git = names != nullptr ? g_hash_table_ref (names) : nullptr;
+  v->git_inherit = inherit;
+  /* Bold and italic names are wider: measure again. */
+  g_array_set_size (v->widths, 0);
+  relayout (v);
+  gtk_widget_queue_draw (GTK_WIDGET (v));
+}
+
+GbkGitState
+gbk_view_git_state (const GbkView *v, GbkHandle h)
+{
+  const GbkEntry *e = v->model != nullptr ? gbk_dir_model_get (v->model, h) : nullptr;
+  return e != nullptr ? git_state (v, e) : GBK_GIT_NONE;
 }
 
 bool
@@ -842,6 +920,60 @@ drop_outline (GbkView *v, cairo_t *cr, int x, int y, int w, int h)
   cairo_restore (cr);
 }
 
+/* A dark theme draws light text on a dark background. */
+static bool
+dark_theme (GtkStyleContext *sc)
+{
+  GdkRGBA fg;
+  gtk_style_context_get_color (sc, gtk_style_context_get_state (sc), &fg);
+  return 0.2126 * fg.red + 0.7152 * fg.green + 0.0722 * fg.blue > 0.5;
+}
+
+/* The background behind a name for its git state (user's choice, 2026-11-01); false for
+ * none. Pale for light themes, deep for dark ones, so the theme's text stays readable. */
+static bool
+git_colour (GbkGitState state, bool dark, GdkRGBA *c)
+{
+  static const struct
+  {
+    GbkGitState state;
+    uint32_t light, dark;
+  } colours[] = {
+    { GBK_GIT_UNTRACKED, 0xd6eaff, 0x23405e }, /* pale blue */
+    { GBK_GIT_ADDED, 0xccf2cc, 0x24502c },     /* light green */
+    { GBK_GIT_STAGED, 0xfff2a8, 0x5a5218 },    /* yellow */
+    { GBK_GIT_MODIFIED, 0xffd8a8, 0x66401a },  /* orange */
+    { GBK_GIT_CONFLICT, 0xffb3b3, 0x6e2626 },  /* red */
+  };
+  for (size_t i = 0; i < G_N_ELEMENTS (colours); i++)
+    if (colours[i].state == state)
+      {
+        uint32_t rgb = dark ? colours[i].dark : colours[i].light;
+        *c = (GdkRGBA) { .red = ((rgb >> 16) & 0xff) / 255.0,
+                         .green = ((rgb >> 8) & 0xff) / 255.0,
+                         .blue = (rgb & 0xff) / 255.0,
+                         .alpha = 1 };
+        return true;
+      }
+  return false;
+}
+
+static void
+rounded_box (cairo_t *cr, const GdkRGBA *c, int x, int y, int w, int h)
+{
+  const double r = 3;
+  cairo_save (cr);
+  cairo_new_sub_path (cr);
+  cairo_arc (cr, x + w - r, y + r, r, -G_PI / 2, 0);
+  cairo_arc (cr, x + w - r, y + h - r, r, 0, G_PI / 2);
+  cairo_arc (cr, x + r, y + h - r, r, G_PI / 2, G_PI);
+  cairo_arc (cr, x + r, y + r, r, G_PI, 3 * G_PI / 2);
+  cairo_close_path (cr);
+  gdk_cairo_set_source_rgba (cr, c);
+  cairo_fill (cr);
+  cairo_restore (cr);
+}
+
 static gboolean
 gbk_view_draw (GtkWidget *w, cairo_t *cr)
 {
@@ -866,6 +998,7 @@ gbk_view_draw (GtkWidget *w, cairo_t *cr)
   int text_dy = (v->row_h - v->text_h) / 2;
   int icon_dy = (v->row_h - ICON_SIZE) / 2;
 
+  bool dark = dark_theme (sc);
   size_t ncols = n_columns (v);
   for (size_t c = column_at (v, clip.x + sx); c < ncols; c++)
     {
@@ -907,10 +1040,18 @@ gbk_view_draw (GtkWidget *w, cairo_t *cr)
             }
 
           int text_w = cw - 2 * PAD_X - ICON_SIZE - ICON_GAP;
+          int text_x = x + PAD_X + ICON_SIZE + ICON_GAP;
+          GdkRGBA bg;
+          if (!(state & GTK_STATE_FLAG_SELECTED) && git_colour (git_state (v, e), dark, &bg))
+            {
+              int tw = MIN (text_width (v, h, e), text_w);
+              rounded_box (cr, &bg, text_x - GIT_BOX_PAD, y + 1, tw + 2 * GIT_BOX_PAD,
+                           v->row_h - 2);
+            }
           pango_layout_set_text (v->layout, gbk_entry_display (e), -1);
           pango_layout_set_width (v->layout, MAX (1, text_w) * PANGO_SCALE);
-          pango_layout_set_attributes (v->layout, is_marked ? v->bold : nullptr);
-          gtk_render_layout (sc, cr, x + PAD_X + ICON_SIZE + ICON_GAP, y + text_dy, v->layout);
+          pango_layout_set_attributes (v->layout, v->styles[style_of (v, e)]);
+          gtk_render_layout (sc, cr, text_x, y + text_dy, v->layout);
           pango_layout_set_attributes (v->layout, nullptr);
 
           if (focused && h == v->cursor)
@@ -1535,7 +1676,9 @@ gbk_view_finalize (GObject *o)
   g_ptr_array_unref (v->icons);
   g_array_unref (v->icons_tried);
   g_clear_pointer (&v->marked, g_hash_table_unref);
-  g_clear_pointer (&v->bold, pango_attr_list_unref);
+  for (int s = 0; s < N_STYLES; s++)
+    g_clear_pointer (&v->styles[s], pango_attr_list_unref);
+  g_clear_pointer (&v->git, g_hash_table_unref);
   g_array_unref (v->col_x);
   g_array_unref (v->widths);
   g_hash_table_unref (v->selected);

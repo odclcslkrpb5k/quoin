@@ -1,4 +1,5 @@
 #include "browser.h"
+#include "gitwatch.h"
 #include "lifetime.h"
 #include "open.h"
 #include "remote.h"
@@ -38,6 +39,10 @@ struct _GbkBrowser
   GPtrArray *pending_select;  /* names to select as they appear (after paste/rename) */
   guint pending_timeout;
   char *message;
+
+  GbkGitWatch *git;           /* the folder's git status (folders on this machine) */
+  guint git_watch;            /* its wake fd's watch */
+  GbkGitResult *git_result;   /* the newest, or nullptr */
 };
 
 G_DEFINE_FINAL_TYPE (GbkBrowser, gbk_browser, GTK_TYPE_BOX)
@@ -99,6 +104,9 @@ gbk_browser_status (GbkBrowser *b)
               g_autofree char *size = format_size (e->size);
               g_string_append_printf (s, "  %s", size);
             }
+          GbkGitState git = gbk_view_git_state (b->view, sel[0]);
+          if (git != GBK_GIT_NONE)
+            g_string_append_printf (s, "  %s", gbk_git_state_label (git, gbk_entry_is_dir (e)));
         }
       else if (n_sel > 1)
         {
@@ -143,6 +151,74 @@ gbk_browser_set_message (GbkBrowser *b, const char *message)
   g_free (b->message);
   b->message = g_strdup (message);
   status_changed (b);
+}
+
+/* ---- git ---- */
+
+static void
+git_stop (GbkBrowser *b)
+{
+  gbk_source_cancel (&b->git_watch);
+  if (b->git != nullptr)
+    gbk_git_watch_stop (g_steal_pointer (&b->git));
+  g_clear_pointer (&b->git_result, gbk_git_result_free);
+}
+
+static bool
+on_git_wake (int fd G_GNUC_UNUSED, GIOCondition condition G_GNUC_UNUSED, void *data)
+{
+  GbkBrowser *b = data;
+  GbkGitResult *r = gbk_git_watch_take (b->git);
+  if (r != nullptr)
+    {
+      gbk_git_result_free (b->git_result);
+      b->git_result = r;
+      gbk_view_set_git (b->view, r->names, r->inherit);
+      status_changed (b);
+    }
+  return true;
+}
+
+/* Follow the git status of the folder now open, if it's on this machine. */
+static void
+git_start (GbkBrowser *b)
+{
+  git_stop (b);
+  gbk_view_set_git (b->view, nullptr, GBK_GIT_NONE);
+  const char *path;
+  if (!gbk_loc_as_local (b->loc, &path))
+    return;
+  b->git = gbk_git_watch_start (path);
+  b->git_watch
+      = gbk_fd_watch (G_OBJECT (b), gbk_git_watch_wake_fd (b->git), G_IO_IN, on_git_wake, b);
+}
+
+void
+gbk_browser_refresh_git (const GbkBrowser *b)
+{
+  if (b->git != nullptr)
+    gbk_git_watch_poke (b->git);
+}
+
+const char *
+gbk_browser_git_summary (const GbkBrowser *b)
+{
+  const GbkGitResult *r = b->git_result;
+  if (r == nullptr || !r->repo)
+    return nullptr;
+  return r->error != nullptr ? r->error : r->summary;
+}
+
+const char *
+gbk_browser_git_upstream (const GbkBrowser *b)
+{
+  return b->git_result != nullptr ? b->git_result->upstream : nullptr;
+}
+
+bool
+gbk_browser_git_failed (const GbkBrowser *b)
+{
+  return b->git_result != nullptr && b->git_result->error != nullptr;
 }
 
 /* ---- pending selection ---- */
@@ -213,6 +289,9 @@ on_model_changed (GbkDirModel *m, GbkBrowser *b)
         }
     }
   apply_pending_select (b);
+  /* A change in a loaded folder can change its git status (loading isn't a change). */
+  if (b->git != nullptr && gbk_dir_model_state (m) == GBK_DIR_READY)
+    gbk_git_watch_poke (b->git);
   status_changed (b);
 }
 
@@ -322,6 +401,7 @@ open_loc (GbkBrowser *b, GbkLoc *loc, const char *focus_name)
   gbk_browser_select_names (b, nullptr);
   g_clear_pointer (&b->message, g_free);
   set_model (b, gbk_dir_model_new (b->loc, b->ctx->types));
+  git_start (b);
   gbk_pathbar_set_loc (b->pathbar, b->loc);
   g_signal_emit (b, signals[SIGNAL_PATH_CHANGED], 0);
   status_changed (b);
@@ -593,6 +673,7 @@ gbk_browser_dispose (GObject *o)
 {
   GbkBrowser *b = GBK_BROWSER (o);
   b->disposing = true;
+  git_stop (b);
   clear_pending (b);
   if (b->model != nullptr)
     set_model (b, nullptr);

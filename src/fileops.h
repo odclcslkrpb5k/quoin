@@ -18,6 +18,7 @@
  * - Directory depth is capped (GBK_OPS_MAX_DEPTH): deep trees fail cleanly instead of
  *   overflowing the stack. */
 #pragma once
+#include "git.h"
 
 #define GBK_OPS_MAX_DEPTH 512
 
@@ -231,6 +232,7 @@ typedef struct
   char *owner, *group;     /* names, or nullptr when unknown */
   int64_t atime_ns, mtime_ns, ctime_ns, btime_ns;
   bool has_btime;          /* the filesystem records creation time */
+  GbkGitFileInfo git;      /* local only, so far */
 } GbkFileInfo;
 
 [[nodiscard]] GbkFileInfo *gbk_ops_info (const char *path, GError **error);

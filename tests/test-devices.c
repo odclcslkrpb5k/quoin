@@ -1,5 +1,6 @@
 /* Devices: the ☰ menu's Devices list and its open / mount / unmount / eject, against a fake
  * volume monitor whose "mounts" are ordinary folders (under Xvfb). */
+#include "gitwatch.h"
 #include "lifetime.h"
 #include "scanner.h"
 #include "window.h"
@@ -932,7 +933,7 @@ test_path_is_under (void)
 static bool
 no_workers (void *data G_GNUC_UNUSED)
 {
-  return gbk_scanner_live_workers () == 0;
+  return gbk_scanner_live_workers () == 0 && gbk_git_watch_live_workers () == 0;
 }
 
 int

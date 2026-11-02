@@ -19,6 +19,7 @@ struct _GbkWindow
   GtkNotebook *tabs;
   GtkLabel *status;
   GtkLabel *activity;     /* status bar: what's happening with other machines (edits.h) */
+  GtkLabel *git;          /* status bar: the folder's git branch and changes */
   GtkWidget *status_bar;  /* event box: right-click gives the folder's (empty-space) menu */
   GtkButton *sort_button; /* status bar, right: shows the sort, click cycles it */
   GtkToggleButton *hidden_button;   /* status bar, right: ".*", bound to win.show-hidden */
@@ -77,8 +78,19 @@ browser_of (GbkView *v)
 static void
 update_status (GbkWindow *w)
 {
+  const GbkBrowser *b = active (w);
   g_autofree char *text = gbk_browser_status (active (w));
   gtk_label_set_text (w->status, text);
+  const char *git = gbk_browser_git_summary (b);
+  gtk_label_set_text (w->git, git != nullptr ? git : "");
+  gtk_widget_set_visible (GTK_WIDGET (w->git), git != nullptr);
+  const char *upstream = gbk_browser_git_upstream (b);
+  g_autofree char *tip
+      = gbk_browser_git_failed (b) ? g_strdup ("Git couldn't show this folder's status")
+        : upstream != nullptr
+            ? g_strdup_printf ("Git: the branch and its changes, compared with %s", upstream)
+            : g_strdup ("Git: the branch and its changes");
+  gtk_widget_set_tooltip_text (GTK_WIDGET (w->git), tip);
 }
 
 /* The title is the full location of the open folder, and nothing else. */
@@ -1621,7 +1633,10 @@ gbk_window_focus_in (GtkWidget *widget, GdkEventFocus *ev)
    * with a tab in it has anything to retry. */
   if (!gtk_widget_in_destruction (widget) && w->tabs != nullptr
       && gtk_notebook_get_current_page (w->tabs) >= 0)
-    gbk_browser_reconnect (active (w));
+    {
+      gbk_browser_reconnect (active (w));
+      gbk_browser_refresh_git (active (w));   /* git may have been used meanwhile */
+    }
   return GTK_WIDGET_CLASS (gbk_window_parent_class)->focus_in_event (widget, ev);
 }
 
@@ -1847,6 +1862,13 @@ gbk_window_new (const GtkApplication *app, GbkContext *ctx, GbkLoc *loc)
   gtk_widget_set_no_show_all (GTK_WIDGET (w->activity), true);
   gtk_box_pack_end (GTK_BOX (status_bar), GTK_WIDGET (w->activity), false, false, 0);
   gbk_window_set_activity (w, gbk_edits_activity ());
+  /* Beside those: the folder's git branch and changes, when it's in a work tree. */
+  w->git = GTK_LABEL (gtk_label_new (""));
+  gtk_label_set_ellipsize (w->git, PANGO_ELLIPSIZE_END);
+  gtk_label_set_max_width_chars (w->git, 60);
+  gtk_widget_set_no_show_all (GTK_WIDGET (w->git), true);
+  gtk_widget_set_margin_end (GTK_WIDGET (w->git), 8);
+  gtk_box_pack_end (GTK_BOX (status_bar), GTK_WIDGET (w->git), false, false, 0);
   w->status_bar = gtk_event_box_new ();
   gtk_container_add (GTK_CONTAINER (w->status_bar), status_bar);
   gbk_connect (G_OBJECT (w), w->status_bar, "button-press-event", G_CALLBACK (on_status_bar_press),
@@ -1931,6 +1953,12 @@ const char *
 gbk_window_status (GbkWindow *w)
 {
   return gtk_label_get_text (w->status);
+}
+
+const char *
+gbk_window_git (const GbkWindow *w)
+{
+  return gtk_widget_get_visible (GTK_WIDGET (w->git)) ? gtk_label_get_text (w->git) : "";
 }
 
 GtkWidget *

@@ -90,6 +90,28 @@ add_field (GbkProps *p, int row, const char *field, const char *value)
   g_hash_table_insert (p->values, g_strdup (field), val);
 }
 
+/* Git: its state, the branch, and the last commit that changed it. */
+static void
+add_git (GbkProps *p, int row, const GbkGitFileInfo *git, bool is_dir)
+{
+  if (!git->known)
+    return;
+  if (git->error != nullptr)
+    {
+      add_field (p, row, "Git", git->error);
+      return;
+    }
+  add_field (p, row, "Git", gbk_git_state_label (git->state, is_dir));
+  add_field (p, row + 1, "Branch", git->branch);
+  if (git->commit.hash != nullptr)
+    {
+      g_autofree char *when = format_time (git->commit.time * INT64_C (1000000000));
+      g_autofree char *commit = g_strdup_printf ("%s · %s · %s · %s", git->commit.hash, when,
+                                                 git->commit.author, git->commit.subject);
+      add_field (p, row + 2, "Last commit", commit);
+    }
+}
+
 static void
 show_details (GbkProps *p, const GbkFileInfo *info)
 {
@@ -139,6 +161,7 @@ show_details (GbkProps *p, const GbkFileInfo *info)
   g_autofree char *group = format_id (info->group, info->gid);
   add_field (p, row++, "Owner", owner);
   add_field (p, row++, "Group", group);
+  add_git (p, row, &info->git, is_dir);
   gtk_widget_show_all (p->details);
 
   /* Permissions: only the owner (or root) may change them; a broken link has none. */

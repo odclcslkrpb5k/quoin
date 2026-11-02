@@ -21,6 +21,8 @@ void gbk_window_open_address (GbkWindow *w, const GbkAddress *a);
 GbkLoc *gbk_window_loc (GbkWindow *w);
 GbkView *gbk_window_view (GbkWindow *w);
 const char *gbk_window_status (GbkWindow *w);
+/* The status bar's git part ("main · 2 modified"); "" when hidden (not in a work tree). */
+const char *gbk_window_git (const GbkWindow *w);
 /* The status bar's other line: news about files being edited on other machines ("Saved
  * notes.txt to ws1 at 14:02"); "" hides it. edits.c keeps every window's the same. */
 void gbk_window_set_activity (GbkWindow *w, const char *text);

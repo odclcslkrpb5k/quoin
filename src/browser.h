@@ -53,3 +53,11 @@ void gbk_browser_select_names (GbkBrowser *b, GPtrArray *names);
 void gbk_browser_set_message (GbkBrowser *b, const char *message);
 /* Status bar text. g_free. */
 char *gbk_browser_status (GbkBrowser *b);
+
+/* Git (gitwatch.h): the work tree's branch and changes ("main ↑1 · 2 modified"), or why
+ * git couldn't say (then gbk_browser_git_failed); nullptr outside a work tree. */
+const char *gbk_browser_git_summary (const GbkBrowser *b);
+bool gbk_browser_git_failed (const GbkBrowser *b);
+const char *gbk_browser_git_upstream (const GbkBrowser *b);   /* or nullptr */
+/* Look at the git status again soon (the window is back in use). */
+void gbk_browser_refresh_git (const GbkBrowser *b);

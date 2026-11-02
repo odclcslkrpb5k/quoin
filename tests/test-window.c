@@ -1,4 +1,5 @@
 /* Browser window: navigation, history, hidden toggle, vanished directories (under Xvfb). */
+#include "gitwatch.h"
 #include "lifetime.h"
 #include <gdk/gdkx.h>
 #include <X11/extensions/XTest.h>
@@ -1646,7 +1647,7 @@ test_tabs (void)
 static bool
 no_workers (void *data G_GNUC_UNUSED)
 {
-  return gbk_scanner_live_workers () == 0;
+  return gbk_scanner_live_workers () == 0 && gbk_git_watch_live_workers () == 0;
 }
 
 /* Closing a window with several tabs, each with a selection: tearing a tab down clears its
@@ -1675,6 +1676,200 @@ test_close_with_selections (void)
   while (gtk_events_pending ())
     gtk_main_iteration ();
   rm_rf (root);
+}
+
+/* ---- git ---- */
+
+static void
+git_in (const char *dir, ...)
+{
+  g_autoptr (GPtrArray) argv = g_ptr_array_new_with_free_func (g_free);
+  const char *const fixed[] = { "git",
+                                "-c",
+                                "user.name=Test",
+                                "-c",
+                                "user.email=test@example.com",
+                                "-c",
+                                "init.defaultBranch=main",
+                                "-c",
+                                "commit.gpgsign=false" };
+  for (size_t i = 0; i < G_N_ELEMENTS (fixed); i++)
+    g_ptr_array_add (argv, g_strdup (fixed[i]));
+  va_list ap;
+  va_start (ap, dir);
+  const char *arg;
+  while ((arg = va_arg (ap, const char *)) != nullptr)
+    g_ptr_array_add (argv, g_strdup (arg));
+  va_end (ap);
+  g_ptr_array_add (argv, nullptr);
+  int status;
+  g_autoptr (GError) error = nullptr;
+  g_autofree char *err = nullptr;
+  if (!g_spawn_sync (dir, (char **) argv->pdata, nullptr, G_SPAWN_SEARCH_PATH, nullptr, nullptr,
+                     nullptr, &err, &status, &error)
+      || !g_spawn_check_wait_status (status, nullptr))
+    gbk_fatal ("git failed: %s", err != nullptr ? err : error->message);
+}
+
+#define GIT(dir, ...) git_in (dir, __VA_ARGS__, (const char *) nullptr)
+
+typedef struct
+{
+  GbkWindow *w;
+  const char *name;
+  GbkGitState state;
+} GitCtx;
+
+static GbkGitState
+git_state_of (GbkWindow *w, const char *name)
+{
+  GbkHandle h = gbk_dir_model_find (model_of (w), name);
+  g_assert_true (h != GBK_HANDLE_NONE);
+  return gbk_view_git_state (gbk_window_view (w), h);
+}
+
+static bool
+git_state_is (void *data)
+{
+  GitCtx *c = data;
+  return git_state_of (c->w, c->name) == c->state;
+}
+
+static bool
+git_text_starts (void *data)
+{
+  NameCtx *c = data;
+  return g_str_has_prefix (gbk_window_git (c->w), c->name);
+}
+
+/* Finish pending events and size allocation: gtk_widget_draw needs both done. */
+static void
+laid_out (GbkWindow *w)
+{
+  while (gtk_events_pending ())
+    gtk_main_iteration ();
+  gtk_container_check_resize (GTK_CONTAINER (w));
+}
+
+/* How many pixels of the view are exactly `rgb`. */
+static unsigned
+pixels_of (GbkWindow *w, uint32_t rgb)
+{
+  laid_out (w);
+  GtkWidget *v = GTK_WIDGET (gbk_window_view (w));
+  int vw = gtk_widget_get_allocated_width (v);
+  int vh = gtk_widget_get_allocated_height (v);
+  cairo_surface_t *surf = cairo_image_surface_create (CAIRO_FORMAT_RGB24, vw, vh);
+  cairo_t *cr = cairo_create (surf);
+  gtk_widget_draw (v, cr);
+  cairo_destroy (cr);
+  cairo_surface_flush (surf);
+  const uint8_t *data = cairo_image_surface_get_data (surf);
+  int stride = cairo_image_surface_get_stride (surf);
+  unsigned n = 0;
+  for (int y = 0; y < vh; y++)
+    for (int x = 0; x < vw; x++)
+      {
+        uint32_t px;
+        memcpy (&px, data + (size_t) y * (size_t) stride + (size_t) x * 4, sizeof px);
+        n += (px & 0xffffff) == rgb;
+      }
+  cairo_surface_destroy (surf);
+  return n;
+}
+
+static void
+test_git (void)
+{
+  g_autofree char *root = g_dir_make_tmp ("gbk-win-git-XXXXXX", nullptr);
+  mkdirs (root, (const char *const[]) { "sub/", "sub/a.txt", "clean.txt", ".gitignore", nullptr });
+  g_autofree char *ignore = g_build_filename (root, ".gitignore", nullptr);
+  g_assert_true (g_file_set_contents (ignore, "*.log\n", -1, nullptr));
+  GIT (root, "init", "-q");
+  GIT (root, "add", "-A");
+  GIT (root, "commit", "-q", "-m", "first");
+  mkdirs (root, (const char *const[]) { "new.txt", "added.txt", "debug.log", nullptr });
+  g_autofree char *a = g_build_filename (root, "sub", "a.txt", nullptr);
+  g_assert_true (g_file_set_contents (a, "changed", -1, nullptr));
+  GIT (root, "add", "added.txt");
+
+  GbkWindow *w = window_at (app, ctx, root);
+  gtk_widget_show_all (GTK_WIDGET (w));
+  wait_at (w, root);
+  NameCtx summary = { w, "main · 1 modified · 1 staged · 1 untracked" };
+  if (!wait_until (git_text_starts, &summary))
+    gbk_fatal ("git status bar: \"%s\"", gbk_window_git (w));
+  g_assert_cmpint (git_state_of (w, "sub"), ==, GBK_GIT_MODIFIED);
+  g_assert_cmpint (git_state_of (w, "new.txt"), ==, GBK_GIT_UNTRACKED);
+  g_assert_cmpint (git_state_of (w, "added.txt"), ==, GBK_GIT_ADDED);
+  g_assert_cmpint (git_state_of (w, "debug.log"), ==, GBK_GIT_IGNORED);
+  g_assert_cmpint (git_state_of (w, "clean.txt"), ==, GBK_GIT_NONE);
+
+  /* The colours are drawn: pale blue, light green and orange (light theme), no others. */
+  gbk_view_unselect_all (gbk_window_view (w));
+  g_assert_cmpuint (pixels_of (w, 0xd6eaff), >, 0);
+  g_assert_cmpuint (pixels_of (w, 0xccf2cc), >, 0);
+  g_assert_cmpuint (pixels_of (w, 0xffd8a8), >, 0);
+  g_assert_cmpuint (pixels_of (w, 0xfff2a8), ==, 0);
+  const char *art = g_getenv ("GBK_ARTIFACTS");
+  if (art != nullptr && g_mkdir_with_parents (art, 0755) == 0)
+    {
+      laid_out (w);
+      GtkWidget *ww = GTK_WIDGET (w);
+      cairo_surface_t *surf
+          = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, gtk_widget_get_allocated_width (ww),
+                                        gtk_widget_get_allocated_height (ww));
+      cairo_t *cr = cairo_create (surf);
+      gtk_widget_draw (ww, cr);
+      cairo_destroy (cr);
+      g_autofree char *png = g_build_filename (art, "git.png", nullptr);
+      cairo_surface_write_to_png (surf, png);
+      cairo_surface_destroy (surf);
+    }
+
+  /* One selected: its state follows its name in the status bar. */
+  gbk_view_select_only (gbk_window_view (w), gbk_dir_model_find (model_of (w), "new.txt"));
+  g_assert_nonnull (strstr (gbk_window_status (w), "Untracked"));
+
+  /* Staged in another program: shown without touching the window. */
+  GIT (root, "add", "new.txt");
+  GitCtx staged = { w, "new.txt", GBK_GIT_ADDED };
+  g_assert_true (wait_until (git_state_is, &staged));
+  NameCtx after = { w, "main · 1 modified · 2 staged" };
+  g_assert_true (wait_until (git_text_starts, &after));
+
+  /* Properties: the file's state, the branch and the last commit. */
+  g_autoptr (GbkLoc) loc = gbk_loc_new_local (a);
+  GbkProps *p = gbk_props_new (GTK_WINDOW (w), loc, "text/plain");
+  g_assert_true (wait_until (props_loaded, p));
+  g_assert_cmpstr (gbk_props_value (p, "Git"), ==, "Changes not staged");
+  g_assert_cmpstr (gbk_props_value (p, "Branch"), ==, "main");
+  const char *last = gbk_props_value (p, "Last commit");
+  g_assert_nonnull (last);
+  g_assert_true (g_str_has_suffix (last, " · Test · first"));
+  gtk_widget_destroy (GTK_WIDGET (p));
+  g_autofree char *log = g_build_filename (root, "debug.log", nullptr);
+  g_autoptr (GbkLoc) log_loc = gbk_loc_new_local (log);
+  p = gbk_props_new (GTK_WINDOW (w), log_loc, "text/plain");
+  g_assert_true (wait_until (props_loaded, p));
+  g_assert_cmpstr (gbk_props_value (p, "Git"), ==, "Ignored");
+  g_assert_null (gbk_props_value (p, "Last commit"));
+  gtk_widget_destroy (GTK_WIDGET (p));
+
+  /* Inside a folder: its own contents. Outside the work tree: nothing. */
+  g_autofree char *sub = g_build_filename (root, "sub", nullptr);
+  open_at (w, sub);
+  wait_at (w, sub);
+  GitCtx in_sub = { w, "a.txt", GBK_GIT_MODIFIED };
+  g_assert_true (wait_until (git_state_is, &in_sub));
+  g_autofree char *plain = g_dir_make_tmp ("gbk-win-plain-XXXXXX", nullptr);
+  open_at (w, plain);
+  wait_at (w, plain);
+  g_assert_cmpstr (gbk_window_git (w), ==, "");
+
+  gtk_widget_destroy (GTK_WIDGET (w));
+  rm_rf (root);
+  rm_rf (plain);
 }
 
 int
@@ -1710,6 +1905,7 @@ main (int argc, char **argv)
   g_test_add_func ("/window/keys-go-to-focused-entry", test_keys_go_to_focused_entry);
   g_test_add_func ("/window/tabs", test_tabs);
   g_test_add_func ("/window/close-with-selections", test_close_with_selections);
+  g_test_add_func ("/window/git", test_git);
   int status = g_test_run ();
 
   while (gtk_events_pending ())

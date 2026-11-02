@@ -390,6 +390,29 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   phase 9". Tests: test-remotewin between-machines ("ws" and "ws2" are both this machine
   under fake-ssh) and actions-there (exact error messages: check-source bans strstr on
   error messages; zombies count as ended via /proc state). Protocol version 3.
+- GIT STATUS (user, 2026-11-01; status only, NO git commands in menus: "I vastly prefer to
+  have Claude manage git"). Colours (user): untracked pale blue, new+staged light green,
+  staged yellow, unstaged orange (also when partly staged: user chose), conflict red (user
+  chose), all bold; ignored italic. Folders roll up the most urgent state inside (user
+  chose; ignored never rolls up; wholly untracked/ignored dirs inherit to their contents).
+  Status bar: branch + short status (w->git label, right side); selected item's state in
+  the left text. Properties: Git / Branch / Last commit rows (GbkFileInfo.git, filled in
+  gbk_ops_info, so the server fills it too).
+  Safety (user chose "neutralise"): git.c gbk_git_find refuses repos not owned by euid,
+  network/FUSE/removable fs types (statfs magic list) and /media, /run/media; always
+  `-c core.fsmonitor=false --no-optional-locks`, env without GIT_*, GIT_OPTIONAL_LOCKS=0.
+  Code: git.{h,c} (serve_lib: parser fuzzed as fuzz-git, roll-up, find, runner with
+  cancel fd + timeout + 64 MiB cap), gitwatch.{h,c} (serve_lib: thread per folder like
+  scanner; inotify on gitdir + gitdir/logs, ignores *.lock; quiet 200 ms / max 1 s; never
+  busier than half the time; posts newest result only). browser.c git_start/stop, pokes on
+  model change when READY and on window focus-in. view: Style enum with ascii advance
+  tables per style (bold/italic measured without Pango), gbk_view_set_git compares before
+  invalidating widths. Image now has the git package. Tests: test-git (incl. a real merge
+  conflict + linked worktree), test-window /window/git (pixel colours, live `git add`,
+  props); mutation-checked: ignoring gitdir events, not drawing the colour. Fuzzing found
+  "? x//" accepted (empty name in roll-up) in 20 s: seed crash-double-slash.
+  NEXT (user: "immediately after"): git status on other machines via quoin-serve (run
+  GbkGitWatch there, new proto messages; GbkFileInfo.git over the INFO message).
 - DEVICES (user, 2026-10-15: Thunar's sidebar Devices list, in the ☰ menu; user chose ONE
   "Devices" submenu, each device a submenu Open / Unmount / Eject|Safely Remove). devices.{h,c}
   (core, GIO only): GbkDevices per window wraps GVolumeMonitor (gvfs udisks2 if installed,

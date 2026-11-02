@@ -24,6 +24,8 @@ serve_lib = static_library('gbk-serve-core',
   'proto.c',
   'peer.c',
   'runcmd.c',
+  'git.c',
+  'gitwatch.c',
   include_directories : config_inc,
   dependencies : serve_deps,
 )

@@ -100,6 +100,19 @@ program that won't start. On anything else, [build from source](#building).
   done by the time you drop (if not, the status bar asks you to drop again). This is for
   files up to 64 MB in all; folders, and anything bigger, go to other applications as
   their `ws1:/path` text only. A download nobody took is removed when the drag ends.
+- **Git status, at a glance.** In a folder inside a git work tree, names are shown in
+  bold on a colour: **pale blue** untracked, **light green** new and staged, **yellow**
+  changes staged, **orange** changes not yet staged (even if some are), **red** a merge
+  conflict. Ignored files are in *italics*. A folder takes the most pressing colour of
+  anything inside it, so changes deep in a tree show from the top. The status bar shows
+  the branch and a short status (`main ↑1 · 2 modified · 1 staged · 3 untracked`), and
+  the selected item's state; Properties shows a file's state, the branch and the last
+  commit that changed it. It follows git as you use it, in a terminal or anywhere else
+  (commits, `git add`, checkouts, fetches) with no refresh. Quoin only *reads* status, by
+  running the `git` program in the background: a slow repository never holds up the
+  folder. For safety it does this only in repositories you own on this machine's own
+  disks (not network shares, FUSE mounts or removable media), with git's fsmonitor
+  turned off, since a repository's own settings can make `git status` run commands.
 - **Properties** (right-click menu or Alt+Enter): dates (modified, accessed, changed,
   created), size, owner, group, link target, and read / write / execute permissions you can
   change with Apply. For files, the right-click menu also has an **Executable** check
