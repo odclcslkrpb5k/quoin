@@ -160,6 +160,11 @@ Protect (deliberate, flagged):
   Each probe must also COMPILE with -DGBK_PRELUDE_NO_BANS (2026-11-01: '(void) alloca(4)'
   failed either way via unused-result, so it proved nothing). check-source's nobans rule
   keeps that switch out of everything but prelude.h and meson.build.
+- analysis.py clang-tidy gate (2026-11-01, from Chandler): error lines count as findings
+  (tool-error for unlocated ones, e.g. an unparseable .clang-tidy), and run-clang-tidy's
+  per-file lines must equal compile_commands.json's files. Verified: a broken .clang-tidy
+  gives tool-error findings. An unknown check NAME is silently ignored by clang-tidy
+  (not caught; it just enables nothing).
 - g_error is banned (its for(;;) trips -fanalyzer). Use gbk_fatal() (src/fatal.h).
 - Never write "type/*" (slash-star) in comments: -Wcomment error.
 - g_assert_* in tests can return (non-fatal mode): don't deref after g_assert_nonnull;

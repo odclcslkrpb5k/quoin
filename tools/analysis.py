@@ -47,7 +47,41 @@ def sh(cmd, log, env=None):
                        env={**os.environ, **(env or {})}, check=False)
 
 
-TIDY_LINE = re.compile(r"^(.+?):(\d+):\d+: warning: (.*) \[([A-Za-z0-9.,_-]+)\]$")
+TIDY_LINE = re.compile(r"^(.+?):(\d+):\d+: (?:warning|error): (.*) \[([A-Za-z0-9.,_-]+)\]$")
+# run-clang-tidy's line per file it ran on: "[ 1/73][5.9s] clang-tidy-21 ... /src/src/x.c"
+TIDY_RAN = re.compile(r"^\[\s*\d+/\d+\]\[[0-9.]+s\] \S*clang-tidy\S* .* (/src/\S+)$")
+# Any other error (a bad .clang-tidy, a crash): it may mean a file went unanalysed.
+# Not the source lines it quotes under a diagnostic ("60 | ... error: ..."), only its own.
+TIDY_ERROR = re.compile(r"^(?:\S+:\d+:\d+: )?(?:fatal )?error: |^Error ")
+
+
+def db_files(db):
+    """The repository files in the compile database (a file built twice is listed twice)."""
+    with open(os.path.join(SRC, db, "compile_commands.json")) as f:
+        return {rel(os.path.join(e["directory"], e["file"])) for e in json.load(f)}
+
+
+def tidy_findings(text, db, wanted):
+    """Findings in run-clang-tidy's output `text`, and proof it ran on every file in `wanted`:
+    a warning count alone can't tell "nothing wrong" from "nothing checked"."""
+    found = []
+    ran = set()
+    for line in text.splitlines():
+        line = line.strip()
+        m = TIDY_LINE.match(line)
+        r = TIDY_RAN.match(line)
+        if m:
+            for check in m.group(4).split(","):
+                found.append(("clang-tidy", check, rel(m.group(1), db), m.group(3)))
+        elif r:
+            ran.add(rel(r.group(1)))
+        elif TIDY_ERROR.search(line):
+            found.append(("clang-tidy", "tool-error", "(none)", line))
+    if not wanted or wanted != ran:
+        sys.exit("analysis: clang-tidy did not check: " + " ".join(sorted(wanted - ran))
+                 + (" (and checked files not built: " + " ".join(sorted(ran - wanted)) + ")"
+                    if ran - wanted else ""))
+    return sorted(set(found))
 
 
 def clang_tidy(db):
@@ -55,13 +89,8 @@ def clang_tidy(db):
     log = OUT + "/clang-tidy.log"
     sh(["run-clang-tidy", "-p", db, "-quiet", "-j", str(os.cpu_count() or 2),
         "-header-filter=^/src/(src|tests)/", r"^/src/(src|tests)/"], log)
-    found = []
-    for line in open(os.path.join(SRC, log)):
-        m = TIDY_LINE.match(line.strip())
-        if m:
-            for check in m.group(4).split(","):
-                found.append(("clang-tidy", check, rel(m.group(1), db), m.group(3)))
-    return sorted(set(found))
+    with open(os.path.join(SRC, log)) as f:
+        return tidy_findings(f.read(), db, db_files(db))
 
 
 def cppcheck(db):
@@ -78,8 +107,7 @@ def cppcheck(db):
     with open(os.path.join(SRC, log), "w") as xml, open(os.path.join(SRC, progress), "w") as out:
         subprocess.run(cmd, stdout=out, stderr=xml, cwd=SRC, check=False)
     # Given a path it can't use, cppcheck checks nothing, writes nothing and exits 0.
-    with open(os.path.join(SRC, commands)) as f:
-        wanted = {rel(os.path.join(e["directory"], e["file"])) for e in json.load(f)}
+    wanted = db_files(db)
     checked = set()
     for line in open(os.path.join(SRC, progress)):
         m = re.match(r"^Checking (\S+) ", line)
