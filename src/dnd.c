@@ -1,6 +1,7 @@
 #include "dnd.h"
 #include "cliptext.h"
 #include "edits.h"
+#include "fetch.h"
 #include "job.h"
 #include "lifetime.h"
 
@@ -48,9 +49,12 @@ gbk_dnd_locs (GtkSelectionData *sd)
 struct GbkDragOut
 {
   GPtrArray *locs;         /* GbkLoc* */
-  GPtrArray *paths;        /* char*: what other apps get (local files, or the copies) */
-  GbkJob *job;             /* downloading the copies, or nullptr */
-  GPtrArray *dirs;         /* char*: the copies' folders (one each) */
+  GPtrArray *paths;        /* char*: what other apps get, when the files are here */
+  bool copies;             /* elsewhere, and other apps get copies (open[] or downloaded) */
+  GPtrArray *open;         /* char* or nullptr, per loc: its copy already being edited here */
+  GArray *slot;            /* int, per loc: its place in the download (dirs), or -1 */
+  GbkJob *job;             /* downloading the others, or nullptr */
+  GPtrArray *dirs;         /* char*: the download's folders (one each) */
   bool taken;              /* another app got the copies */
 };
 
@@ -87,29 +91,45 @@ on_unwanted_fetched (GbkJob *job, GError *error G_GNUC_UNUSED, void *unused G_GN
   remove_dirs (g_object_get_data (G_OBJECT (job), KEY_DIRS));
 }
 
-/* Start downloading `d->locs` (on one other machine) into folders of their own. */
-static void
+/* Copies for other apps: those already being edited here, the rest downloaded, each into a
+ * folder of its own. False if a folder can't be made (then other apps get text only). */
+static bool
 fetch (GbkDragOut *d)
 {
   g_autofree char *cache = gbk_edits_cache ();
   d->dirs = g_ptr_array_new_with_free_func (g_free);
+  d->open = g_ptr_array_new_with_free_func (g_free);
+  d->slot = g_array_new (false, false, sizeof (int));
+  g_autoptr (GPtrArray) wanted = gbk_loc_array_new ();
   for (guint i = 0; i < d->locs->len; i++)
     {
-      g_autofree char *tmpl = g_build_filename (cache, "XXXXXX", nullptr);
-      if (g_mkdtemp_full (tmpl, 0700) == nullptr)
+      GbkLoc *loc = g_ptr_array_index (d->locs, i);
+      char *open = gbk_fetch_open_copy (loc);
+      int slot = -1;
+      g_ptr_array_add (d->open, open);
+      if (open == nullptr)
         {
-          g_warning ("no download folder for a drag: %s", g_strerror (errno));
-          remove_dirs (d->dirs);
-          g_clear_pointer (&d->dirs, g_ptr_array_unref);
-          return;
+          g_autofree char *tmpl = g_build_filename (cache, "XXXXXX", nullptr);
+          if (g_mkdtemp_full (tmpl, 0700) == nullptr)
+            {
+              g_warning ("no download folder for a drag: %s", g_strerror (errno));
+              remove_dirs (d->dirs);
+              return false;
+            }
+          slot = (int) d->dirs->len;
+          g_ptr_array_add (d->dirs, g_steal_pointer (&tmpl));
+          g_ptr_array_add (wanted, gbk_loc_ref (loc));
         }
-      g_ptr_array_add (d->dirs, g_steal_pointer (&tmpl));
+      g_array_append_val (d->slot, slot);
     }
-  d->job = gbk_job_new_fetch (d->locs, d->dirs);
+  if (wanted->len == 0)
+    return true;                       /* all already here */
+  d->job = gbk_job_new_fetch (wanted, d->dirs);
   g_object_set_data_full (G_OBJECT (d->job), KEY_DIRS, g_ptr_array_ref (d->dirs),
                           (GDestroyNotify) g_ptr_array_unref);
   gbk_connect (G_OBJECT (d->job), d->job, "question", G_CALLBACK (on_fetch_question), nullptr);
   gbk_job_start (d->job);
+  return true;
 }
 
 GbkDragOut *
@@ -121,7 +141,7 @@ gbk_drag_out_new (const GPtrArray *locs, bool fetchable)
     g_ptr_array_add (d->locs, gbk_loc_ref (g_ptr_array_index (locs, i)));
   d->paths = gbk_loc_array_as_local (d->locs);
   if (d->paths == nullptr && fetchable && d->locs->len > 0)
-    fetch (d);
+    d->copies = fetch (d);
   return d;
 }
 
@@ -130,29 +150,48 @@ gbk_drag_out_targets (const GbkDragOut *d)
 {
   GtkTargetList *t = gtk_target_list_new (nullptr, 0);
   gtk_target_list_add (t, gdk_atom_intern_static_string (LOCS_TARGET), 0, GBK_DND_LOCS);
-  if (d->paths != nullptr || d->job != nullptr)
+  if (d->paths != nullptr || d->copies)
     gtk_target_list_add (t, gdk_atom_intern_static_string ("text/uri-list"), 0, GBK_DND_URIS);
   gtk_target_list_add_text_targets (t, GBK_DND_TEXT);
   return t;
 }
 
-/* The downloaded copies, once every one has come; nullptr until then (or if one didn't). */
+/* The downloaded copy in folder `slot`, or nullptr. */
+static const GbkFetched *
+fetched_in (const GbkDragOut *d, int slot)
+{
+  const GPtrArray *got = gbk_job_fetched (d->job);
+  for (guint i = 0; got != nullptr && i < got->len; i++)
+    {
+      const GbkFetched *f = g_ptr_array_index (got, i);
+      if ((int) f->index == slot)
+        return f;
+    }
+  return nullptr;
+}
+
+/* The copies, in drag order, once every one is here; nullptr until then (or if one
+ * didn't come). */
 static GPtrArray *
 copies (const GbkDragOut *d)
 {
-  if (d->job == nullptr || gbk_job_running (d->job))
+  if (!d->copies || (d->job != nullptr && gbk_job_running (d->job)))
     return nullptr;
-  const GPtrArray *got = gbk_job_fetched (d->job);
-  if (got == nullptr || got->len != d->locs->len)
-    return nullptr;
-  GPtrArray *paths = g_ptr_array_new_with_free_func (g_free);
-  for (guint i = 0; i < got->len; i++)
+  g_autoptr (GPtrArray) paths = g_ptr_array_new_with_free_func (g_free);
+  for (guint i = 0; i < d->locs->len; i++)
     {
-      const GbkFetched *f = g_ptr_array_index (got, i);
-      g_ptr_array_add (paths,
-                       g_build_filename (g_ptr_array_index (d->dirs, f->index), f->name, nullptr));
+      const char *open = g_ptr_array_index (d->open, i);
+      int slot = g_array_index (d->slot, int, i);
+      const GbkFetched *f = slot >= 0 ? fetched_in (d, slot) : nullptr;
+      if (open != nullptr)
+        g_ptr_array_add (paths, g_strdup (open));
+      else if (f != nullptr)
+        g_ptr_array_add (paths,
+                         g_build_filename (g_ptr_array_index (d->dirs, slot), f->name, nullptr));
+      else
+        return nullptr;                  /* this one didn't come */
     }
-  return paths;
+  return g_steal_pointer (&paths);
 }
 
 static char *
@@ -212,11 +251,48 @@ gbk_drag_out_get (GbkDragOut *d, GtkSelectionData *sd, guint info)
 }
 
 void
+gbk_drag_out_dropped (GbkDragOut *d)
+{
+  if (!d->taken || d->job == nullptr)
+    return;                            /* nothing new went to an app */
+  d->taken = false;                    /* once */
+  guint watched = 0, n = 0;
+  for (guint i = 0; i < d->locs->len; i++)
+    {
+      int slot = g_array_index (d->slot, int, i);
+      const GbkFetched *f = slot >= 0 ? fetched_in (d, slot) : nullptr;
+      if (f == nullptr)
+        continue;
+      n++;
+      const char *dir = g_ptr_array_index (d->dirs, slot);
+      uint64_t id;
+      if (gbk_fetch_watch (g_ptr_array_index (d->locs, i), f, dir, "", nullptr, true, &id))
+        watched++;
+      else
+        {
+          g_autofree char *copy = g_build_filename (dir, f->name, nullptr);
+          gbk_fetch_read_only (copy);
+        }
+    }
+  /* The copies are the app's now: no longer the drag's to remove. */
+  g_ptr_array_set_size (d->dirs, 0);
+  if (watched == 0)
+    return;
+  const GbkLoc *first = g_ptr_array_index (d->locs, 0);
+  g_autofree char *name = gbk_loc_display_name (first);
+  g_autofree char *said = n == 1 ? g_strdup_printf ("Dropped %s from %s: saves there go back", name,
+                                                    gbk_loc_host (first))
+                                 : g_strdup_printf ("Dropped %u files from %s: saves there go back",
+                                                    n, gbk_loc_host (first));
+  gbk_edits_say (said);
+}
+
+void
 gbk_drag_out_free (GbkDragOut *d)
 {
   if (d == nullptr)
     return;
-  if (d->job != nullptr && !d->taken)
+  if (d->job != nullptr && !d->taken && d->dirs->len > 0)
     {
       if (gbk_job_running (d->job))
         {
@@ -229,6 +305,8 @@ gbk_drag_out_free (GbkDragOut *d)
     }
   g_clear_object (&d->job);       /* one still running keeps itself alive */
   g_clear_pointer (&d->dirs, g_ptr_array_unref);
+  g_clear_pointer (&d->open, g_ptr_array_unref);
+  g_clear_pointer (&d->slot, g_array_unref);
   g_clear_pointer (&d->paths, g_ptr_array_unref);
   g_ptr_array_unref (d->locs);
   g_free (d);

@@ -41,6 +41,7 @@ typedef struct
   bool blocked;           /* the machine answering isn't the one it came from */
   bool adopted;           /* left by an earlier Quoin: ends once uploaded */
   bool file_seen;         /* another process was seen using the copy itself */
+  bool dropped;           /* dropped onto an app we can't name: never seen means done */
   int unused_looks;       /* surveys since then that saw nobody using it */
 } Edit;
 
@@ -158,6 +159,13 @@ static int
 grace_ms (void)
 {
   return E.grace_ms > 0 ? E.grace_ms : GBK_EDITS_GRACE_MS;
+}
+
+/* How long a copy's app has to show it's using it. A drop's app is already running. */
+static int
+grace_for (const Edit *e)
+{
+  return e->dropped && E.grace_ms <= 0 ? GBK_EDITS_DROP_GRACE_MS : grace_ms ();
 }
 
 static int
@@ -449,8 +457,13 @@ judge_app (Edit *e, const Survey *s, bool fresh, int64_t now)
     case APP_STARTING:
       if (running)
         e->app = APP_RUNNING;
-      else if (now - e->started_us >= (int64_t) grace_ms () * 1000)
-        e->app = APP_UNKNOWN;
+      else if (now - e->started_us >= (int64_t) grace_for (e) * 1000)
+        {
+          /* Dropped and never seen in use: whatever took it (an upload, the desktop) has
+           * read it and let go. It ends, once any change in it has gone back. */
+          e->app = e->dropped ? APP_GONE : APP_UNKNOWN;
+          e->gone_us = now;
+        }
       break;
     case APP_UNKNOWN:
       if (used)
@@ -766,7 +779,8 @@ run_timer (void)
 /* ---- watching ---- */
 
 uint64_t
-gbk_edits_watch (GbkEditRecord *rec, int lock_fd, const char *asked, const char *executable)
+gbk_edits_watch (GbkEditRecord *rec, int lock_fd, const char *asked, const char *executable,
+                 bool dropped)
 {
   Edit *e = g_new0 (Edit, 1);
   e->id = ++E.next_id;
@@ -775,6 +789,7 @@ gbk_edits_watch (GbkEditRecord *rec, int lock_fd, const char *asked, const char 
   e->asked = g_strdup (asked);
   e->exe = executable != nullptr && !generic (executable) ? g_strdup (executable) : nullptr;
   e->app = APP_STARTING;
+  e->dropped = dropped;
   e->started_us = g_get_monotonic_time ();
   g_ptr_array_add (E.edits, e);
   hold (true);

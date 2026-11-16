@@ -302,6 +302,16 @@ As built in phase 8 (2026-11-01), drag and drop:
   gets nothing and the status bar says to drop again. Questions are answered Cancel (no
   UI). Not taken by drag end: cancelled and removed (after the job finishes).
 
+After phase 9 (2026-11-15, user: "Drop = Open"): a remote file dropped onto another app is
+watched like an opened one. view.c drag-end calls gbk_drag_out_dropped when
+gdk_drag_drop_succeeded and the uri-list was taken; each downloaded copy gets a record and
+a watch through gbk_fetch_watch (shared with Open) with no app name or executable and
+`dropped` set: seen in use (open fd / inotify watch, the usual survey), it lasts until
+released; never seen within GBK_EDITS_DROP_GRACE_MS (20 s), it goes GONE, ending once any
+change is uploaded (not UNKNOWN, which would last while any window is open). Unwatchable
+copies are made read-only, as Open does. A file already being edited is dragged as that
+same copy (no download, no second watch). A drop not accepted watches nothing.
+
 As built in phase 9 (2026-11-01):
 - Actions (user's choice, 2026-11-01): an optional `RemoteCommand=` per action (same
   placeholders d f F, expanded with the paths there); only actions with one are offered

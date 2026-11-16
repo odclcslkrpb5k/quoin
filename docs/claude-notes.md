@@ -420,6 +420,10 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   its own DELTAs); browser only displays. tests/testgit.h = the one git helper for tests.
   Tests: test-proto git round trip/split/refused + info-git, test-serve /serve/git,
   test-remotewin /remotewin/git-there (mutation: server never sending GIT fails it).
+- DROP = OPEN (user, 2026-11-15): remote files dropped onto apps are watched edits; see
+  remote-plan.md "After phase 9". Test lesson: gbk_edits_count in test-remotewin isn't 0
+  at a test's start (earlier tests leave UNKNOWN-app watches that last while a window is
+  open): count relative to the start, and close the window before waiting for none.
 - DEVICES (user, 2026-10-15: Thunar's sidebar Devices list, in the ☰ menu; user chose ONE
   "Devices" submenu, each device a submenu Open / Unmount / Eject|Safely Remove). devices.{h,c}
   (core, GIO only): GbkDevices per window wraps GVolumeMonitor (gvfs udisks2 if installed,

@@ -1418,6 +1418,128 @@ test_drag_and_drop (void)
   gtk_widget_destroy (GTK_WIDGET (w));
 }
 
+/* The copy a drag of the selection gives other apps (waiting for its download). */
+static char *
+dragged_copy (GbkDragOut *out)
+{
+  g_assert_true (wait_until (drag_ready, out));
+  g_autofree char *uris = gbk_drag_out_data (out, GBK_DND_URIS);
+  g_assert_nonnull (uris);
+  bool cut;
+  g_autoptr (GPtrArray) paths = gbk_clip_parse (uris, strlen (uris), false, &cut);
+  g_assert_cmpuint (paths->len, ==, 1);
+  return g_strdup (g_ptr_array_index (paths, 0));
+}
+
+/* A separate program watching `dir` (as an editor with the file open does) until `hold`
+ * goes. */
+static void
+hold_watch (const char *dir, const char *hold)
+{
+  g_assert_true (g_file_set_contents (hold, "", -1, nullptr));
+  char script[] = "import ctypes, os, sys, time\n"
+                  "libc = ctypes.CDLL(None, use_errno=True)\n"
+                  "fd = libc.inotify_init1(0)\n"
+                  "assert fd >= 0 and libc.inotify_add_watch(fd, sys.argv[1].encode(), 0x2) >= 0\n"
+                  "while os.path.exists(sys.argv[2]): time.sleep(0.05)\n";
+  g_autofree char *d = g_strdup (dir), *h = g_strdup (hold);
+  char *argv[] = { (char[]) { "python3" }, (char[]) { "-c" }, script, d, h, nullptr };
+  g_autoptr (GError) error = nullptr;
+  g_assert_true (g_spawn_async (nullptr, argv, nullptr, G_SPAWN_SEARCH_PATH, nullptr, nullptr,
+                                nullptr, &error));
+  g_assert_no_error (error);
+}
+
+/* Dropped onto an app: like Open, saves there go back; it ends when the app lets go, or at
+ * once if nothing ever used it (an upload, the desktop) — after sending any change. */
+static bool
+edits_are (void *n)
+{
+  return gbk_edits_count () == *(const guint *) n;
+}
+
+static void
+test_drop_edits (void)
+{
+  put ("data/drop.txt", "one");
+  put ("data/upload.txt", "up");
+  put ("data/quick.txt", "q");
+  put ("data/open.txt", "o");
+  GbkWindow *w = window_on_remote_data ();
+  GbkView *v = gbk_window_view (w);
+  guint base = gbk_edits_count ();   /* earlier tests may leave some (apps never seen) */
+
+  /* An editor takes it and keeps it: saves go back until it lets go. */
+  gbk_view_select_only (v, gbk_dir_model_find (model_of (w), "drop.txt"));
+  GbkDragOut *out = gbk_view_drag_out_for_test (v);
+  g_autofree char *copy = dragged_copy (out);
+  g_autofree char *dir = g_path_get_dirname (copy);
+  g_autofree char *hold = g_build_filename (home, "hold-drop", nullptr);
+  hold_watch (dir, hold);
+  gbk_drag_out_dropped (out);
+  gbk_drag_out_free (out);
+  g_assert_cmpuint (gbk_edits_count (), ==, base + 1);
+  g_assert_cmpstr (gbk_window_activity (w), ==, "Dropped drop.txt from ws: saves there go back");
+  save_copy (copy, "two");
+  Content two = { "data/drop.txt", "two" };
+  g_assert_true (wait_until (has_content, &two));
+  run_for (1500);                              /* well past the grace: it's in use */
+  g_assert_cmpuint (gbk_edits_count (), ==, base + 1);
+  unlink (hold);
+  g_assert_true (wait_until (edits_are, &base));
+
+  /* Something reads it and lets go (a browser's upload): the watch ends by itself, and the
+   * file there is untouched. */
+  gbk_view_select_only (v, gbk_dir_model_find (model_of (w), "upload.txt"));
+  out = gbk_view_drag_out_for_test (v);
+  g_autofree char *up = dragged_copy (out);
+  gbk_drag_out_dropped (out);
+  gbk_drag_out_free (out);
+  g_assert_cmpuint (gbk_edits_count (), ==, base + 1);
+  g_assert_true (wait_until (edits_are, &base));
+  g_assert_true (g_file_test (up, G_FILE_TEST_EXISTS));
+  Content same = { "data/upload.txt", "up" };
+  g_assert_true (has_content (&same));
+
+  /* Changed at once by something never seen holding it: the change still goes back. */
+  gbk_view_select_only (v, gbk_dir_model_find (model_of (w), "quick.txt"));
+  out = gbk_view_drag_out_for_test (v);
+  g_autofree char *quick = dragged_copy (out);
+  gbk_drag_out_dropped (out);
+  gbk_drag_out_free (out);
+  save_copy (quick, "changed");
+  Content changed = { "data/quick.txt", "changed" };
+  g_assert_true (wait_until (has_content, &changed));
+  g_assert_true (wait_until (edits_are, &base));
+
+  /* A drop nobody accepted: nothing is watched. */
+  out = gbk_view_drag_out_for_test (v);
+  g_autofree char *refused = dragged_copy (out);
+  gbk_drag_out_free (out);
+  g_assert_cmpuint (gbk_edits_count (), ==, base);
+
+  /* Already open: the drag gives that same copy, downloading nothing. */
+  g_autofree char *hold2 = g_build_filename (home, "hold-app", nullptr);
+  g_assert_true (g_file_set_contents (hold2, "", -1, nullptr));   /* the opener stays open */
+  gbk_view_select_only (v, gbk_dir_model_find (model_of (w), "open.txt"));
+  g_signal_emit_by_name (v, "activate");
+  g_autofree char *opened = opened_copy ("open.txt");
+  g_assert_nonnull (opened);
+  g_assert_true (wait_until (no_jobs, nullptr));
+  guint dirs = cache_dirs ();
+  out = gbk_view_drag_out_for_test (v);
+  g_autofree char *same_copy = dragged_copy (out);
+  g_assert_cmpstr (same_copy, ==, opened);
+  gbk_drag_out_dropped (out);
+  gbk_drag_out_free (out);
+  g_assert_cmpuint (cache_dirs (), ==, dirs);
+  g_assert_cmpuint (gbk_edits_count (), ==, base + 1);    /* still the one watch */
+  /* As in edit-upload: with no window left and the app gone, every watch ends. */
+  gtk_widget_destroy (GTK_WIDGET (w));
+  unlink (hold2);
+  g_assert_true (wait_until (no_edits, nullptr));
+}
+
 /* ---- phase 9 ---- */
 
 static GbkLoc *
@@ -1639,6 +1761,7 @@ main (int argc, char **argv)
   g_test_add_func ("/remotewin/between-machines", test_between_machines);
   g_test_add_func ("/remotewin/actions-there", test_actions_there);
   g_test_add_func ("/remotewin/git-there", test_git_there);
+  g_test_add_func ("/remotewin/drop-edits", test_drop_edits);
   int status = g_test_run ();
 
   while (gtk_events_pending ())

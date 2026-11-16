@@ -104,45 +104,51 @@ remove_empty (const char *dir)
     g_warning ("an unused download folder stays in the cache: %s", g_strerror (errno));
 }
 
-/* Without a watch (none set up, or the machine's identity unknown), a copy is only for
- * looking at: nobody's saves would reach the other machine. */
-static void
-make_read_only (const char *path)
+char *
+gbk_fetch_open_copy (const GbkLoc *loc)
+{
+  return gbk_edits_find (gbk_loc_host (loc), gbk_loc_path (loc));
+}
+
+void
+gbk_fetch_read_only (const char *path)
 {
   struct stat st;
   if (lstat (path, &st) == 0 && S_ISREG (st.st_mode))
     (void) !chmod (path, st.st_mode & 0555);
 }
 
-/* Record a downloaded copy and start watching it; false if it can't be (read-only then). */
-static bool
-watch (const Fetch *f, const GbkFetched *got, const GbkHello *hello, const char *copy, uint64_t *id)
+bool
+gbk_fetch_watch (const GbkLoc *orig, const GbkFetched *got, const char *dir, const char *app,
+                 const char *executable, bool dropped, uint64_t *id)
 {
-  const GbkItem *orig = g_ptr_array_index (f->items, got->index);
+  GbkRemote *r = gbk_remote_default ();
+  const GbkConn *c = r != nullptr ? gbk_remote_peek (r, gbk_loc_host (orig)) : nullptr;
+  const GbkHello *hello = c != nullptr ? gbk_conn_hello (c) : nullptr;
+  g_autofree char *copy = g_build_filename (dir, got->name, nullptr);
   struct stat st;
   if (!gbk_edits_ready () || hello == nullptr || lstat (copy, &st) != 0)
     return false;
-  g_autoptr (GAppInfo) app = app_for (f, orig);
+  g_autofree char *cache = gbk_edits_cache ();
   g_autoptr (GbkEditRecord) rec = g_new0 (GbkEditRecord, 1);
-  rec->id = g_path_get_basename (g_ptr_array_index (f->dirs, got->index));
+  rec->id = g_path_get_basename (dir);
   rec->name = g_strdup (got->name);
-  rec->host = g_strdup (gbk_loc_host (orig->loc));
+  rec->host = g_strdup (gbk_loc_host (orig));
   rec->machine_id = g_strdup (hello->machine_id);
   rec->uid = hello->uid;
   rec->remote = g_strdup (got->remote);
-  rec->app = g_strdup (app != nullptr ? g_app_info_get_display_name (app) : "");
+  rec->app = g_strdup (app);
   rec->base = got->token;
   rec->synced = gbk_file_token_of (&st);
-  int lock = gbk_edit_lock (f->cache, rec->id);
+  int lock = gbk_edit_lock (cache, rec->id);
   g_autoptr (GError) error = nullptr;
-  if (lock < 0 || !gbk_edit_record_save (f->cache, rec, &error))
+  if (lock < 0 || !gbk_edit_record_save (cache, rec, &error))
     {
       if (lock >= 0)
         close (lock);
       return false;
     }
-  g_autofree char *exe = executable_of (app);
-  *id = gbk_edits_watch (g_steal_pointer (&rec), lock, gbk_loc_path (orig->loc), exe);
+  *id = gbk_edits_watch (g_steal_pointer (&rec), lock, gbk_loc_path (orig), executable, dropped);
   return true;
 }
 
@@ -178,10 +184,6 @@ on_fetched (GbkJob *job, GError *error G_GNUC_UNUSED, GtkWindow *parent)
       return;
     }
 
-  const char *host = gbk_loc_host (((const GbkItem *) g_ptr_array_index (f->items, 0))->loc);
-  GbkRemote *r = gbk_remote_default ();
-  const GbkConn *c = r != nullptr ? gbk_remote_peek (r, host) : nullptr;
-  const GbkHello *hello = c != nullptr ? gbk_conn_hello (c) : nullptr;
   g_autoptr (GPtrArray) local = g_ptr_array_new_with_free_func ((GDestroyNotify) gbk_item_free);
   GPtrArray *launches = g_ptr_array_new_with_free_func ((GDestroyNotify) launch_free);
   for (guint i = 0; i < fetched->len; i++)
@@ -191,7 +193,11 @@ on_fetched (GbkJob *job, GError *error G_GNUC_UNUSED, GtkWindow *parent)
       g_autofree char *copy
           = g_build_filename (g_ptr_array_index (f->dirs, got->index), got->name, nullptr);
       uint64_t id = 0;
-      if (watch (f, got, hello, copy, &id))
+      g_autoptr (GAppInfo) app = app_for (f, orig);
+      g_autofree char *exe = executable_of (app);
+      const char *app_name = app != nullptr ? g_app_info_get_display_name (app) : "";
+      if (gbk_fetch_watch (orig->loc, got, g_ptr_array_index (f->dirs, got->index), app_name, exe,
+                           false, &id))
         {
           Launch *l = g_new0 (Launch, 1);
           l->app = app_for (f, orig);
@@ -199,7 +205,7 @@ on_fetched (GbkJob *job, GError *error G_GNUC_UNUSED, GtkWindow *parent)
           g_ptr_array_add (launches, l);
         }
       else
-        make_read_only (copy);
+        gbk_fetch_read_only (copy);
       g_ptr_array_add (local, copy_item (orig, copy));
     }
   launch (parent, local, f->app, launches);
@@ -220,7 +226,7 @@ gbk_fetch_open (GtkWindow *parent, GPtrArray *items, GAppInfo *app)
   for (guint i = 0; i < items->len; i++)
     {
       const GbkItem *it = g_ptr_array_index (items, i);
-      g_autofree char *copy = gbk_edits_find (gbk_loc_host (it->loc), gbk_loc_path (it->loc));
+      g_autofree char *copy = gbk_fetch_open_copy (it->loc);
       g_ptr_array_add (copy != nullptr ? again : wanted,
                        copy != nullptr ? copy_item (it, copy) : gbk_item_copy (it));
     }

@@ -1242,9 +1242,12 @@ gbk_view_drag_data_get (GtkWidget *w, GdkDragContext *ctx G_GNUC_UNUSED, GtkSele
 }
 
 static void
-gbk_view_drag_end (GtkWidget *w, GdkDragContext *ctx G_GNUC_UNUSED)
+gbk_view_drag_end (GtkWidget *w, GdkDragContext *ctx)
 {
-  gbk_drag_out_free (g_steal_pointer (&GBK_VIEW (w)->drag));
+  GbkView *v = GBK_VIEW (w);
+  if (v->drag != nullptr && gdk_drag_drop_succeeded (ctx))
+    gbk_drag_out_dropped (v->drag);
+  gbk_drag_out_free (g_steal_pointer (&v->drag));
 }
 
 /* Where a drop at (x, y) would go: a folder item under the pointer, else the view's own

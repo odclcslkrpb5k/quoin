@@ -32,10 +32,13 @@ void gbk_edits_shutdown (void);
 
 /* Watch a copy (its record already saved, its lock held: `lock_fd`, taken over). `asked`:
  * the path there as it was opened (before links were resolved), to find it again.
- * `executable`: the app's executable name to look for (nullptr: unknown). Returns an id for
+ * `executable`: the app's executable name to look for (nullptr: unknown). `dropped`: the
+ * copy was dropped onto an app we can't name (dnd.h); seen using it, it is watched until it
+ * lets go, as above; never seen within GBK_EDITS_DROP_GRACE_MS (a browser's upload, the
+ * desktop), the watch ends once any change has gone back. Returns an id for
  * gbk_edits_launched. */
 uint64_t gbk_edits_watch (GbkEditRecord *rec, int lock_fd, const char *asked,
-                          const char *executable);
+                          const char *executable, bool dropped);
 /* The app for watch `id` started as process `pid`. */
 void gbk_edits_launched (uint64_t id, GPid pid);
 /* The copy of `host`:`path` being watched (nullptr: none). g_free. */
@@ -84,5 +87,6 @@ void gbk_edits_set_in_front_for_test (int in_front);
 #define GBK_EDITS_POLL_MS 1000
 #define GBK_EDITS_APP_CHECK_MS 5000
 #define GBK_EDITS_GRACE_MS 60000
+#define GBK_EDITS_DROP_GRACE_MS 20000
 #define GBK_EDITS_AFTER_WINDOWS_MS ((int) 10 * 60 * 1000) /* app unknown: after the last window */
 #define GBK_EDITS_KEEP_DAYS 7                       /* finished copies are kept this long */

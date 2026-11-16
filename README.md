@@ -97,9 +97,14 @@ program that won't start. On anything else, [build from source](#building).
   and between Quoin windows. Drag files from there to another application (a browser's
   upload, an editor, the desktop) and it gets copies downloaded here, into
   `~/.cache/quoin/remote/`; the download starts as you start dragging, so it's normally
-  done by the time you drop (if not, the status bar asks you to drop again). This is for
-  files up to 64 MB in all; folders, and anything bigger, go to other applications as
-  their `ws1:/path` text only. A download nobody took is removed when the drag ends.
+  done by the time you drop (if not, the status bar asks you to drop again). A dropped file
+  is like one you opened: save it in that application and the save goes back to `ws1`
+  (with the same checks), for as long as the application keeps the file open. If nothing
+  holds on to it (a browser's upload, a drop on the desktop), that ends by itself after
+  a few seconds, sending back any change first. A file you already have open is dragged
+  as that same copy. This is for files up to 64 MB in all; folders, and anything bigger,
+  go to other applications as their `ws1:/path` text only. A download nobody took is
+  removed when the drag ends.
 - **Git status, at a glance.** In a folder inside a git work tree, names are shown in
   bold on a colour: **pale blue** untracked, **light green** new and staged, **yellow**
   changes staged, **orange** changes not yet staged (even if some are), **red** a merge

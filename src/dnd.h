@@ -52,6 +52,9 @@ typedef struct GbkDragOut GbkDragOut;
 [[nodiscard]] char *gbk_drag_out_data (GbkDragOut *d, guint info);
 /* Fill drag data in format `info`; nothing set if it can't be had (yet). */
 void gbk_drag_out_get (GbkDragOut *d, GtkSelectionData *sd, guint info);
+/* The drop happened (the drag ended, and the target said it took it): copies another app
+ * got are watched like opened files, so saves there go back (fetch.h, edits.h). */
+void gbk_drag_out_dropped (GbkDragOut *d);
 /* The drag ended: a download nobody took is stopped and removed. */
 void gbk_drag_out_free (GbkDragOut *d);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (GbkDragOut, gbk_drag_out_free)
