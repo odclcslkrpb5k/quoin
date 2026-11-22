@@ -42,6 +42,7 @@ staged_release() {
     exit 1
   fi
   local hash bin=$root/out/release/src/quoin serve=$root/out/release/src/quoin-serve
+  local helper=$root/out/release/src/quoin-appimage
   local stamp=$root/out/release/released
   hash=$(git -C "$root" rev-parse --short=12 HEAD)
   if [[ ! -f $stamp || $(<"$stamp") != "$hash" ]]; then
@@ -57,11 +58,15 @@ staged_release() {
     echo "$cmd: $serve reports '$("$serve" --version)', expected quoin-serve $hash" >&2
     exit 1
   fi
+  if [[ $("$helper" --version) != "quoin-appimage $hash" ]]; then
+    echo "$cmd: $helper reports '$("$helper" --version)', expected quoin-appimage $hash" >&2
+    exit 1
+  fi
   local dist=$root/out/dist/$hash
   rm -rf "$dist"
   mkdir -p "$dist"
-  cp "$bin" "$serve" "$root/data/quoin.desktop.in" "$root/data/icons/$icon" "$dist/"
-  (cd "$dist" && sha256sum quoin quoin-serve quoin.desktop.in "$icon" > SHA256SUMS)
+  cp "$bin" "$serve" "$helper" "$root/data/quoin.desktop.in" "$root/data/icons/$icon" "$dist/"
+  (cd "$dist" && sha256sum quoin quoin-serve quoin-appimage quoin.desktop.in "$icon" > SHA256SUMS)
   echo "$dist"
 }
 
@@ -91,11 +96,12 @@ publish_release() {
     --notes "Built from $full on Ubuntu 26.04 (x86_64), hardened release build; the full release gate (sanitizer tests, analyzer, fuzzing, hardened tests) passed.
 
 Install or update: \`curl -fsSL https://raw.githubusercontent.com/odclcslkrpb5k/quoin/main/install.sh | bash\`" \
-    "$dist/quoin" "$dist/quoin-serve" "$dist/quoin.desktop.in" "$dist/$icon" "$dist/SHA256SUMS"
+    "$dist/quoin" "$dist/quoin-serve" "$dist/quoin-appimage" "$dist/quoin.desktop.in" \
+    "$dist/$icon" "$dist/SHA256SUMS"
   # Check what was published rather than trusting it went through: every file there.
   local have
   have=$(gh release view "$hash" --json assets -q '.assets[].name')
-  for want in quoin quoin-serve quoin.desktop.in "$icon" SHA256SUMS; do
+  for want in quoin quoin-serve quoin-appimage quoin.desktop.in "$icon" SHA256SUMS; do
     if ! grep -qxF "$want" <<<"$have"; then
       echo "publish: release $hash is missing $want" >&2
       exit 1

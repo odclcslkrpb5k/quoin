@@ -60,7 +60,7 @@ Or build from source: see https://github.com/$repo#building"
     # Expanded now: `src` is local and gone by the time the EXIT trap runs.
     trap "rm -rf '$src'" EXIT
     local f
-    for f in quoin quoin-serve quoin.desktop.in "$icon" SHA256SUMS; do
+    for f in quoin quoin-serve quoin-appimage quoin.desktop.in "$icon" SHA256SUMS; do
       curl -fsSL --proto '=https' --tlsv1.2 -o "$src/$f" "$base/$f" \
         || die "download failed: $base/$f"
     done
@@ -69,12 +69,13 @@ Or build from source: see https://github.com/$repo#building"
     (cd "$src" && sha256sum --quiet --strict -c SHA256SUMS) || die "checksum mismatch"
   fi
 
-  [[ -f $src/quoin && -f $src/quoin-serve && -f $src/quoin.desktop.in && -f $src/$icon ]] \
-    || die "missing files in $src"
-  chmod 755 "$src/quoin" "$src/quoin-serve"
+  [[ -f $src/quoin && -f $src/quoin-serve && -f $src/quoin-appimage && -f $src/quoin.desktop.in \
+     && -f $src/$icon ]] || die "missing files in $src"
+  chmod 755 "$src/quoin" "$src/quoin-serve" "$src/quoin-appimage"
   local got
   got=$("$src/quoin" --version) || die "the binary doesn't run here (missing libraries?)"
   "$src/quoin-serve" --version >/dev/null || die "quoin-serve doesn't run here"
+  "$src/quoin-appimage" --version >/dev/null || die "quoin-appimage doesn't run here"
 
   local bindir=$prefix/bin appdir=$prefix/share/applications
   local icondir=$prefix/share/icons/hicolor/scalable/apps
@@ -89,6 +90,11 @@ Or build from source: see https://github.com/$repo#building"
   cp "$src/quoin-serve" "$bindir/.quoin-serve.new"
   chmod 755 "$bindir/.quoin-serve.new"
   mv -f "$bindir/.quoin-serve.new" "$bindir/quoin-serve"
+  # Reads AppImages' icons and names for the Icons view, in a process of its own; found
+  # next to the quoin binary.
+  cp "$src/quoin-appimage" "$bindir/.quoin-appimage.new"
+  chmod 755 "$bindir/.quoin-appimage.new"
+  mv -f "$bindir/.quoin-appimage.new" "$bindir/quoin-appimage"
   sed "s|@BIN@|$bindir/quoin|g" "$src/quoin.desktop.in" > "$appdir/.quoin.desktop.new"
   mv -f "$appdir/.quoin.desktop.new" "$appdir/quoin.desktop"
   cp "$src/$icon" "$icondir/.$icon.new"
@@ -97,6 +103,7 @@ Or build from source: see https://github.com/$repo#building"
   say "installed $got"
   say "  $bindir/quoin"
   say "  $bindir/quoin-serve"
+  say "  $bindir/quoin-appimage"
   say "  $appdir/quoin.desktop"
   say "  $icondir/$icon"
 

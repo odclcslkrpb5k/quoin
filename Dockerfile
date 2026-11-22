@@ -24,6 +24,7 @@ RUN apt-get update --error-on=any \
       xvfb xauth libxtst-dev dbus-daemon \
       openssh-client openssh-server libnss-wrapper \
       git \
+      zlib1g-dev libzstd-dev liblzma-dev squashfs-tools \
       fonts-dejavu-core adwaita-icon-theme librsvg2-common \
  && rm -rf /var/lib/apt/lists/*
 

@@ -434,10 +434,27 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   folder view (not a launcher mode); labels = AppImage Name + version, else filename; 48
   default; read inside AppImages in a fuzzed helper process, cached, generic icons until
   found, failing safe. Remote: doesn't need to be perfect (generic icons).
-  NEXT: stage 2 squashfs/AppImage reader + helper; stage 3 cache + .desktop Exec matches.
+  STAGE 2 built (2026-11-22): squashfs.c (squashfs 4.0 reader, gzip/zstd/xz, offsets
+  checked, 64 MiB decompression cap per image, 65536 names, 8 links, 256 path steps,
+  links stay inside the image; absolute links start at the image's top), appimage.c (ELF
+  section-header end = image start, needs "AI\x02" at e_ident[8..10]; .desktop Name /
+  X-AppImage-Version / Icon; .DirIcon else <Icon>.png/.svg), appimage_lib linked ONLY into
+  quoin-appimage + tests + fuzzer. Helper (appimage-main.c): no_new_privs, RLIMIT_CORE 0,
+  CPU 10 s, AS 512 MiB (not under ASan: it reserves TBs), NO RLIMIT_FSIZE (glycin hands
+  images to its sandboxed decoders via memory files: SIGXFSZ otherwise). Decodes PNG
+  (signature) or SVG ("<svg" in the first KiB) with gdk-pixbuf, writes appimage-out.h's
+  format (magic, name, version, w, h, premultiplied ARGB32); appimage-out.c (core) parses
+  it strictly (every pixel premultiplied). Shipped: build/publish/install.sh/check-binary
+  allowlist. Tests build real images with mksquashfs (-processors 1). Fuzz: fuzz-appimage.
+  cppcheck needs plain code here: g_bytes_get_size, not the out-param; no const laundering.
+  NEXT: stage 3 = cache (freedesktop thumbnails "large" + own ini for name/version/fail)
+  on a worker, view shows them; .desktop Exec matches for ~/bin.
   FLAKE seen once (2026-11-21, full check): /scanner/large-directory "main loop blocked for
   322 ms by on_scanner_wake" under ASan with the whole suite running; 6/6 alone and the
   rerun passed. If it recurs: look at DRAIN_BUDGET x chunk size per wakeup, not the limit.
+  RECURRED 2026-11-22 with /window/open-folder-elsewhere too (279 ms): the host had load
+  ~11 on 8 cores from the user's other work (java, freecadcmd). Check `uptime` before
+  chasing a stall. Own share reduced: test-appimage's mksquashfs uses one core.
 - DEVICES (user, 2026-10-15: Thunar's sidebar Devices list, in the ☰ menu; user chose ONE
   "Devices" submenu, each device a submenu Open / Unmount / Eject|Safely Remove). devices.{h,c}
   (core, GIO only): GbkDevices per window wraps GVolumeMonitor (gvfs udisks2 if installed,

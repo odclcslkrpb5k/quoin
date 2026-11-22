@@ -17,23 +17,24 @@ test_env.set('XDG_DATA_HOME', '/nonexistent/data')
 test_env.set('GBK_SOURCE_ROOT', meson.project_source_root())
 test_env.set('GBK_ARTIFACTS', meson.project_source_root() / 'out' / 'artifacts')
 test_env.set('QUOIN_SERVE', serve_exe.full_path())
+test_env.set('QUOIN_APPIMAGE', appimage_exe.full_path())
 
-test_libs = [core_lib, lifetime_lib]
+test_libs = [core_lib, lifetime_lib, appimage_lib]
 gui_test_libs = [gui_lib, core_lib, lifetime_lib]
 gui_tests = ['view', 'window', 'devices', 'remotewin']
 # GUI tests drive real X input (XTest) where GTK only listens to the X server: drag and drop.
 gui_test_deps = deps + [dependency('x11'), dependency('xtst')]
 test_inc = [config_inc, core_inc]
 
-unit_tests = ['lifetime', 'filetype', 'natsort', 'loc', 'dirmodel', 'scanner', 'command', 'config', 'menu', 'open', 'fileops', 'clip', 'job', 'proto', 'peer', 'notify', 'serve', 'conn', 'remote', 'sshd', 'git']
-fuzz_targets = ['filetype', 'natsort', 'inotify', 'entry', 'command', 'config', 'clip', 'proto', 'git']
+unit_tests = ['lifetime', 'filetype', 'natsort', 'loc', 'dirmodel', 'scanner', 'command', 'config', 'menu', 'open', 'fileops', 'clip', 'job', 'proto', 'peer', 'notify', 'serve', 'conn', 'remote', 'sshd', 'git', 'appimage']
+fuzz_targets = ['filetype', 'natsort', 'inotify', 'entry', 'command', 'config', 'clip', 'proto', 'git', 'appimage']
 
 if not get_option('fuzzing')
   foreach name : unit_tests
     exe = executable('test-' + name, 'test-' + name + '.c',
       include_directories : test_inc,
       link_with : test_libs,
-      dependencies : deps,
+      dependencies : deps + compress_deps,
     )
     test(name, exe, env : test_env, protocol : 'tap', args : ['--tap'], timeout : 120)
   endforeach
@@ -58,13 +59,13 @@ foreach name : fuzz_targets
       include_directories : test_inc + [include_directories('fuzz')],
       link_with : test_libs,
       link_args : '-fsanitize=fuzzer',
-      dependencies : deps,
+      dependencies : deps + compress_deps,
     )
   else
     exe = executable('replay-' + name, 'fuzz' / 'fuzz-' + name + '.c', 'fuzz' / 'driver.c',
       include_directories : test_inc + [include_directories('fuzz')],
       link_with : test_libs,
-      dependencies : deps,
+      dependencies : deps + compress_deps,
     )
     test('fuzz-seeds-' + name, exe, env : test_env, args : [seeds], timeout : 300)
   endif

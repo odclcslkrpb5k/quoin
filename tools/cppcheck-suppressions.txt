@@ -7,3 +7,6 @@ assertWithSideEffect
 # 21: a callback's parameter "could be const", but its type is fixed by the GTK or GLib
 # signal it is connected to.
 constParameterCallback
+# 1 (2026-11-22): GLib's own g_bit_nth_msf_impl, `nth_bit < 0` on a gint that cppcheck takes
+# for unsigned. GLib's header, not our code; only there.
+unsignedLessThanZero:/usr/include/glib-2.0/glib/gutils.h

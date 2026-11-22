@@ -47,6 +47,7 @@ core_lib = static_library('gbk-core',
   'notify.c',
   'devices.c',
   'viewstate.c',
+  'appimage-out.c',
   include_directories : config_inc,
   link_with : [serve_lib, lifetime_lib],
   dependencies : deps,
@@ -72,6 +73,19 @@ gui_lib = static_library('gbk-gui',
 )
 
 core_inc = include_directories('.')
+
+# Reading AppImages: squashfs images from wherever the user got them, so only the
+# quoin-appimage helper (a process of its own) and the tests and fuzzer link this.
+compress_deps = [dependency('zlib'), dependency('libzstd'), dependency('liblzma')]
+appimage_lib = static_library('gbk-appimage', 'squashfs.c', 'appimage.c',
+  include_directories : config_inc,
+  dependencies : serve_deps + compress_deps,
+)
+appimage_exe = executable('quoin-appimage', 'appimage-main.c',
+  include_directories : config_inc,
+  link_with : appimage_lib,
+  dependencies : serve_deps + compress_deps + [dependency('gdk-pixbuf-2.0')],
+)
 
 serve_exe = executable('quoin-serve', 'serve.c',
   include_directories : config_inc,
