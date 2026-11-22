@@ -342,6 +342,117 @@ test_output_refused (void)
   g_byte_array_unref (ok);
 }
 
+/* The version in upstream's file names: the user's own nine, and what isn't a version. */
+static void
+test_version_in_name (void)
+{
+  const char *const cases[][2] = {
+    { "FreeCAD_1.1.3-Linux-x86_64-py311.AppImage", "1.1.3" },
+    { "FreeCAD_26.3rc2-Linux-x86_64.AppImage", "26.3rc2" },
+    { "OrcaSlicer_Linux_AppImage_Ubuntu2404_V2.5.1.AppImage", "2.5.1" },
+    { "Snapmaker_Orca_Linux_AppImage_Ubuntu2404_V2.4.1-alpha.AppImage", "2.4.1-alpha" },
+    { "Snapmaker_Orca_Linux_AppImage_Ubuntu2404_V2.4.1.AppImage", "2.4.1" },
+    { "arduino-ide_2.3.6_Linux_64bit.AppImage", "2.3.6" },
+    { "solidcraft-0.17.0-linux-x86_64.AppImage", "0.17.0" },
+    { "solidcraft-0.40.0-rc.2-linux-x86_64.AppImage", "0.40.0-rc.2" },
+    { "App-v3.0.BETA1.appimage", "3.0.BETA1" },
+    { "App 1.2 nightly.AppImage", "1.2" },
+    { "1.0.AppImage", "1.0" },
+    { "App-2.0-x86_64", "2.0" },
+    { "App-x86_64.AppImage", nullptr },
+    { "App-py311-64bit.AppImage", nullptr },
+    { "App_Ubuntu24.04.AppImage", nullptr },   /* not at the start of a part */
+    { "App-2.3.6x.AppImage", nullptr },
+    { "App-1..2.AppImage", nullptr },
+    { "App-1.AppImage", nullptr },
+    { "App-v.AppImage", nullptr },
+    { ".AppImage", nullptr },
+    { "", nullptr },
+  };
+  for (size_t i = 0; i < G_N_ELEMENTS (cases); i++)
+    {
+      g_autofree char *v = gbk_appimage_version_in_name (cases[i][0]);
+      if (g_strcmp0 (v, cases[i][1]) != 0)
+        gbk_fatal ("%s: %s, not %s", cases[i][0], v, cases[i][1]);
+    }
+}
+
+/* Read an AppImage made from `dir` (gzip). */
+static void
+read_tree (const char *dir, GbkAppImage *a)
+{
+  g_autoptr (GBytes) img = make_image (dir, "gzip");
+  size_t img_len, elf;
+  const uint8_t *img_data = g_bytes_get_data (img, &img_len);
+  g_autoptr (GBytes) ai = make_appimage (img_data, img_len, &elf);
+  g_autoptr (GError) error = nullptr;
+  if (!gbk_appimage_read (mem_read, ai, g_bytes_get_size (ai), a, &error))
+    gbk_fatal ("not read: %s", error->message);
+}
+
+/* No X-AppImage-Version: the newest release in its AppStream metadata, if it's sound. */
+static void
+test_metainfo (void)
+{
+  const char desktop[] = "[Desktop Entry]\nType=Application\nName=Meta App\nIcon=app\n";
+  struct
+  {
+    const char *file, *xml, *want;
+  } cases[] = {
+    { "usr/share/metainfo/org.ex.App.metainfo.xml",
+      "<?xml version=\"1.0\"?><component><id>org.ex.App</id><releases>"
+      "<release version=\"26.3.0\" date=\"2026-10-18\"><description><p>x</p></description>"
+      "</release><release version=\"1.0\"/></releases></component>",
+      "26.3.0" },
+    { "usr/share/metainfo/org.ex.App.appdata.xml",
+      "<component><releases><release date=\"1\" version=\"2.4.1\"/></releases></component>",
+      "2.4.1" },
+    { "usr/share/appdata/org.ex.App.appdata.xml",
+      "<component><releases><release version=\"0.9\"/></releases></component>", "0.9" },
+    /* Only <component><releases><release>. */
+    { "usr/share/metainfo/org.ex.App.metainfo.xml",
+      "<component><x><releases><release version=\"6\"/></releases></x>"
+      "<release version=\"7\"/></component>",
+      nullptr },
+    { "usr/share/metainfo/org.ex.App.metainfo.xml",
+      "<component><releases></releases><release version=\"7\"/></component>", nullptr },
+    /* Broken after the release: still counts; before it: nothing. */
+    { "usr/share/metainfo/org.ex.App.metainfo.xml",
+      "<component><releases><release version=\"3.1\"/></releases><oops></component>", "3.1" },
+    { "usr/share/metainfo/org.ex.App.metainfo.xml", "<component><releases><release version=\"3.1\"",
+      nullptr },
+    { "usr/share/metainfo/org.ex.App.metainfo.xml",
+      "<component><releases><release version=\"a\nb\tc\"/></releases></component>", "a b c" },
+    { "usr/share/metainfo/org.ex.App.metainfo.xml", "", nullptr },
+    { "usr/share/metainfo/other.metainfo.xml",
+      "<component><releases><release version=\"5\"/></releases></component>", nullptr },
+  };
+  for (size_t i = 0; i < G_N_ELEMENTS (cases); i++)
+    {
+      g_autofree char *leaf = g_strdup_printf ("meta%zu", i);
+      g_autofree char *dir = g_build_filename (tmp, leaf, nullptr);
+      put (dir, "org.ex.App.desktop", desktop, strlen (desktop));
+      put (dir, cases[i].file, cases[i].xml, strlen (cases[i].xml));
+      GbkAppImage a;
+      read_tree (dir, &a);
+      g_assert_cmpstr (a.name, ==, "Meta App");
+      if (g_strcmp0 (a.version, cases[i].want) != 0)
+        gbk_fatal ("case %zu: %s, not %s", i, a.version, cases[i].want);
+      gbk_appimage_clear (&a);
+    }
+
+  /* X-AppImage-Version, when there is one, comes first. */
+  g_autofree char *dir = g_build_filename (tmp, "meta-both", nullptr);
+  const char both[] = "[Desktop Entry]\nName=Meta App\nX-AppImage-Version=1.2.3\n";
+  const char xml[] = "<component><releases><release version=\"9\"/></releases></component>";
+  put (dir, "org.ex.App.desktop", both, strlen (both));
+  put (dir, "usr/share/metainfo/org.ex.App.metainfo.xml", xml, strlen (xml));
+  GbkAppImage a;
+  read_tree (dir, &a);
+  g_assert_cmpstr (a.version, ==, "1.2.3");
+  gbk_appimage_clear (&a);
+}
+
 static void
 rm_rf (const char *path)
 {
@@ -379,6 +490,8 @@ main (int argc, char **argv)
   g_test_add_func ("/appimage/damaged", test_damaged);
   g_test_add_func ("/appimage/appimage", test_appimage);
   g_test_add_func ("/appimage/output-refused", test_output_refused);
+  g_test_add_func ("/appimage/version-in-name", test_version_in_name);
+  g_test_add_func ("/appimage/metainfo", test_metainfo);
   int status = g_test_run ();
   g_bytes_unref (big);
   g_bytes_unref (png);

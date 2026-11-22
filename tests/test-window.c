@@ -1950,8 +1950,15 @@ label_is (void *data)
          && gbk_view_has_app_icon_for_test (gbk_window_view (c->w), h);
 }
 
-/* An AppImage shows its own icon and "Name Version"; a broken one stays as it was (the
- * generic icon, its file name). Both are cached: the helper isn't asked again. */
+static bool
+helper_ran (void *runs)
+{
+  return gbk_app_icons_helper_runs () >= GPOINTER_TO_INT (runs);
+}
+
+/* An AppImage shows its own icon and "Name Version", the version in its file name first;
+ * a broken one stays as it was (the generic icon, its file name). All are cached: the
+ * helper isn't asked again, until another Quoin wrote the cache. */
 static void
 test_appimages (void)
 {
@@ -1960,6 +1967,10 @@ test_appimages (void)
   testappimage_make (good, "Test App", "1.2.3");
   g_autofree char *tree = g_strconcat (good, ".tree", nullptr);
   rm_rf (tree);
+  g_autofree char *beta = g_build_filename (root, "Test_V2.0.0-beta.AppImage", nullptr);
+  testappimage_make (beta, "Test App", "2.0.0");
+  g_autofree char *beta_tree = g_strconcat (beta, ".tree", nullptr);
+  rm_rf (beta_tree);
   g_autofree char *broken = g_build_filename (root, "Broken.AppImage", nullptr);
   g_assert_true (g_file_set_contents (broken,
                                       "\x7f"
@@ -1976,6 +1987,8 @@ test_appimages (void)
   if (!wait_until (label_is, &want))
     gbk_fatal ("label: %s", gbk_view_label_for_test (gbk_window_view (w),
                                                      gbk_dir_model_find (model_of (w), want.name)));
+  LabelCtx want_beta = { w, "Test_V2.0.0-beta.AppImage", "Test App 2.0.0-beta" };
+  g_assert_true (wait_until (label_is, &want_beta));
   g_autofree char *failed_ini = nullptr;
   {
     g_autofree char *uri = g_filename_to_uri (broken, nullptr, nullptr);
@@ -1987,7 +2000,7 @@ test_appimages (void)
   GbkHandle bh = gbk_dir_model_find (model_of (w), "Broken.AppImage");
   g_assert_cmpstr (gbk_view_label_for_test (gbk_window_view (w), bh), ==, "Broken.AppImage");
   g_assert_false (gbk_view_has_app_icon_for_test (gbk_window_view (w), bh));
-  g_assert_cmpint (gbk_app_icons_helper_runs (), ==, runs + 2);
+  g_assert_cmpint (gbk_app_icons_helper_runs (), ==, runs + 3);
   {
     g_autofree char *uri = g_filename_to_uri (good, nullptr, nullptr);
     g_autofree char *key = g_compute_checksum_for_string (G_CHECKSUM_MD5, uri, -1);
@@ -2021,8 +2034,23 @@ test_appimages (void)
   LabelCtx again = { w2, "Test-1.2.3-x86_64.AppImage", "Test App 1.2.3" };
   g_assert_true (wait_until (label_is, &again));
   run_for_ms (300);
-  g_assert_cmpint (gbk_app_icons_helper_runs (), ==, runs + 2);
+  g_assert_cmpint (gbk_app_icons_helper_runs (), ==, runs + 3);
   gtk_widget_destroy (GTK_WIDGET (w2));
+
+  /* Written by another Quoin: read again, the broken one too. */
+  {
+    g_autoptr (GKeyFile) kf = g_key_file_new ();
+    g_assert_true (g_key_file_load_from_file (kf, failed_ini, G_KEY_FILE_NONE, nullptr));
+    g_key_file_set_string (kf, "AppImage", "Reader", "older");
+    g_assert_true (g_key_file_save_to_file (kf, failed_ini, nullptr));
+  }
+  GbkWindow *w3 = window_at (app, ctx, root);
+  gtk_widget_show_all (GTK_WIDGET (w3));
+  wait_at (w3, root);
+  g_assert_true (wait_until (helper_ran, GINT_TO_POINTER (runs + 4)));
+  run_for_ms (300);
+  g_assert_cmpint (gbk_app_icons_helper_runs (), ==, runs + 4);
+  gtk_widget_destroy (GTK_WIDGET (w3));
   rm_rf (root);
 }
 

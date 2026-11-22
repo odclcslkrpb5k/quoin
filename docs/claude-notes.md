@@ -458,6 +458,15 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   file name still. Pango hyphen insertion off for names. Tests: test-window
   /window/appimages (real AppImage via tests/testappimage.h, broken one, cache reuse =
   no new helper runs).
+  VERSIONS (2026-11-22, after the user's real ~/Applications showed none for FreeCAD,
+  OrcaSlicer, Snapmaker Orca): label version = gbk_appimage_version_in_name(file name)
+  (appimage-out.c, core; first '_'/'-'/' '-delimited part of digits with a '.', optional
+  v, pre-release mark alpha/beta/rc/pre/preview/dev/nightly) ELSE X-AppImage-Version ELSE
+  AppStream metainfo (helper: usr/share/metainfo/<desktop id>.{metainfo,appdata}.xml,
+  usr/share/appdata; first <component><releases><release version>; GMarkup, 256 KiB).
+  Why filename first: metainfo is coarse (FreeCAD 26.3rc2 says 26.3.0; Snapmaker alpha
+  and release both 2.4.1); OrcaSlicer has no version inside at all. Cache now valid only
+  when Reader == GBK_VERSION (any entry, not just Failed): a new Quoin rereads once.
   NOT DONE (offered): .desktop Exec matches for ~/bin executables; Ctrl+scroll zoom.
   FLAKE seen once (2026-11-21, full check): /scanner/large-directory "main loop blocked for
   322 ms by on_scanner_wake" under ASan with the whole suite running; 6/6 alone and the

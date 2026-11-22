@@ -9,7 +9,8 @@
 typedef struct
 {
   char *name;           /* the .desktop file's Name (valid UTF-8), or nullptr */
-  char *version;        /* its X-AppImage-Version, or nullptr */
+  char *version;        /* its X-AppImage-Version, else the newest release in its
+                  * AppStream metadata (usr/share/metainfo), or nullptr */
   GBytes *icon;         /* .DirIcon's bytes (PNG or SVG, as shipped), or nullptr */
 } GbkAppImage;
 
@@ -25,4 +26,5 @@ void gbk_appimage_clear (GbkAppImage *a);
 
 #define GBK_APPIMAGE_DESKTOP_MAX ((size_t) 64 * 1024)
 #define GBK_APPIMAGE_ICON_MAX ((size_t) 4 * 1024 * 1024)
+#define GBK_APPIMAGE_METAINFO_MAX ((size_t) 256 * 1024)
 #define GBK_APPIMAGE_TEXT_MAX 200                  /* name and version, in characters */

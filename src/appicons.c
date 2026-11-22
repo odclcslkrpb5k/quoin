@@ -130,12 +130,16 @@ save_atomically (const char *path, const char *data, size_t len)
     g_debug ("AppImage cache not written: %s", error->message);
 }
 
-/* "Name Version", the name alone, or nullptr for neither. */
+/* "Name Version", the name alone, or nullptr for neither. The version in the file's name
+ * comes first: upstream names its files more exactly than it fills in the metadata
+ * ("26.3rc2" against "26.3.0"; an alpha and its release both "2.4.1"). */
 static char *
-label_of (const char *name, const char *version)
+label_of (const char *file, const char *name, const char *declared)
 {
   if (name == nullptr)
     return nullptr;
+  g_autofree char *in_name = gbk_appimage_version_in_name (file);
+  const char *version = in_name != nullptr ? in_name : declared;
   if (version == nullptr || strstr (name, version) != nullptr)
     return g_strdup (name);
   return g_strdup_printf ("%s %s", name, version);
@@ -307,14 +311,15 @@ find (const GbkAppIcons *a, const Want *w)
   int64_t mtime_s = w->mtime_ns / 1000000000;
   g_autofree char *ini = ini_path (key);
   g_autoptr (GKeyFile) kf = g_key_file_new ();
-  if (g_key_file_load_from_file (kf, ini, G_KEY_FILE_NONE, nullptr)
-      && g_key_file_get_int64 (kf, "AppImage", "MTime", nullptr) == w->mtime_ns
-      && g_key_file_get_uint64 (kf, "AppImage", "Size", nullptr) == w->size)
+  bool loaded = g_key_file_load_from_file (kf, ini, G_KEY_FILE_NONE, nullptr);
+  g_autofree char *reader
+      = loaded ? g_key_file_get_string (kf, "AppImage", "Reader", nullptr) : nullptr;
+  if (loaded && g_key_file_get_int64 (kf, "AppImage", "MTime", nullptr) == w->mtime_ns
+      && g_key_file_get_uint64 (kf, "AppImage", "Size", nullptr) == w->size
+      && g_strcmp0 (reader, GBK_VERSION) == 0)
     {
-      g_autofree char *reader = g_key_file_get_string (kf, "AppImage", "Reader", nullptr);
-      /* Not again until it changes, or another Quoin (which may read it) comes. */
-      if (g_key_file_get_boolean (kf, "AppImage", "Failed", nullptr)
-          && g_strcmp0 (reader, GBK_VERSION) == 0)
+      /* Not again until it changes, or another Quoin (which may read more of it) comes. */
+      if (g_key_file_get_boolean (kf, "AppImage", "Failed", nullptr))
         return r;
       g_autofree char *name = g_key_file_get_string (kf, "AppImage", "Name", nullptr);
       g_autofree char *version = g_key_file_get_string (kf, "AppImage", "Version", nullptr);
@@ -322,7 +327,7 @@ find (const GbkAppIcons *a, const Want *w)
       cairo_surface_t *thumb = has_icon ? load_thumbnail (key, path, mtime_s) : nullptr;
       if (!has_icon || thumb != nullptr)
         {
-          r->label = label_of (name, version);
+          r->label = label_of (w->name, name, version);
           if (thumb != nullptr)
             {
               r->icon = fit (thumb, w->px);
@@ -364,7 +369,7 @@ find (const GbkAppIcons *a, const Want *w)
   size_t len;
   g_autofree char *text = g_key_file_to_data (out, &len, nullptr);
   save_atomically (ini, text, len);
-  r->label = label_of (info.name, info.version);
+  r->label = label_of (w->name, info.name, info.version);
   gbk_appimage_info_clear (&info);
   return r;
 }

@@ -22,3 +22,10 @@ void gbk_appimage_info_clear (GbkAppImageInfo *info);
 
 /* Parse the helper's whole output. False if anything about it is wrong. */
 [[nodiscard]] bool gbk_appimage_out_parse (const uint8_t *data, size_t len, GbkAppImageInfo *out);
+
+/* The version in an AppImage's file name, as upstream names them, or nullptr:
+ * "FreeCAD_26.3rc2-Linux-x86_64.AppImage" -> "26.3rc2",
+ * "Snapmaker_Orca_Linux_AppImage_Ubuntu2404_V2.4.1-alpha.AppImage" -> "2.4.1-alpha".
+ * The first part (between '_', '-' or ' ') that is digits with at least one '.', after an
+ * optional 'v', with a pre-release mark if one follows (alpha, beta, rc, ...). g_free. */
+[[nodiscard]] char *gbk_appimage_version_in_name (const char *name);

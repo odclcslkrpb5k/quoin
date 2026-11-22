@@ -75,6 +75,68 @@ clean (const char *raw)
   return g_steal_pointer (&valid);
 }
 
+/* The newest release's version in AppStream metadata: the first <release version="...">
+ * in <component><releases> (the specification has them newest first). */
+typedef struct
+{
+  int depth;
+  bool in_releases;  /* inside <component><releases> */
+  char *version;
+} Releases;
+
+static void
+release_start (GMarkupParseContext *, const char *element, const char **names, const char **values,
+               void *data, GError **)
+{
+  Releases *r = data;
+  r->depth++;
+  if (r->depth == 2 && strcmp (element, "releases") == 0)
+    r->in_releases = true;
+  else if (r->depth == 3 && r->in_releases && r->version == nullptr
+           && strcmp (element, "release") == 0)
+    for (size_t i = 0; names[i] != nullptr; i++)
+      if (strcmp (names[i], "version") == 0)
+        r->version = g_strdup (values[i]);
+}
+
+static void
+release_end (GMarkupParseContext *, const char *, void *data, GError **)
+{
+  Releases *r = data;
+  if (r->depth == 2)
+    r->in_releases = false;
+  r->depth--;
+}
+
+static char *
+metainfo_version (GbkSquash *s, const char *id)
+{
+  const char *const where[][2] = { { "usr/share/metainfo/", ".metainfo.xml" },
+                                   { "usr/share/metainfo/", ".appdata.xml" },
+                                   { "usr/share/appdata/", ".appdata.xml" } };
+  for (size_t i = 0; i < G_N_ELEMENTS (where); i++)
+    {
+      g_autofree char *path = g_strconcat (where[i][0], id, where[i][1], nullptr);
+      g_autoptr (GError) e = nullptr;
+      g_autoptr (GBytes) xml = gbk_squash_read (s, path, GBK_APPIMAGE_METAINFO_MAX, &e);
+      if (xml == nullptr)
+        continue;
+      static const GMarkupParser parser
+          = { .start_element = release_start, .end_element = release_end };
+      Releases r = { 0 };
+      size_t len;
+      const char *data = g_bytes_get_data (xml, &len);
+      GMarkupParseContext *ctx = g_markup_parse_context_new (&parser, 0, &r, nullptr);
+      /* Whatever was found before any error in it still counts. */
+      bool parsed = len > 0 && g_markup_parse_context_parse (ctx, data, (gssize) len, nullptr);
+      g_markup_parse_context_free (ctx);
+      g_autofree char *version = g_steal_pointer (&r.version);
+      if (parsed || version != nullptr)
+        return clean (version);
+    }
+  return nullptr;
+}
+
 /* An icon file at the top named for the .desktop file's Icon key ("app" -> app.png). */
 static GBytes *
 icon_named (GbkSquash *s, const char *icon)
@@ -112,11 +174,13 @@ gbk_appimage_read (GbkReadAt read, void *ctx, uint64_t size, GbkAppImage *out, G
 
   /* The first .desktop file at the top (an AppImage has one). */
   g_autofree char *icon_key = nullptr;
+  g_autofree char *id = nullptr;
   for (guint i = 0; i < names->len; i++)
     {
       const char *n = g_ptr_array_index (names, i);
       if (!g_str_has_suffix (n, ".desktop"))
         continue;
+      id = g_strndup (n, strlen (n) - strlen (".desktop"));
       g_autoptr (GError) e = nullptr;
       g_autoptr (GBytes) text = gbk_squash_read (s, n, GBK_APPIMAGE_DESKTOP_MAX, &e);
       if (text == nullptr)
@@ -135,6 +199,9 @@ gbk_appimage_read (GbkReadAt read, void *ctx, uint64_t size, GbkAppImage *out, G
         }
       break;
     }
+  /* No version in the .desktop file: perhaps in its AppStream metadata. */
+  if (out->version == nullptr && id != nullptr && id[0] != '\0' && strchr (id, '/') == nullptr)
+    out->version = metainfo_version (s, id);
 
   g_autoptr (GError) e = nullptr;
   out->icon = gbk_squash_read (s, ".DirIcon", GBK_APPIMAGE_ICON_MAX, &e);

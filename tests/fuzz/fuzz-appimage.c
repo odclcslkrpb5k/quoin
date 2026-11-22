@@ -1,5 +1,5 @@
 /* Input: arbitrary bytes as an AppImage, as a bare squashfs image, and as quoin-appimage's
- * output. Each reader must refuse what it can't use, within its limits. */
+ * output, and as a file name. Each reader must refuse what it can't use, within its limits. */
 #include "appimage-out.h"
 #include "appimage.h"
 #include "fuzz.h"
@@ -46,6 +46,11 @@ LLVMFuzzerTestOneInput (const uint8_t *data, size_t size)
           g_clear_error (&error);
         }
     }
+
+  /* As a file name. */
+  g_autofree char *name = g_strndup ((const char *) data, MIN (size, 4096));
+  g_autofree char *version = gbk_appimage_version_in_name (name);
+  g_assert (version == nullptr || (version[0] != '\0' && strstr (name, version) != nullptr));
 
   GbkAppImageInfo info;
   if (gbk_appimage_out_parse (data, size, &info))

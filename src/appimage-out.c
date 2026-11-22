@@ -81,3 +81,77 @@ gbk_appimage_out_parse (const uint8_t *data, size_t len, GbkAppImageInfo *out)
     }
   return true;
 }
+
+static bool
+part_end (char c)
+{
+  return c == '\0' || c == '_' || c == '-' || c == ' ';
+}
+
+/* Digits, then one or more ".digits"; the end of them, or nullptr. */
+static const char *
+dotted (const char *p)
+{
+  if (!g_ascii_isdigit (*p))
+    return nullptr;
+  int dots = 0;
+  for (;;)
+    {
+      while (g_ascii_isdigit (*p))
+        p++;
+      if (p[0] != '.' || !g_ascii_isdigit (p[1]))
+        break;
+      p++;
+      dots++;
+    }
+  return dots > 0 ? p : nullptr;
+}
+
+/* A pre-release mark at `p` ("rc2", "-alpha", "-rc.2", ".beta1"): its end, or `p`. */
+static const char *
+pre_release (const char *p)
+{
+  static const char *const marks[] = { "alpha", "beta", "rc", "pre", "preview", "dev", "nightly" };
+  const char *q = p;
+  if (*q == '-' || *q == '.')
+    q++;
+  size_t letters = 0;
+  while (g_ascii_isalpha (q[letters]))
+    letters++;
+  bool known = false;
+  for (size_t i = 0; i < G_N_ELEMENTS (marks); i++)
+    known = known
+            || (strlen (marks[i]) == letters && g_ascii_strncasecmp (q, marks[i], letters) == 0);
+  if (!known)
+    return p;
+  q += letters;
+  if (*q == '.' && g_ascii_isdigit (q[1]))
+    q++;
+  while (g_ascii_isdigit (*q))
+    q++;
+  return q;
+}
+
+char *
+gbk_appimage_version_in_name (const char *name)
+{
+  g_autofree char *stem = g_strdup (name);
+  size_t len = strlen (stem);
+  const char suffix[] = ".appimage";
+  if (len >= sizeof suffix - 1
+      && g_ascii_strcasecmp (stem + len - (sizeof suffix - 1), suffix) == 0)
+    stem[len - (sizeof suffix - 1)] = '\0';
+  for (const char *p = stem; *p != '\0'; p++)
+    {
+      if (p != stem && !part_end (p[-1]))
+        continue;
+      const char *start = (*p == 'v' || *p == 'V') ? p + 1 : p;
+      const char *end = dotted (start);
+      if (end == nullptr)
+        continue;
+      end = pre_release (end);
+      if (part_end (*end))
+        return g_strndup (start, (size_t) (end - start));
+    }
+  return nullptr;
+}

@@ -11,7 +11,9 @@
  * its own that never runs the AppImage; its output is checked (appimage-out.h). Until an
  * answer comes, and whenever anything fails, the view shows the generic icon and the
  * file's name: failing safe. A file that couldn't be read isn't tried again until it
- * changes. */
+ * changes, or another Quoin comes (the cache holds only for the Quoin that wrote it).
+ * The label's version: the one in the file's name if it has one (upstream's names are
+ * the more exact), else the one the AppImage declares. */
 #pragma once
 #include <cairo.h>
 
