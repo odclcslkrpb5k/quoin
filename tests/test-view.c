@@ -418,6 +418,65 @@ test_many_items_and_screenshot (Fixture *f, const void *data G_GNUC_UNUSED)
     }
 }
 
+/* Icons view: a grid of cells, rows left to right, scrolling down; arrows move across rows
+ * and down columns. */
+static void
+test_icons_view (Fixture *f, const void *data G_GNUC_UNUSED)
+{
+  GtkScrolledWindow *sw = GTK_SCROLLED_WINDOW (gtk_widget_get_parent (GTK_WIDGET (f->view)));
+  gtk_scrolled_window_set_policy (sw, GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gbk_view_set_mode (f->view, GBK_VIEW_ICONS, 48);
+  flush ();
+  g_assert_cmpint (gbk_view_mode (f->view), ==, GBK_VIEW_ICONS);
+  /* Cells are 48 + 56 = 104 px wide: 4 to a row in 500 px (less a scrollbar). */
+  g_assert_cmpstr (name_at (f, idx (f, gbk_view_item_at (f->view, 50, 10))), ==, "Dir A");
+  g_assert_cmpstr (name_at (f, idx (f, gbk_view_item_at (f->view, 150, 10))), ==, "Dir B");
+  g_assert_true (gbk_view_item_at (f->view, 450, 10) == GBK_HANDLE_NONE);   /* past the row */
+  send_key (f, GDK_KEY_Home, 0);
+  g_assert_cmpuint (idx (f, gbk_view_cursor (f->view)), ==, 0);
+  send_key (f, GDK_KEY_Right, 0);
+  g_assert_cmpuint (idx (f, gbk_view_cursor (f->view)), ==, 1);
+  send_key (f, GDK_KEY_Down, 0);
+  g_assert_cmpuint (idx (f, gbk_view_cursor (f->view)), ==, 5);
+  send_key (f, GDK_KEY_Up, 0);
+  g_assert_cmpuint (idx (f, gbk_view_cursor (f->view)), ==, 1);
+
+  /* The end is down there: scrolled to, and the sideways scrollbar is out of it. */
+  GtkAdjustment *v = gtk_scrollable_get_vadjustment (GTK_SCROLLABLE (f->view));
+  GtkAdjustment *h = gtk_scrollable_get_hadjustment (GTK_SCROLLABLE (f->view));
+  send_key (f, GDK_KEY_End, 0);
+  g_assert_cmpfloat (gtk_adjustment_get_value (v), >, 0);
+  g_assert_cmpfloat (gtk_adjustment_get_upper (h), ==, 0);
+  g_assert_cmpuint (idx (f, gbk_view_cursor (f->view)), ==, gbk_dir_model_n_visible (f->model) - 1);
+  const char *dir = g_getenv ("GBK_ARTIFACTS");
+  if (dir != nullptr)
+    {
+      gtk_container_check_resize (GTK_CONTAINER (f->window));
+      int w = gtk_widget_get_allocated_width (f->window);
+      int ht = gtk_widget_get_allocated_height (f->window);
+      cairo_surface_t *s = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, w, ht);
+      cairo_t *cr = cairo_create (s);
+      gtk_widget_draw (f->window, cr);
+      cairo_destroy (cr);
+      g_autofree char *path = g_build_filename (dir, "view-icons.png", nullptr);
+      g_assert_cmpint (cairo_surface_write_to_png (s, path), ==, CAIRO_STATUS_SUCCESS);
+      cairo_surface_destroy (s);
+    }
+  send_key (f, GDK_KEY_Home, 0);
+  g_assert_cmpfloat (gtk_adjustment_get_value (v), ==, 0);
+
+  /* And back: columns again, the cursor where it was, nothing scrolled down. */
+  send_key (f, GDK_KEY_Right, 0);
+  gtk_scrolled_window_set_policy (sw, GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+  gbk_view_set_mode (f->view, GBK_VIEW_COMPACT, 48);
+  flush ();
+  g_assert_cmpint (gbk_view_mode (f->view), ==, GBK_VIEW_COMPACT);
+  g_assert_cmpstr (cursor_name (f), ==, "Dir B");
+  g_assert_cmpfloat (gtk_adjustment_get_upper (v), ==, 0);
+  send_key (f, GDK_KEY_Down, 0);
+  g_assert_cmpstr (cursor_name (f), ==, "Dir C");
+}
+
 #define ADD(path, fn, n, w, h) \
   g_test_add (path, Fixture, nullptr, setup_##n##_##w##_##h, fn, teardown)
 
@@ -425,6 +484,11 @@ static void
 setup_30_500_160 (Fixture *f, const void *d G_GNUC_UNUSED)
 {
   setup (f, 30, 500, 160);
+}
+static void
+setup_30_500_300 (Fixture *f, const void *d G_GNUC_UNUSED)
+{
+  setup (f, 30, 500, 300);
 }
 static void
 setup_200_600_200 (Fixture *f, const void *d G_GNUC_UNUSED)
@@ -452,6 +516,7 @@ main (int argc, char **argv)
   ADD ("/view/type-ahead", test_type_ahead, 30, 500, 160);
   ADD ("/view/live-changes", test_live_changes, 30, 500, 160);
   ADD ("/view/many-items", test_many_items_and_screenshot, 200, 600, 200);
+  ADD ("/view/icons", test_icons_view, 30, 500, 300);
   int status = g_test_run ();
 
   gbk_type_table_unref (types);

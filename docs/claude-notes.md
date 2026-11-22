@@ -424,6 +424,20 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   remote-plan.md "After phase 9". Test lesson: gbk_edits_count in test-remotewin isn't 0
   at a test's start (earlier tests leave UNKNOWN-app watches that last while a window is
   open): count relative to the start, and close the window before waiting for none.
+- ICONS VIEW (user, 2026-11-21; rox-filer as prior art): stage 1 built: GbkView `grid`
+  mode (fixed cells icon + max(icon, 56) wide, 2-line centred labels, WORD_CHAR wrap,
+  middle ellipsis; vadj scrolls, hadj held 0; arrows swap axes; GBK_MOVE_COLUMN = one line
+  across), browser picks per folder: views.ini choice (viewstate.c, XDG_STATE_HOME, keys
+  URI-escaped) > IconFolders > Compact; scroller policy per mode. win.view ('icons' |
+  'compact'), Ctrl+1 / Ctrl+3 as Thunar (Ctrl+2 left for a detailed list). Config IconSize
+  (16..256, default 48), IconFolders (~ expanded, canonical). User decisions: general per-
+  folder view (not a launcher mode); labels = AppImage Name + version, else filename; 48
+  default; read inside AppImages in a fuzzed helper process, cached, generic icons until
+  found, failing safe. Remote: doesn't need to be perfect (generic icons).
+  NEXT: stage 2 squashfs/AppImage reader + helper; stage 3 cache + .desktop Exec matches.
+  FLAKE seen once (2026-11-21, full check): /scanner/large-directory "main loop blocked for
+  322 ms by on_scanner_wake" under ASan with the whole suite running; 6/6 alone and the
+  rerun passed. If it recurs: look at DRAIN_BUDGET x chunk size per wakeup, not the limit.
 - DEVICES (user, 2026-10-15: Thunar's sidebar Devices list, in the ☰ menu; user chose ONE
   "Devices" submenu, each device a submenu Open / Unmount / Eject|Safely Remove). devices.{h,c}
   (core, GIO only): GbkDevices per window wraps GVolumeMonitor (gvfs udisks2 if installed,

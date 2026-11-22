@@ -28,10 +28,16 @@ typedef struct
   bool show_hidden;
   bool full_path_title;  /* the window title is the folder's full path, or only its name */
   GbkSortMode sort;
+  int icon_size;            /* the Icons view's icons, px (GBK_VIEW_ICON_MIN..MAX) */
+  GPtrArray *icon_folders;  /* char*: absolute paths of folders that start in the Icons view */
   GHashTable *interpreters; /* lowercased ext -> char** argv prefix; marks scripts */
   GPtrArray *type_overrides; /* char* pairs: ext, mime, ext, mime, ... */
   GPtrArray *actions; /* GbkAction*, in file order */
 } GbkConfig;
+
+#define GBK_CONFIG_ICON_SIZE 48
+#define GBK_ICON_SIZE_MIN 16
+#define GBK_ICON_SIZE_MAX 256
 
 /* Built-in defaults. */
 [[nodiscard]] GbkConfig *gbk_config_new_default (void);

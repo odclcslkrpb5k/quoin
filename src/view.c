@@ -12,6 +12,8 @@
 #define MIN_COL_W 48
 #define TEXT_SLACK 3            /* px added to estimated widths (kerning can widen a bit) */
 #define GIT_BOX_PAD 2           /* the git colour reaches this far either side of a name */
+#define GRID_PAD 4              /* Icons view: around a cell's icon and label */
+#define GRID_LABEL_W 56         /* Icons view: a cell is at least this much wider than its icon */
 #define SEARCH_TIMEOUT_MS 1000
 #define WHEEL_STEP_PX 64
 #define DND_EDGE_PX 24          /* hovering a drag this close to a side scrolls that way */
@@ -103,6 +105,14 @@ struct _GbkView
   GbkGitState git_inherit; /* the state of names not in `git` */
   bool emblem_tried;
   int icon_scale;
+
+  /* Icons view (gbk_view_set_mode): a grid of big icons with their names below, rows
+   * left to right, scrolling down. Every cell is the same size. */
+  bool grid;
+  int grid_icon;                /* the icons' size there, px */
+  int cell_w, cell_h;
+  size_t per_row;
+  gulong vadj_changed_id;
 };
 
 enum
@@ -170,6 +180,33 @@ static int
 scroll_x (GbkView *v)
 {
   return v->hadj != nullptr ? (int) gtk_adjustment_get_value (v->hadj) : 0;
+}
+
+static int
+scroll_y (GbkView *v)
+{
+  return v->vadj != nullptr ? (int) gtk_adjustment_get_value (v->vadj) : 0;
+}
+
+/* The icons' size in the current view. */
+static int
+icon_px (const GbkView *v)
+{
+  return v->grid ? v->grid_icon : ICON_SIZE;
+}
+
+/* The adjustment that scrolls the content: sideways in Compact, down in Icons. */
+static GtkAdjustment *
+scroll_adj (const GbkView *v)
+{
+  return v->grid ? v->vadj : v->hadj;
+}
+
+/* Icons view: rows of cells. */
+static size_t
+grid_lines (GbkView *v)
+{
+  return v->per_row > 0 ? (n_items (v) + v->per_row - 1) / v->per_row : 0;
 }
 
 /* ---- metrics & widths ---- */
@@ -294,9 +331,40 @@ max_column_width (GbkView *v)
 
 static size_t column_at (GbkView *v, int cx);
 
+/* Icons view: the vertical adjustment from the anchor; the horizontal one is unused. */
+static void
+update_grid_adjustment (GbkView *v)
+{
+  v->adjusting = true;
+  if (v->hadj != nullptr)
+    gtk_adjustment_configure (v->hadj, 0, 0, 0, 0, 0, 0);
+  if (v->vadj != nullptr)
+    {
+      double page = gtk_widget_get_allocated_height (GTK_WIDGET (v));
+      double upper = MAX ((double) grid_lines (v) * v->cell_h, page);
+      size_t line = v->per_row > 0 ? v->anchor_index / v->per_row : 0;
+      double value = v->anchor_end ? upper - page
+                                   : (double) line * v->cell_h + MIN (v->anchor_offset, v->cell_h);
+      value = CLAMP (value, 0, upper - page);
+      gtk_adjustment_configure (v->vadj, value, 0, upper, v->cell_h / 2.0, page * 0.9, page);
+    }
+  v->adjusting = false;
+}
+
 static void
 update_adjustment (GbkView *v)
 {
+  if (v->grid)
+    {
+      update_grid_adjustment (v);
+      return;
+    }
+  if (v->vadj != nullptr)
+    {
+      v->adjusting = true;
+      gtk_adjustment_configure (v->vadj, 0, 0, 0, 0, 0, 0);
+      v->adjusting = false;
+    }
   if (v->hadj == nullptr)
     return;
   double page = gtk_widget_get_allocated_width (GTK_WIDGET (v));
@@ -317,6 +385,21 @@ update_adjustment (GbkView *v)
 static void
 record_anchor (GbkView *v)
 {
+  if (v->grid)
+    {
+      if (v->vadj == nullptr || v->cell_h <= 0)
+        return;
+      double value = gtk_adjustment_get_value (v->vadj);
+      double upper = gtk_adjustment_get_upper (v->vadj);
+      double page = gtk_adjustment_get_page_size (v->vadj);
+      v->anchor_end = upper > page && value >= upper - page - 0.5;
+      size_t line = (size_t) (value / v->cell_h);
+      v->anchor_index = line * v->per_row;
+      v->anchor_offset = (int) value - (int) line * v->cell_h;
+      return;
+    }
+  if (v->hadj == nullptr)
+    return;
   double value = gtk_adjustment_get_value (v->hadj);
   double upper = gtk_adjustment_get_upper (v->hadj), page = gtk_adjustment_get_page_size (v->hadj);
   v->anchor_end = upper > page && value >= upper - page - 0.5;
@@ -345,6 +428,15 @@ relayout (GbkView *v)
   /* Layout can be requested (set_model) before the first style_updated. */
   if (v->layout == nullptr)
     update_metrics (v);
+  if (v->grid)
+    {
+      v->cell_w = v->grid_icon + MAX (v->grid_icon, GRID_LABEL_W);
+      v->cell_h = 2 * GRID_PAD + v->grid_icon + ICON_GAP + 2 * v->text_h;
+      int width = gtk_widget_get_allocated_width (GTK_WIDGET (v));
+      v->per_row = (size_t) MAX (1, width / v->cell_w);
+      update_adjustment (v);
+      return;
+    }
   int height = gtk_widget_get_allocated_height (GTK_WIDGET (v));
   v->rows = (size_t) MAX (1, height / MAX (1, v->row_h));
   size_t n = n_items (v);
@@ -390,6 +482,20 @@ column_at (GbkView *v, int cx)
 static void
 scroll_to_index (GbkView *v, size_t i)
 {
+  if (v->grid)
+    {
+      if (v->vadj == nullptr || v->per_row == 0 || i >= n_items (v))
+        return;
+      size_t line = i / v->per_row;
+      double y0 = (double) line * v->cell_h, y1 = y0 + v->cell_h;
+      double value = gtk_adjustment_get_value (v->vadj);
+      double page = gtk_adjustment_get_page_size (v->vadj);
+      if (y0 < value)
+        gtk_adjustment_set_value (v->vadj, y0);
+      else if (y1 > value + page)
+        gtk_adjustment_set_value (v->vadj, MIN (y0, y1 - page));
+      return;
+    }
   if (v->hadj == nullptr || v->rows == 0 || i >= n_items (v))
     return;
   size_t c = i / v->rows;
@@ -443,13 +549,19 @@ icon_for (GbkView *v, GbkTypeId type)
   };
   GtkIconTheme *theme = gtk_icon_theme_get_for_screen (gtk_widget_get_screen (GTK_WIDGET (v)));
   g_autoptr (GtkIconInfo) info = gtk_icon_theme_choose_icon_for_scale (
-      theme, names, ICON_SIZE, scale, GTK_ICON_LOOKUP_FORCE_SIZE);
+      theme, names, icon_px (v), scale, GTK_ICON_LOOKUP_FORCE_SIZE);
   if (info == nullptr)
     return nullptr;
   cairo_surface_t *surface
       = gtk_icon_info_load_surface (info, gtk_widget_get_window (GTK_WIDGET (v)), nullptr);
   g_ptr_array_index (v->icons, type) = surface;
   return surface;
+}
+
+static int
+emblem_px (const GbkView *v)
+{
+  return MAX (EMBLEM_SIZE, icon_px (v) / 3);
 }
 
 /* The "being edited" emblem, drawn over the bottom right of an item's icon. */
@@ -463,7 +575,7 @@ emblem (GbkView *v)
       = { "document-edit-symbolic", "document-edit", "accessories-text-editor", nullptr };
   GtkIconTheme *theme = gtk_icon_theme_get_for_screen (gtk_widget_get_screen (GTK_WIDGET (v)));
   g_autoptr (GtkIconInfo) info = gtk_icon_theme_choose_icon_for_scale (
-      theme, names, EMBLEM_SIZE, gtk_widget_get_scale_factor (GTK_WIDGET (v)),
+      theme, names, emblem_px (v), gtk_widget_get_scale_factor (GTK_WIDGET (v)),
       GTK_ICON_LOOKUP_FORCE_SIZE);
   if (info != nullptr)
     v->emblem = gtk_icon_info_load_surface (info, gtk_widget_get_window (GTK_WIDGET (v)), nullptr);
@@ -702,6 +814,23 @@ columns_per_page (GbkView *v)
   return (size_t) MAX (1, gtk_widget_get_allocated_width (GTK_WIDGET (v)) / avg);
 }
 
+/* Items in one line across the flow: a column (Compact) or a row (Icons). */
+static size_t
+line_len (GbkView *v)
+{
+  return v->grid ? MAX (v->per_row, 1) : v->rows;
+}
+
+/* Items in a screenful. */
+static size_t
+page_len (GbkView *v)
+{
+  if (!v->grid)
+    return v->rows * columns_per_page (v);
+  int height = gtk_widget_get_allocated_height (GTK_WIDGET (v));
+  return line_len (v) * (size_t) MAX (1, height / MAX (1, v->cell_h));
+}
+
 static size_t
 step_index (size_t cur, int64_t delta, size_t n)
 {
@@ -724,10 +853,10 @@ gbk_view_move_cursor (GbkView *v, GbkMoveStep step, int count, GbkSelectMode mod
       {
       case GBK_MOVE_ITEM: target = step_index (cur, count, n); break;
       case GBK_MOVE_COLUMN:
-        target = step_index (cur, (int64_t) count * (int64_t) v->rows, n);
+        target = step_index (cur, (int64_t) count * (int64_t) line_len (v), n);
         break;
       case GBK_MOVE_PAGE:
-        target = step_index (cur, (int64_t) count * (int64_t) (v->rows * columns_per_page (v)), n);
+        target = step_index (cur, (int64_t) count * (int64_t) page_len (v), n);
         break;
       case GBK_MOVE_ENDS: target = count < 0 ? 0 : n - 1; break;
       default: gbk_fatal ("bad move step %d", (int) step);
@@ -878,6 +1007,32 @@ gbk_view_get_model (const GbkView *v)
   return v->model;
 }
 
+/* ---- views ---- */
+
+void
+gbk_view_set_mode (GbkView *v, GbkViewMode mode, int icon_size)
+{
+  bool grid = mode == GBK_VIEW_ICONS;
+  int size = CLAMP (icon_size, GBK_VIEW_ICON_MIN, GBK_VIEW_ICON_MAX);
+  if (grid == v->grid && (!grid || size == v->grid_icon))
+    return;
+  v->grid = grid;
+  v->grid_icon = size;
+  clear_icons (v);
+  reset_anchor (v);
+  relayout (v);
+  size_t i = index_of (v, v->cursor);
+  if (i != SIZE_MAX)
+    scroll_to_index (v, i);
+  gtk_widget_queue_draw (GTK_WIDGET (v));
+}
+
+GbkViewMode
+gbk_view_mode (const GbkView *v)
+{
+  return v->grid ? GBK_VIEW_ICONS : GBK_VIEW_COMPACT;
+}
+
 /* ---- introspection ---- */
 
 size_t
@@ -889,6 +1044,15 @@ gbk_view_rows_per_column (const GbkView *v)
 GbkHandle
 gbk_view_item_at (GbkView *v, double x, double y)
 {
+  if (v->grid)
+    {
+      if (y < 0 || x < 0 || v->per_row == 0 || v->cell_w <= 0 || v->cell_h <= 0)
+        return GBK_HANDLE_NONE;
+      size_t col = (size_t) (x / v->cell_w);
+      size_t line = (size_t) ((y + scroll_y (v)) / v->cell_h);
+      size_t i = line * v->per_row + col;
+      return col < v->per_row && i < n_items (v) ? handle_at_index (v, i) : GBK_HANDLE_NONE;
+    }
   if (y < 0 || x < 0 || v->rows == 0 || n_columns (v) == 0)
     return GBK_HANDLE_NONE;
   int cx = (int) x + scroll_x (v);
@@ -974,6 +1138,96 @@ rounded_box (cairo_t *cr, const GdkRGBA *c, int x, int y, int w, int h)
   cairo_restore (cr);
 }
 
+/* Icons view: one cell. */
+static void
+draw_cell (GbkView *v, cairo_t *cr, GtkStyleContext *sc, GbkHandle h, int x, int y, bool focused,
+           GtkStateFlags base, bool dark)
+{
+  const GbkEntry *e = gbk_dir_model_get (v->model, h);
+  GtkStateFlags state = base;
+  bool selected = gbk_view_is_selected (v, h);
+  if (selected)
+    state |= GTK_STATE_FLAG_SELECTED;
+  gtk_style_context_save (sc);
+  gtk_style_context_set_state (sc, state);
+  if (selected)
+    gtk_render_background (sc, cr, x + 1, y + 1, v->cell_w - 2, v->cell_h - 2);
+
+  int ic = v->grid_icon;
+  int icon_x = x + (v->cell_w - ic) / 2, icon_y = y + GRID_PAD;
+  cairo_surface_t *icon = icon_for (v, e->type);
+  if (icon != nullptr)
+    {
+      cairo_set_source_surface (cr, icon, icon_x, icon_y);
+      cairo_paint (cr);
+    }
+  bool is_marked = marked (v, e);
+  cairo_surface_t *mark = is_marked ? emblem (v) : nullptr;
+  if (mark != nullptr)
+    {
+      int em = emblem_px (v);
+      cairo_set_source_surface (cr, mark, icon_x + ic - em + 2, icon_y + ic - em + 2);
+      cairo_paint (cr);
+    }
+
+  int label_x = x + PAD_X, label_y = icon_y + ic + ICON_GAP;
+  pango_layout_set_text (v->layout, gbk_entry_display (e), -1);
+  pango_layout_set_attributes (v->layout, v->styles[style_of (v, e)]);
+  GdkRGBA bg;
+  if (!selected && git_colour (git_state (v, e), dark, &bg))
+    {
+      PangoRectangle ink, logical;
+      pango_layout_get_pixel_extents (v->layout, &ink, &logical);
+      rounded_box (cr, &bg, label_x + logical.x - GIT_BOX_PAD, label_y + logical.y,
+                   logical.width + 2 * GIT_BOX_PAD, logical.height);
+    }
+  gtk_render_layout (sc, cr, label_x, label_y, v->layout);
+  pango_layout_set_attributes (v->layout, nullptr);
+
+  if (focused && h == v->cursor)
+    gtk_render_focus (sc, cr, x, y, v->cell_w, v->cell_h);
+  gtk_style_context_restore (sc);
+  if (v->drop_hover && h == v->drop_folder)
+    drop_outline (v, cr, x, y, v->cell_w, v->cell_h);
+}
+
+/* Icons view: the cells in `clip`. Labels take two lines at most, shortened in the middle
+ * (a name's end, often its version, stays readable). */
+static void
+draw_grid (GbkView *v, cairo_t *cr, GtkStyleContext *sc, const GdkRectangle *clip, bool focused,
+           GtkStateFlags base)
+{
+  if (v->per_row == 0 || v->cell_h <= 0)
+    return;
+  bool dark = dark_theme (sc);
+  int sy = scroll_y (v);
+  pango_layout_set_width (v->layout, MAX (1, v->cell_w - 2 * PAD_X) * PANGO_SCALE);
+  pango_layout_set_wrap (v->layout, PANGO_WRAP_WORD_CHAR);
+  pango_layout_set_height (v->layout, -2);
+  pango_layout_set_ellipsize (v->layout, PANGO_ELLIPSIZE_MIDDLE);
+  pango_layout_set_alignment (v->layout, PANGO_ALIGN_CENTER);
+  size_t n = n_items (v);
+  for (size_t line = (size_t) MAX (0, (clip->y + sy) / v->cell_h); line < grid_lines (v); line++)
+    {
+      int y = (int) MIN (line * (size_t) v->cell_h, (size_t) G_MAXINT / 2) - sy;
+      if (y >= clip->y + clip->height)
+        break;
+      for (size_t c = 0; c < v->per_row; c++)
+        {
+          size_t i = line * v->per_row + c;
+          if (i >= n)
+            break;
+          draw_cell (v, cr, sc, handle_at_index (v, i), (int) c * v->cell_w, y, focused, base,
+                     dark);
+        }
+    }
+  pango_layout_set_width (v->layout, -1);
+  pango_layout_set_height (v->layout, -1);
+  pango_layout_set_wrap (v->layout, PANGO_WRAP_WORD);
+  pango_layout_set_ellipsize (v->layout, PANGO_ELLIPSIZE_NONE);
+  pango_layout_set_alignment (v->layout, PANGO_ALIGN_LEFT);
+}
+
 static gboolean
 gbk_view_draw (GtkWidget *w, cairo_t *cr)
 {
@@ -994,6 +1248,13 @@ gbk_view_draw (GtkWidget *w, cairo_t *cr)
   int sx = scroll_x (v);
   bool focused = gtk_widget_has_visible_focus (w);
   GtkStateFlags base = gtk_widget_get_state_flags (w);
+  if (v->grid)
+    {
+      draw_grid (v, cr, sc, &clip, focused, base);
+      if (v->drop_hover && v->drop_folder == GBK_HANDLE_NONE)
+        drop_outline (v, cr, 0, 0, width, height);
+      return false;
+    }
   pango_layout_set_ellipsize (v->layout, PANGO_ELLIPSIZE_MIDDLE);
   int text_dy = (v->row_h - v->text_h) / 2;
   int icon_dy = (v->row_h - ICON_SIZE) / 2;
@@ -1283,13 +1544,13 @@ static bool
 autoscroll_tick (void *data)
 {
   GbkView *v = data;
-  if (v->scroll_dir == 0 || v->hadj == nullptr)
+  GtkAdjustment *adj = scroll_adj (v);
+  if (v->scroll_dir == 0 || adj == nullptr)
     {
       v->autoscroll = 0;
       return false;
     }
-  gtk_adjustment_set_value (v->hadj,
-                            gtk_adjustment_get_value (v->hadj) + v->scroll_dir * DND_SCROLL_PX);
+  gtk_adjustment_set_value (adj, gtk_adjustment_get_value (adj) + v->scroll_dir * DND_SCROLL_PX);
   return true;
 }
 
@@ -1307,8 +1568,10 @@ static gboolean
 gbk_view_drag_motion (GtkWidget *w, GdkDragContext *ctx, int x, int y, guint time)
 {
   GbkView *v = GBK_VIEW (w);
-  int width = gtk_widget_get_allocated_width (w);
-  set_autoscroll (v, x < DND_EDGE_PX ? -1 : x > width - DND_EDGE_PX ? 1 : 0);
+  /* Near the edge the content extends past: scroll that way. */
+  int along = v->grid ? y : x;
+  int extent = v->grid ? gtk_widget_get_allocated_height (w) : gtk_widget_get_allocated_width (w);
+  set_autoscroll (v, along < DND_EDGE_PX ? -1 : along > extent - DND_EDGE_PX ? 1 : 0);
   GbkHandle folder;
   bool ok = gtk_drag_dest_find_target (w, ctx, nullptr) != GDK_NONE
             && drop_target (v, x, y, gtk_drag_get_source_widget (ctx) == w, &folder);
@@ -1381,25 +1644,27 @@ gbk_view_key_press (GtkWidget *w, GdkEventKey *ev)
 
   switch (ev->keyval)
     {
+    /* Up and down move within a column (Compact) or between rows (Icons); left and right
+     * the other way. */
     case GDK_KEY_Up:
     case GDK_KEY_KP_Up:
       search_clear (v);
-      gbk_view_move_cursor (v, GBK_MOVE_ITEM, -1, mode);
+      gbk_view_move_cursor (v, v->grid ? GBK_MOVE_COLUMN : GBK_MOVE_ITEM, -1, mode);
       return true;
     case GDK_KEY_Down:
     case GDK_KEY_KP_Down:
       search_clear (v);
-      gbk_view_move_cursor (v, GBK_MOVE_ITEM, 1, mode);
+      gbk_view_move_cursor (v, v->grid ? GBK_MOVE_COLUMN : GBK_MOVE_ITEM, 1, mode);
       return true;
     case GDK_KEY_Left:
     case GDK_KEY_KP_Left:
       search_clear (v);
-      gbk_view_move_cursor (v, GBK_MOVE_COLUMN, -1, mode);
+      gbk_view_move_cursor (v, v->grid ? GBK_MOVE_ITEM : GBK_MOVE_COLUMN, -1, mode);
       return true;
     case GDK_KEY_Right:
     case GDK_KEY_KP_Right:
       search_clear (v);
-      gbk_view_move_cursor (v, GBK_MOVE_COLUMN, 1, mode);
+      gbk_view_move_cursor (v, v->grid ? GBK_MOVE_ITEM : GBK_MOVE_COLUMN, 1, mode);
       return true;
     case GDK_KEY_Page_Up:
     case GDK_KEY_KP_Page_Up:
@@ -1495,8 +1760,9 @@ gbk_view_key_press (GtkWidget *w, GdkEventKey *ev)
 static gboolean
 gbk_view_scroll (GtkWidget *w, GdkEventScroll *ev)
 {
-  GbkView *v = GBK_VIEW (w);
-  if (v->hadj == nullptr)
+  const GbkView *v = GBK_VIEW (w);
+  GtkAdjustment *adj = scroll_adj (v);
+  if (adj == nullptr)
     return false;
   double delta = 0;
   switch (ev->direction)
@@ -1510,8 +1776,8 @@ gbk_view_scroll (GtkWidget *w, GdkEventScroll *ev)
       break;
     default: return false;
     }
-  /* Vertical wheel scrolls horizontally: content only extends sideways. */
-  gtk_adjustment_set_value (v->hadj, gtk_adjustment_get_value (v->hadj) + delta * WHEEL_STEP_PX);
+  /* Content extends one way only (sideways in Compact, down in Icons): any wheel scrolls it. */
+  gtk_adjustment_set_value (adj, gtk_adjustment_get_value (adj) + delta * WHEEL_STEP_PX);
   return true;
 }
 
@@ -1611,15 +1877,31 @@ set_hadjustment (GbkView *v, GtkAdjustment *adj)
 }
 
 static void
+on_vadj_changed (GtkAdjustment *adj G_GNUC_UNUSED, GbkView *v)
+{
+  if (!v->adjusting)
+    record_anchor (v);
+  gtk_widget_queue_draw (GTK_WIDGET (v));
+}
+
+/* Scrolls the Icons view; held at 0 in Compact. */
+static void
 set_vadjustment (GbkView *v, GtkAdjustment *adj)
 {
-  /* No vertical scrolling: hold the adjustment so GtkScrollable is satisfied, keep it 0. */
-  g_clear_object (&v->vadj);
-  if (adj != nullptr)
+  if (v->vadj == adj)
+    return;
+  if (v->vadj != nullptr)
     {
-      v->vadj = g_object_ref_sink (adj);
-      gtk_adjustment_configure (adj, 0, 0, 0, 0, 0, 0);
+      g_signal_handler_disconnect (v->vadj, v->vadj_changed_id);
+      v->vadj_changed_id = 0;
+      g_clear_object (&v->vadj);
     }
+  if (adj == nullptr)
+    adj = gtk_adjustment_new (0, 0, 0, 0, 0, 0);
+  v->vadj = g_object_ref_sink (adj);
+  v->vadj_changed_id
+      = gbk_connect (G_OBJECT (v), adj, "value-changed", G_CALLBACK (on_vadj_changed), v);
+  update_adjustment (v);
 }
 
 static void
@@ -1666,7 +1948,11 @@ gbk_view_dispose (GObject *o)
       g_signal_handler_disconnect (v->hadj, v->hadj_changed_id);
       g_clear_object (&v->hadj);
     }
-  g_clear_object (&v->vadj);
+  if (v->vadj != nullptr)
+    {
+      g_signal_handler_disconnect (v->vadj, v->vadj_changed_id);
+      g_clear_object (&v->vadj);
+    }
   g_clear_object (&v->layout);
   G_OBJECT_CLASS (gbk_view_parent_class)->dispose (o);
 }

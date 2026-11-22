@@ -51,6 +51,11 @@ void gbk_browser_select_names (GbkBrowser *b, GPtrArray *names);
 
 /* A transient message shown instead of the usual status, until the selection changes. */
 void gbk_browser_set_message (GbkBrowser *b, const char *message);
+/* The view of the folder open (view.h): Icons or Compact. Setting it remembers the choice
+ * for that folder (viewstate.h); each folder opens in its own. */
+void gbk_browser_set_view (GbkBrowser *b, GbkViewMode mode);
+GbkViewMode gbk_browser_view_mode (const GbkBrowser *b);
+
 /* Status bar text. g_free. */
 char *gbk_browser_status (GbkBrowser *b);
 

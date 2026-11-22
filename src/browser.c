@@ -2,6 +2,7 @@
 #include "lifetime.h"
 #include "open.h"
 #include "remote.h"
+#include "viewstate.h"
 
 #define HISTORY_MAX 100
 #define PENDING_SELECT_MS 2000
@@ -14,6 +15,7 @@ struct _GbkBrowser
   GtkBox *toolbar;
   GbkPathbar *pathbar;
   GbkView *view;
+  GtkScrolledWindow *scroller;
   bool disposing;
   GtkInfoBar *bar;            /* a folder on another machine that can't be reached */
   GtkLabel *bar_label;
@@ -375,6 +377,60 @@ set_model (GbkBrowser *b, GbkDirModel *m)
   update_bar (b);
 }
 
+/* ---- views ---- */
+
+/* The view for the folder open: as chosen for it, else Icons for quoin.conf's
+ * IconFolders, else Compact. */
+static GbkViewMode
+mode_for (const GbkBrowser *b)
+{
+  g_autofree char *where = gbk_loc_display (b->loc);
+  switch (gbk_view_state_get (where))
+    {
+    case GBK_VIEW_CHOICE_ICONS: return GBK_VIEW_ICONS;
+    case GBK_VIEW_CHOICE_COMPACT: return GBK_VIEW_COMPACT;
+    case GBK_VIEW_CHOICE_NONE: break;
+    default: gbk_fatal ("bad view choice");
+    }
+  const char *path;
+  if (gbk_loc_as_local (b->loc, &path))
+    {
+      const GPtrArray *folders = b->ctx->config->icon_folders;
+      for (guint i = 0; i < folders->len; i++)
+        if (g_str_equal (g_ptr_array_index (folders, i), path))
+          return GBK_VIEW_ICONS;
+    }
+  return GBK_VIEW_COMPACT;
+}
+
+static void
+apply_mode (GbkBrowser *b, GbkViewMode mode)
+{
+  gbk_view_set_mode (b->view, mode, b->ctx->config->icon_size);
+  /* Compact extends sideways, Icons downwards. */
+  if (mode == GBK_VIEW_ICONS)
+    gtk_scrolled_window_set_policy (b->scroller, GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  else
+    gtk_scrolled_window_set_policy (b->scroller, GTK_POLICY_AUTOMATIC, GTK_POLICY_NEVER);
+}
+
+void
+gbk_browser_set_view (GbkBrowser *b, GbkViewMode mode)
+{
+  if (b->loc == nullptr || mode == gbk_view_mode (b->view))
+    return;
+  apply_mode (b, mode);
+  g_autofree char *where = gbk_loc_display (b->loc);
+  gbk_view_state_set (where,
+                      mode == GBK_VIEW_ICONS ? GBK_VIEW_CHOICE_ICONS : GBK_VIEW_CHOICE_COMPACT);
+}
+
+GbkViewMode
+gbk_browser_view_mode (const GbkBrowser *b)
+{
+  return gbk_view_mode (b->view);
+}
+
 /* Replace the current directory without touching history. */
 static void
 open_loc (GbkBrowser *b, GbkLoc *loc, const char *focus_name)
@@ -387,6 +443,7 @@ open_loc (GbkBrowser *b, GbkLoc *loc, const char *focus_name)
   gbk_browser_select_names (b, nullptr);
   g_clear_pointer (&b->message, g_free);
   set_model (b, gbk_dir_model_new (b->loc, b->ctx->types));
+  apply_mode (b, mode_for (b));
   gbk_pathbar_set_loc (b->pathbar, b->loc);
   g_signal_emit (b, signals[SIGNAL_PATH_CHANGED], 0);
   status_changed (b);
@@ -730,6 +787,7 @@ gbk_browser_new (GbkContext *ctx, bool show_hidden, GbkSortMode sort)
   gbk_connect (G_OBJECT (b), b->bar, "response", G_CALLBACK (on_bar_response), b);
 
   GtkWidget *scroller = gtk_scrolled_window_new (nullptr, nullptr);
+  b->scroller = GTK_SCROLLED_WINDOW (scroller);
   gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (scroller), GTK_POLICY_AUTOMATIC,
                                   GTK_POLICY_NEVER);
   /* An overlay scrollbar would sit on the bottom row of items (the view fills its height

@@ -44,8 +44,12 @@ program that won't start. On anything else, [build from source](#building).
 
 ## What it does
 
-- **One view:** compact icon and name columns that scroll sideways, like Thunar's compact
-  view. Sort by name, date modified or size, always with folders first.
+- **Two views, chosen per folder:** **Compact** (the default: small icons and names in
+  columns that scroll sideways, like Thunar's compact view) and **Icons** (big icons with
+  their names below, at most two lines, in rows that scroll down: for a folder of
+  applications, say). Switch with Ctrl+1 (Icons) and Ctrl+3 (Compact), or from the ☰
+  menu; each folder remembers its own. Sort by name, date modified or size, always with
+  folders first.
 - **Live updates:** the view follows changes on disk as they happen; there is no polling
   and no refresh button.
 - **Big folders:** a folder of 100,000 files shows its first items within milliseconds and
@@ -154,6 +158,7 @@ program that won't start. On anything else, [build from source](#building).
 | Alt+Home | Home folder |
 | Mouse back / forward buttons | Back / forward |
 | Ctrl+H | Show or hide hidden files |
+| Ctrl+1 / Ctrl+3 | Icons view / Compact view, for this folder |
 | Ctrl+L | Type a location |
 | F4 | Open a terminal here |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / cut / paste |
@@ -181,6 +186,7 @@ loads it, so it always matches what the program accepts. You can set:
 - whether the title bar shows the folder's full path or only its name (also in the ☰
   menu);
 - the starting sort;
+- the Icons view's icon size, and folders that start in the Icons view;
 - script interpreters;
 - extra extension → file type mappings;
 - right-click actions.

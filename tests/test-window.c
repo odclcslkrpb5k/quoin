@@ -7,6 +7,7 @@
 #include "job.h"
 #include "props.h"
 #include "testgit.h"
+#include "viewstate.h"
 #include "window.h"
 
 /* Windows and tabs on local folders, by path. */
@@ -1840,6 +1841,80 @@ test_git (void)
   rm_rf (plain);
 }
 
+/* ---- views ---- */
+
+static GbkViewMode
+view_mode (GbkWindow *w)
+{
+  return gbk_view_mode (gbk_window_view (w));
+}
+
+/* Ctrl+1 / Ctrl+3 switch the folder on show; each folder keeps its own, remembered in the
+ * state file; quoin.conf's IconFolders start folders as icons, unless switched since. */
+static void
+test_views (void)
+{
+  g_autofree char *root = g_dir_make_tmp ("gbk-win-views-XXXXXX", nullptr);
+  mkdirs (root, (const char *const[]) { "apps/", "apps/a.AppImage", "other/", "third/", nullptr });
+  g_autofree char *apps = g_build_filename (root, "apps", nullptr);
+  g_autofree char *other = g_build_filename (root, "other", nullptr);
+  g_autofree char *third = g_build_filename (root, "third", nullptr);
+  GbkWindow *w = window_at (app, ctx, apps);
+  gtk_widget_show_all (GTK_WIDGET (w));
+  wait_at (w, apps);
+  g_assert_cmpint (view_mode (w), ==, GBK_VIEW_COMPACT);
+  send_key_to_window (w, GDK_KEY_1, GDK_CONTROL_MASK);
+  g_assert_cmpint (view_mode (w), ==, GBK_VIEW_ICONS);
+  GVariant *st = g_action_group_get_action_state (G_ACTION_GROUP (w), "view");
+  g_assert_cmpstr (g_variant_get_string (st, nullptr), ==, "icons");
+  g_variant_unref (st);
+
+  open_at (w, other);
+  wait_at (w, other);
+  g_assert_cmpint (view_mode (w), ==, GBK_VIEW_COMPACT);
+  activate (w, "back");
+  wait_at (w, apps);
+  g_assert_cmpint (view_mode (w), ==, GBK_VIEW_ICONS);
+
+  /* Remembered on disk: read again, the choice is still there. */
+  g_autofree char *state
+      = g_build_filename (g_get_user_state_dir (), "quoin", "views.ini", nullptr);
+  g_assert_true (g_file_test (state, G_FILE_TEST_IS_REGULAR));
+  gbk_view_state_forget_for_test ();
+  open_at (w, other);
+  wait_at (w, other);
+  activate (w, "back");
+  wait_at (w, apps);
+  g_assert_cmpint (view_mode (w), ==, GBK_VIEW_ICONS);
+  send_key_to_window (w, GDK_KEY_3, GDK_CONTROL_MASK);
+  g_assert_cmpint (view_mode (w), ==, GBK_VIEW_COMPACT);
+
+  /* IconFolders: a folder never switched starts as icons; one switched keeps its choice. */
+  open_at (w, other);
+  wait_at (w, other);
+  send_key_to_window (w, GDK_KEY_3, GDK_CONTROL_MASK);   /* already compact: not recorded */
+  send_key_to_window (w, GDK_KEY_1, GDK_CONTROL_MASK);
+  send_key_to_window (w, GDK_KEY_3, GDK_CONTROL_MASK);   /* chosen: compact */
+  g_autofree char *conf = g_build_filename (root, "quoin.conf", nullptr);
+  g_autofree char *text
+      = g_strdup_printf ("[General]\nIconSize=64\nIconFolders=%s;%s\n", third, other);
+  g_assert_true (g_file_set_contents (conf, text, -1, nullptr));
+  GbkContext *iconic = gbk_context_new (conf);
+  g_assert_cmpuint (iconic->config_errors->len, ==, 0);
+  GbkWindow *w2 = window_at (app, iconic, third);
+  gtk_widget_show_all (GTK_WIDGET (w2));
+  wait_at (w2, third);
+  g_assert_cmpint (view_mode (w2), ==, GBK_VIEW_ICONS);
+  open_at (w2, other);
+  wait_at (w2, other);
+  g_assert_cmpint (view_mode (w2), ==, GBK_VIEW_COMPACT);
+
+  gtk_widget_destroy (GTK_WIDGET (w2));
+  gtk_widget_destroy (GTK_WIDGET (w));
+  gbk_context_unref (iconic);
+  rm_rf (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1874,6 +1949,7 @@ main (int argc, char **argv)
   g_test_add_func ("/window/tabs", test_tabs);
   g_test_add_func ("/window/close-with-selections", test_close_with_selections);
   g_test_add_func ("/window/git", test_git);
+  g_test_add_func ("/window/views", test_views);
   int status = g_test_run ();
 
   while (gtk_events_pending ())

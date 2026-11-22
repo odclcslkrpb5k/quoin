@@ -39,6 +39,26 @@ test_defaults (void)
   g_assert_null (gbk_config_interpreter (c, "x.txt"));
   g_assert_null (gbk_config_interpreter (c, ".sh"));     /* dotfile, no extension */
   g_assert_null (gbk_config_interpreter (c, "sh"));
+  g_assert_cmpint (c->icon_size, ==, 48);
+  g_assert_cmpuint (c->icon_folders->len, ==, 0);
+}
+
+static void
+test_icons (void)
+{
+  g_autoptr (GPtrArray) errors = g_ptr_array_new_with_free_func (g_free);
+  g_autoptr (GbkConfig) c
+      = load ("[General]\nIconSize=96\nIconFolders=~/Applications;/opt/apps/;~\n", errors);
+  g_assert_cmpuint (errors->len, ==, 0);
+  g_assert_cmpint (c->icon_size, ==, 96);
+  g_assert_cmpuint (c->icon_folders->len, ==, 3);
+  g_autofree char *apps = g_build_filename (g_get_home_dir (), "Applications", nullptr);
+  g_assert_cmpstr (g_ptr_array_index (c->icon_folders, 0), ==, apps);
+  g_assert_cmpstr (g_ptr_array_index (c->icon_folders, 1), ==, "/opt/apps");   /* as compared */
+  g_assert_cmpstr (g_ptr_array_index (c->icon_folders, 2), ==, g_get_home_dir ());
+  assert_errors ("[General]\nIconSize=8\n", "IconSize: expected a size in pixels from 16 to 256");
+  assert_errors ("[General]\nIconSize=big\n", "IconSize");
+  assert_errors ("[General]\nIconFolders=Applications\n", "isn't an absolute path");
 }
 
 static void
@@ -53,6 +73,8 @@ test_example_conf (void)
     g_test_message ("error: %s", (char *) g_ptr_array_index (errors, i));
   g_assert_cmpuint (errors->len, ==, 0);
   g_assert_cmpuint (c->actions->len, ==, 3);
+  g_assert_cmpint (c->icon_size, ==, 48);
+  g_assert_cmpuint (c->icon_folders->len, ==, 2);
   const GbkAction *a = g_ptr_array_index (c->actions, 0);
   g_assert_cmpstr (a->id, ==, "extract-here");
   g_assert_cmpstr (gbk_command_template (a->remote_command), ==, "bsdtar -xf %f");
@@ -190,6 +212,7 @@ main (int argc, char **argv)
   g_test_add_func ("/config/defaults", test_defaults);
   g_test_add_func ("/config/example-conf", test_example_conf);
   g_test_add_func ("/config/full", test_full);
+  g_test_add_func ("/config/icons", test_icons);
   g_test_add_func ("/config/errors", test_errors);
   g_test_add_func ("/config/missing-file", test_missing_file);
   g_test_add_func ("/config/old-location-moves", test_old_location_moves);

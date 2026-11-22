@@ -133,12 +133,15 @@ update_sort_button (GbkWindow *w)
   gtk_widget_set_tooltip_text (GTK_WIDGET (w->sort_button), sorts[i].tooltip);
 }
 
+static void sync_view (GbkWindow *w);
+
 static void
 update_chrome (GbkWindow *w)
 {
   const GbkBrowser *b = active (w);
   set_title_loc (w, gbk_browser_loc (b));
   update_status (w);
+  sync_view (w);
 }
 
 static void
@@ -352,6 +355,16 @@ set_sort (GbkWindow *w, GbkSortMode sort)
   g_simple_action_set_state (G_SIMPLE_ACTION (a),
                              g_variant_new_string (sorts[sort_index (sort)].state));
   update_sort_button (w);
+}
+
+/* win.view follows the folder on show: each folder has its own. */
+static void
+sync_view (GbkWindow *w)
+{
+  GAction *a = g_action_map_lookup_action (G_ACTION_MAP (w), "view");
+  bool icons = gbk_browser_view_mode (active (w)) == GBK_VIEW_ICONS;
+  g_simple_action_set_state (G_SIMPLE_ACTION (a),
+                             g_variant_new_string (icons ? "icons" : "compact"));
 }
 
 static void
@@ -1549,6 +1562,19 @@ change_sort (GSimpleAction *a G_GNUC_UNUSED, GVariant *state, void *data)
       set_sort (data, sorts[i].mode);
 }
 
+static void
+change_view (GSimpleAction *a G_GNUC_UNUSED, GVariant *state, void *data)
+{
+  GbkWindow *w = data;
+  const char *want = g_variant_get_string (state, nullptr);
+  /* Reachable from outside the process (D-Bus): unknown values change nothing. */
+  if (g_str_equal (want, "icons"))
+    gbk_browser_set_view (active (w), GBK_VIEW_ICONS);
+  else if (g_str_equal (want, "compact"))
+    gbk_browser_set_view (active (w), GBK_VIEW_COMPACT);
+  sync_view (w);
+}
+
 static const GActionEntry actions[] = {
   { .name = "back", .activate = action_back },
   { .name = "forward", .activate = action_forward },
@@ -1579,6 +1605,7 @@ static const GActionEntry actions[] = {
   { .name = "show-hidden", .state = "false", .change_state = change_show_hidden },
   { .name = "full-path-title", .state = "true", .change_state = change_full_path_title },
   { .name = "sort", .parameter_type = "s", .state = "'name'", .change_state = change_sort },
+  { .name = "view", .parameter_type = "s", .state = "'compact'", .change_state = change_view },
 };
 
 /* ---- keys ---- */
@@ -1609,6 +1636,9 @@ static const struct
   { "win.delete", { "<Shift>Delete", "<Shift>KP_Delete", nullptr } },
   { "win.rename", { "F2", nullptr } },
   { "win.properties", { "<Alt>Return", "<Alt>KP_Enter", nullptr } },
+  /* As Thunar's: Ctrl+2 would be a detailed list, which Quoin hasn't got. */
+  { "win.view::icons", { "<Control>1", nullptr } },
+  { "win.view::compact", { "<Control>3", nullptr } },
 };
 
 void
@@ -1773,6 +1803,8 @@ app_menu_button (GbkWindow *w)
     g_menu_append_submenu (s1, "Files Being Edited", gbk_edits_menu ());
   g_menu_append_section (menu, nullptr, G_MENU_MODEL (s1));
   g_autoptr (GMenu) s2 = g_menu_new ();
+  g_menu_append (s2, "Icons", "win.view::icons");
+  g_menu_append (s2, "Compact", "win.view::compact");
   g_menu_append (s2, "Full Path in Title Bar", "win.full-path-title");
   g_menu_append (s2, "Show Hidden Files", "win.show-hidden");
   g_menu_append (s2, "Sort by Name", "win.sort::name");

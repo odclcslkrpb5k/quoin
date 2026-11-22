@@ -6,6 +6,7 @@
 #pragma once
 
 #include "dirmodel.h"
+#include "config.h"
 #include "dnd.h"
 #include "git.h"
 
@@ -49,11 +50,26 @@ bool gbk_view_is_marked (const GbkView *v, GbkHandle h);
 void gbk_view_set_git (GbkView *v, GHashTable *names, GbkGitState inherit);
 GbkGitState gbk_view_git_state (const GbkView *v, GbkHandle h);
 
+/* How items are shown: Compact (small icons, names beside them, columns scrolling
+ * sideways) or Icons (big icons, names below in two lines at most, rows scrolling down).
+ * `icon_size` (px, clamped to GBK_VIEW_ICON_MIN..MAX) is the Icons view's. The scrolled
+ * window around the view must scroll the matching way (browser.c). */
+typedef enum
+{
+  GBK_VIEW_COMPACT,
+  GBK_VIEW_ICONS,
+} GbkViewMode;
+#define GBK_VIEW_ICON_MIN GBK_ICON_SIZE_MIN
+#define GBK_VIEW_ICON_MAX GBK_ICON_SIZE_MAX
+void gbk_view_set_mode (GbkView *v, GbkViewMode mode, int icon_size);
+GbkViewMode gbk_view_mode (const GbkView *v);
+
 /* Keyboard-style cursor movement, used by the key handler and by tests. */
 typedef enum
 {
   GBK_MOVE_ITEM,       /* count = +-1: down/up within the flow */
-  GBK_MOVE_COLUMN,     /* count = +-1: right/left one column */
+  GBK_MOVE_COLUMN,     /* count = +-1: one line across the flow: the next column (Compact),
+                    * the next row (Icons) */
   GBK_MOVE_PAGE,       /* count = +-1: one screenful of columns */
   GBK_MOVE_ENDS,       /* count < 0: first item; > 0: last item */
 } GbkMoveStep;

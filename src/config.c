@@ -30,6 +30,7 @@ gbk_config_free (GbkConfig *c)
   g_hash_table_unref (c->interpreters);
   g_ptr_array_unref (c->type_overrides);
   g_ptr_array_unref (c->actions);
+  g_ptr_array_unref (c->icon_folders);
   g_free (c);
 }
 
@@ -41,7 +42,9 @@ config_new_empty (void)
       = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify) g_strfreev);
   c->type_overrides = g_ptr_array_new_with_free_func (g_free);
   c->actions = g_ptr_array_new_with_free_func ((GDestroyNotify) action_free);
+  c->icon_folders = g_ptr_array_new_with_free_func (g_free);
   c->sort = GBK_SORT_NAME;
+  c->icon_size = GBK_CONFIG_ICON_SIZE;
   return c;
 }
 
@@ -143,11 +146,42 @@ get_bool (Loader *l, const char *group, const char *key, bool *out)
   return true;
 }
 
+/* IconFolders: absolute paths, or ~ and ~/... for the home folder; ';' between them. */
+static void
+load_icon_folders (Loader *l, const char *g)
+{
+  g_autoptr (GError) error = nullptr;
+  g_auto (GStrv) list = g_key_file_get_string_list (l->kf, g, "IconFolders", nullptr, &error);
+  if (list == nullptr)
+    {
+      fail (l, "[%s] IconFolders: %s", g, error->message);
+      return;
+    }
+  for (size_t i = 0; list[i] != nullptr; i++)
+    {
+      const char *f = list[i];
+      g_autofree char *path = nullptr;
+      if (g_str_equal (f, "~"))
+        path = g_strdup (g_get_home_dir ());
+      else if (g_str_has_prefix (f, "~/"))
+        path = g_build_filename (g_get_home_dir (), f + 2, nullptr);
+      else if (f[0] == '/')
+        path = g_strdup (f);
+      else
+        {
+          fail (l, "[%s] IconFolders: \"%s\" isn't an absolute path (or one starting with ~/)", g,
+                f);
+          continue;
+        }
+      g_ptr_array_add (l->c->icon_folders, g_canonicalize_filename (path, nullptr));
+    }
+}
+
 static void
 load_general (Loader *l)
 {
-  static const char *const keys[]
-      = { "Terminal", "TerminalRun", "ShowHidden", "FullPathInTitle", "SortBy", nullptr };
+  static const char *const keys[] = { "Terminal", "TerminalRun", "ShowHidden",  "FullPathInTitle",
+                                      "SortBy",   "IconSize",    "IconFolders", nullptr };
   const char *g = "General";
   check_keys (l, g, keys);
 
@@ -192,6 +226,20 @@ load_general (Loader *l)
       else
         fail (l, "[%s] SortBy: expected name, modified or size, got \"%s\"", g, v);
     }
+  if (g_key_file_has_key (l->kf, g, "IconSize", nullptr))
+    {
+      g_autofree char *v = get_string (l, g, "IconSize");
+      uint64_t size;
+      if (v != nullptr
+          && !g_ascii_string_to_unsigned (v, 10, GBK_ICON_SIZE_MIN, GBK_ICON_SIZE_MAX, &size,
+                                          nullptr))
+        fail (l, "[%s] IconSize: expected a size in pixels from %d to %d, got \"%s\"", g,
+              GBK_ICON_SIZE_MIN, GBK_ICON_SIZE_MAX, v);
+      else if (v != nullptr)
+        l->c->icon_size = (int) size;
+    }
+  if (g_key_file_has_key (l->kf, g, "IconFolders", nullptr))
+    load_icon_folders (l, g);
 }
 
 /* An extension as used in [Interpreters] and [Types]: no dots at the ends, no '/'. */
