@@ -50,8 +50,13 @@ program that won't start. On anything else, [build from source](#building).
   columns that scroll sideways, like Thunar's compact view) and **Icons** (big icons with
   their names below, at most two lines, in rows that scroll down: for a folder of
   applications, say). Switch with Ctrl+1 (Icons) and Ctrl+3 (Compact), or from the ☰
-  menu; each folder remembers its own. Sort by name, date modified or size, always with
-  folders first.
+  menu; each folder remembers its own. In the Icons view, **AppImages** show their own icon
+  and their name and version ("FreeCAD 1.1.3") instead of the long file name. These are
+  read in the background by a small helper program, `quoin-appimage`, that never runs the
+  AppImage and can't harm Quoin if a file is broken or hostile; until it answers, and if
+  it can't, you see the usual icon and the file name. Icons are cached as standard
+  thumbnails (`~/.cache/thumbnails/`), names in `~/.cache/quoin/appimage/`. Sort by name,
+  date modified or size, always with folders first.
 - **Live updates:** the view follows changes on disk as they happen; there is no polling
   and no refresh button.
 - **Big folders:** a folder of 100,000 files shows its first items within milliseconds and

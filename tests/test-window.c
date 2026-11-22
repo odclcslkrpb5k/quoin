@@ -6,6 +6,8 @@
 #include "cliptext.h"
 #include "job.h"
 #include "props.h"
+#include "appicons.h"
+#include "testappimage.h"
 #include "testgit.h"
 #include "viewstate.h"
 #include "window.h"
@@ -1649,7 +1651,8 @@ test_tabs (void)
 static bool
 no_workers (void *data G_GNUC_UNUSED)
 {
-  return gbk_scanner_live_workers () == 0 && gbk_git_watch_live_workers () == 0;
+  return gbk_scanner_live_workers () == 0 && gbk_git_watch_live_workers () == 0
+         && gbk_app_icons_live_workers () == 0;
 }
 
 /* Closing a window with several tabs, each with a selection: tearing a tab down clears its
@@ -1915,6 +1918,114 @@ test_views (void)
   rm_rf (root);
 }
 
+/* ---- AppImages in the Icons view ---- */
+
+/* Let time pass with the main loop running. */
+static void
+run_for_ms (int ms)
+{
+  int64_t until = g_get_monotonic_time () + (int64_t) ms * 1000;
+  while (g_get_monotonic_time () < until)
+    {
+      while (gtk_events_pending ())
+        gtk_main_iteration ();
+      g_usleep (5000);
+    }
+}
+
+typedef struct
+{
+  GbkWindow *w;
+  const char *name;
+  const char *label;
+} LabelCtx;
+
+static bool
+label_is (void *data)
+{
+  const LabelCtx *c = data;
+  GbkHandle h = gbk_dir_model_find (model_of (c->w), c->name);
+  return h != GBK_HANDLE_NONE
+         && g_str_equal (gbk_view_label_for_test (gbk_window_view (c->w), h), c->label)
+         && gbk_view_has_app_icon_for_test (gbk_window_view (c->w), h);
+}
+
+/* An AppImage shows its own icon and "Name Version"; a broken one stays as it was (the
+ * generic icon, its file name). Both are cached: the helper isn't asked again. */
+static void
+test_appimages (void)
+{
+  g_autofree char *root = g_dir_make_tmp ("gbk-win-apps-XXXXXX", nullptr);
+  g_autofree char *good = g_build_filename (root, "Test-1.2.3-x86_64.AppImage", nullptr);
+  testappimage_make (good, "Test App", "1.2.3");
+  g_autofree char *tree = g_strconcat (good, ".tree", nullptr);
+  rm_rf (tree);
+  g_autofree char *broken = g_build_filename (root, "Broken.AppImage", nullptr);
+  g_assert_true (g_file_set_contents (broken,
+                                      "\x7f"
+                                      "ELF not really",
+                                      -1, nullptr));
+  mkdirs (root, (const char *const[]) { "notes.txt", nullptr });
+
+  int runs = gbk_app_icons_helper_runs ();
+  GbkWindow *w = window_at (app, ctx, root);
+  gtk_widget_show_all (GTK_WIDGET (w));
+  wait_at (w, root);
+  send_key_to_window (w, GDK_KEY_1, GDK_CONTROL_MASK);
+  LabelCtx want = { w, "Test-1.2.3-x86_64.AppImage", "Test App 1.2.3" };
+  if (!wait_until (label_is, &want))
+    gbk_fatal ("label: %s", gbk_view_label_for_test (gbk_window_view (w),
+                                                     gbk_dir_model_find (model_of (w), want.name)));
+  g_autofree char *failed_ini = nullptr;
+  {
+    g_autofree char *uri = g_filename_to_uri (broken, nullptr, nullptr);
+    g_autofree char *key = g_compute_checksum_for_string (G_CHECKSUM_MD5, uri, -1);
+    g_autofree char *file = g_strconcat (key, ".ini", nullptr);
+    failed_ini = g_build_filename (g_get_user_cache_dir (), "quoin", "appimage", file, nullptr);
+  }
+  g_assert_true (wait_until (file_exists, failed_ini));
+  GbkHandle bh = gbk_dir_model_find (model_of (w), "Broken.AppImage");
+  g_assert_cmpstr (gbk_view_label_for_test (gbk_window_view (w), bh), ==, "Broken.AppImage");
+  g_assert_false (gbk_view_has_app_icon_for_test (gbk_window_view (w), bh));
+  g_assert_cmpint (gbk_app_icons_helper_runs (), ==, runs + 2);
+  {
+    g_autofree char *uri = g_filename_to_uri (good, nullptr, nullptr);
+    g_autofree char *key = g_compute_checksum_for_string (G_CHECKSUM_MD5, uri, -1);
+    g_autofree char *file = g_strconcat (key, ".png", nullptr);
+    g_autofree char *thumb
+        = g_build_filename (g_get_user_cache_dir (), "thumbnails", "large", file, nullptr);
+    g_assert_true (g_file_test (thumb, G_FILE_TEST_IS_REGULAR));
+  }
+  const char *art = g_getenv ("GBK_ARTIFACTS");
+  if (art != nullptr && g_mkdir_with_parents (art, 0755) == 0)
+    {
+      laid_out (w);
+      GtkWidget *ww = GTK_WIDGET (w);
+      cairo_surface_t *surf
+          = cairo_image_surface_create (CAIRO_FORMAT_ARGB32, gtk_widget_get_allocated_width (ww),
+                                        gtk_widget_get_allocated_height (ww));
+      cairo_t *cr = cairo_create (surf);
+      gtk_widget_draw (ww, cr);
+      cairo_destroy (cr);
+      g_autofree char *png = g_build_filename (art, "appimages.png", nullptr);
+      cairo_surface_write_to_png (surf, png);
+      cairo_surface_destroy (surf);
+    }
+  gtk_widget_destroy (GTK_WIDGET (w));
+
+  /* Again: all from the caches. */
+  GbkWindow *w2 = window_at (app, ctx, root);
+  gtk_widget_show_all (GTK_WIDGET (w2));
+  wait_at (w2, root);
+  g_assert_cmpint (view_mode (w2), ==, GBK_VIEW_ICONS);   /* remembered */
+  LabelCtx again = { w2, "Test-1.2.3-x86_64.AppImage", "Test App 1.2.3" };
+  g_assert_true (wait_until (label_is, &again));
+  run_for_ms (300);
+  g_assert_cmpint (gbk_app_icons_helper_runs (), ==, runs + 2);
+  gtk_widget_destroy (GTK_WIDGET (w2));
+  rm_rf (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1950,6 +2061,7 @@ main (int argc, char **argv)
   g_test_add_func ("/window/close-with-selections", test_close_with_selections);
   g_test_add_func ("/window/git", test_git);
   g_test_add_func ("/window/views", test_views);
+  g_test_add_func ("/window/appimages", test_appimages);
   int status = g_test_run ();
 
   while (gtk_events_pending ())

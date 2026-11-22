@@ -263,10 +263,98 @@ test_fd_watch (void)
   close (fd);
 }
 
+/* ---- the stall watch (each case in a child process: a stall aborts it) ---- */
+
+static gint64
+cpu_us (void)
+{
+  struct timespec ts;
+  g_assert_cmpint (clock_gettime (CLOCK_THREAD_CPUTIME_ID, &ts), ==, 0);
+  return (gint64) ts.tv_sec * G_USEC_PER_SEC + ts.tv_nsec / 1000;
+}
+
+static bool
+work_200ms (void *data G_GNUC_UNUSED)
+{
+  gint64 until = cpu_us () + 200000;
+  while (cpu_us () < until)
+    ;
+  return false;
+}
+
+static bool
+wait_100ms (void *data G_GNUC_UNUSED)
+{
+  g_usleep (100000);
+  return false;
+}
+
+static bool
+wait_250ms (void *data G_GNUC_UNUSED)
+{
+  g_usleep (250000);
+  return false;
+}
+
+/* Run `fn` once on the main loop with the watch at 40 ms. */
+static void
+stall_child (GbkSourceFunc fn, const char *name)
+{
+  g_setenv ("GBK_STALL_MS", "40", true);  /* read at the first callback, in this process */
+  g_autoptr (GObject) owner = g_object_new (G_TYPE_OBJECT, nullptr);
+  bool done = false;
+  gbk_idle_add_named (owner, fn, &done, name);
+  for (int i = 0; i < 10; i++)
+    g_main_context_iteration (nullptr, false);
+}
+
+static void
+test_stall_work (void)
+{
+  if (g_test_subprocess ())
+    {
+      stall_child (work_200ms, "work_200ms");
+      return;
+    }
+  g_test_trap_subprocess (nullptr, 0, G_TEST_SUBPROCESS_DEFAULT);
+  g_test_trap_assert_failed ();
+  g_test_trap_assert_stderr ("*main loop blocked*work_200ms*");
+}
+
+/* Waiting a little (a busy machine, a short read) isn't work: not a stall. */
+static void
+test_stall_short_wait (void)
+{
+  if (g_test_subprocess ())
+    {
+      stall_child (wait_100ms, "wait_100ms");
+      return;
+    }
+  g_test_trap_subprocess (nullptr, 0, G_TEST_SUBPROCESS_DEFAULT);
+  g_test_trap_assert_passed ();
+}
+
+/* Waiting long (a hung read): the window is frozen all the same. */
+static void
+test_stall_long_wait (void)
+{
+  if (g_test_subprocess ())
+    {
+      stall_child (wait_250ms, "wait_250ms");
+      return;
+    }
+  g_test_trap_subprocess (nullptr, 0, G_TEST_SUBPROCESS_DEFAULT);
+  g_test_trap_assert_failed ();
+  g_test_trap_assert_stderr ("*main loop blocked*wait_250ms*");
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, nullptr);
+  g_test_add_func ("/lifetime/stall/work", test_stall_work);
+  g_test_add_func ("/lifetime/stall/short-wait", test_stall_short_wait);
+  g_test_add_func ("/lifetime/stall/long-wait", test_stall_long_wait);
 
   g_test_add_func ("/lifetime/signal/fires", test_signal_fires);
   g_test_add_func ("/lifetime/signal/owner-disposed-first", test_signal_owner_disposed_first);

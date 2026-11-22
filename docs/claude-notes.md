@@ -447,14 +447,28 @@ GUI (libgbk-gui; tests under Xvfb started by in-container.sh, is_parallel:false)
   it strictly (every pixel premultiplied). Shipped: build/publish/install.sh/check-binary
   allowlist. Tests build real images with mksquashfs (-processors 1). Fuzz: fuzz-appimage.
   cppcheck needs plain code here: g_bytes_get_size, not the out-param; no const laundering.
-  NEXT: stage 3 = cache (freedesktop thumbnails "large" + own ini for name/version/fail)
-  on a worker, view shows them; .desktop Exec matches for ~/bin.
+  STAGE 3 built (2026-11-22): capture.c (shared spawn+poll+timeout+cap runner; git.c
+  uses it too), appicons.c (per-view worker started on first want; ini cache
+  ~/.cache/quoin/appimage/<md5 uri>.ini with MTime ns, Size, Name, Version, Icon, Failed,
+  Reader=GBK_VERSION so failures are retried by a new build; thumbnail
+  ~/.cache/thumbnails/large/<md5 uri>.png with Thumb::URI/MTime/Size, validated on load;
+  helper asked at 256 px, fitted to icon px * scale). view.c app_info() asks while drawing
+  grid cells of local *.AppImage regular files; apps_reset on set_model / set_mode /
+  dispose. Labels "Name Version" (version dropped if already in the name). Names sort by
+  file name still. Pango hyphen insertion off for names. Tests: test-window
+  /window/appimages (real AppImage via tests/testappimage.h, broken one, cache reuse =
+  no new helper runs).
+  NOT DONE (offered): .desktop Exec matches for ~/bin executables; Ctrl+scroll zoom.
   FLAKE seen once (2026-11-21, full check): /scanner/large-directory "main loop blocked for
   322 ms by on_scanner_wake" under ASan with the whole suite running; 6/6 alone and the
   rerun passed. If it recurs: look at DRAIN_BUDGET x chunk size per wakeup, not the limit.
   RECURRED 2026-11-22 with /window/open-folder-elsewhere too (279 ms): the host had load
   ~11 on 8 cores from the user's other work (java, freecadcmd). Check `uptime` before
   chasing a stall. Own share reduced: test-appimage's mksquashfs uses one core.
+  THIRD time (2026-11-22, 306 ms) -> Engineer fix: the stall watch (lifetime.c) now judges
+  WORK by the main thread's CPU time against GBK_STALL_MS, and wall time against 4x that
+  (blocked callbacks). Alone the test never passed 60 ms. Tested: /lifetime/stall/* (work
+  aborts, a short wait doesn't, a long wait does; each in a subprocess).
 - DEVICES (user, 2026-10-15: Thunar's sidebar Devices list, in the ☰ menu; user chose ONE
   "Devices" submenu, each device a submenu Open / Unmount / Eject|Safely Remove). devices.{h,c}
   (core, GIO only): GbkDevices per window wraps GVolumeMonitor (gvfs udisks2 if installed,

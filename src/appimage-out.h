@@ -7,7 +7,7 @@
 #define GBK_APPIMAGE_OUT_ICON_MAX 256            /* px, either side */
 #define GBK_APPIMAGE_OUT_TEXT_MAX 1024           /* bytes, the name and the version */
 #define GBK_APPIMAGE_OUT_MAX \
-  (sizeof GBK_APPIMAGE_OUT_MAGIC + 4u * (2u + GBK_APPIMAGE_OUT_TEXT_MAX) + 8u \
+  (sizeof GBK_APPIMAGE_OUT_MAGIC + (size_t) 4 * (2 + GBK_APPIMAGE_OUT_TEXT_MAX) + 8u \
    + (size_t) GBK_APPIMAGE_OUT_ICON_MAX * GBK_APPIMAGE_OUT_ICON_MAX * 4u)
 
 typedef struct

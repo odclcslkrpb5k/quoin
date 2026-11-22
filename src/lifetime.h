@@ -68,7 +68,9 @@ void gbk_dbus_signal_named (GObject *owner, GBusType bus, const char *sender, co
 
 /* The stall watch. While one of the callbacks registered here runs, the main loop can't
  * repaint or take input: a frozen window. With GBK_STALL_MS set (the tests set it), a
- * callback that runs longer than that many milliseconds aborts, naming itself. Every
+ * callback that works longer than that many milliseconds (CPU time, so a busy machine
+ * doesn't count), or takes four times that in all (blocked, waiting), aborts, naming
+ * itself. Every
  * callback of ours is registered here (the raw APIs are poisoned elsewhere), so this times
  * all of our code on the main loop; GTK's own handlers are not timed. Unset, it costs a
  * branch per callback. */

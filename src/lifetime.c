@@ -26,23 +26,45 @@ stall_limit (void)
   return stall_limit_us;
 }
 
-/* `start` from g_get_monotonic_time () before the callback, or 0 when the watch is off. */
-static gint64
-stall_start (void)
+/* A callback's start: wall-clock time, and the CPU time this thread had used. */
+typedef struct
 {
-  return stall_limit () > 0 ? g_get_monotonic_time () : 0;
+  gint64 wall;            /* 0: the watch is off */
+  gint64 cpu;
+} Stall;
+
+static gint64
+thread_cpu_us (void)
+{
+  struct timespec ts;
+  if (clock_gettime (CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+    return 0;
+  return (gint64) ts.tv_sec * G_USEC_PER_SEC + ts.tv_nsec / 1000;
 }
 
-static void
-stall_check (gint64 start, const char *kind, const char *name, const char *detail)
+static Stall
+stall_start (void)
 {
-  if (start == 0)
+  if (stall_limit () <= 0)
+    return (Stall) { 0, 0 };
+  return (Stall) { g_get_monotonic_time (), thread_cpu_us () };
+}
+
+/* Too long is the limit of work (CPU time: a busy machine, which slows everything, doesn't
+ * count against a callback), or four times it of waiting (a callback blocked on a read
+ * does no work, but the window is frozen all the same). */
+static void
+stall_check (Stall start, const char *kind, const char *name, const char *detail)
+{
+  if (start.wall == 0)
     return;
-  gint64 took = g_get_monotonic_time () - start;
-  if (took > stall_limit_us)
-    gbk_fatal ("main loop blocked for %" G_GINT64_FORMAT " ms (GBK_STALL_MS=%" G_GINT64_FORMAT
-               ") by %s %s%s",
-               took / 1000, stall_limit_us / 1000, kind, name, detail);
+  gint64 wall = g_get_monotonic_time () - start.wall;
+  gint64 cpu = thread_cpu_us () - start.cpu;
+  if (cpu > stall_limit_us || wall > 4 * stall_limit_us)
+    gbk_fatal ("main loop blocked for %" G_GINT64_FORMAT " ms, %" G_GINT64_FORMAT
+               " of them working (GBK_STALL_MS=%" G_GINT64_FORMAT
+               ": work, 4 times that in all) by %s %s%s",
+               wall / 1000, cpu / 1000, stall_limit_us / 1000, kind, name, detail);
 }
 
 /* ---- Signals ----
@@ -76,11 +98,11 @@ timed_marshal (GClosure *closure, GValue *return_value, guint n_param_values,
 {
   Handler *h = marshal_data;
   bool outer = h->depth++ == 0;
-  gint64 start = outer ? stall_start () : 0;
+  Stall start = outer ? stall_start () : (Stall) { 0, 0 };
   g_cclosure_marshal_generic (closure, return_value, n_param_values, param_values, invocation_hint,
                               nullptr);
   h->depth--;
-  if (start != 0)
+  if (start.wall != 0)
     {
       g_autofree char *detail = g_strdup_printf (" for \"%s\" on %s", h->signal, h->type);
       stall_check (start, "handler", h->name, detail);
@@ -143,7 +165,7 @@ dispatch_common (SourceRec *r, int fd, GIOCondition condition)
   /* Hold the owner across the callback: if the callback drops the last other ref, the
    * owner is disposed at our unref below, after the callback has returned. */
   GObject *owner = g_object_ref (r->owner);
-  gint64 start = stall_start ();
+  Stall start = stall_start ();
   bool keep = r->fn != nullptr ? r->fn (r->data) : r->fd_fn (fd, condition, r->data);
   stall_check (start, "source", r->name, "");
   g_object_unref (owner);
@@ -246,7 +268,7 @@ clipboard_received (GtkClipboard *clipboard G_GNUC_UNUSED, GtkSelectionData *sd,
   GObject *owner = g_weak_ref_get (&r->owner);
   if (owner != nullptr)
     {
-      gint64 start = stall_start ();
+      Stall start = stall_start ();
       r->fn (sd, r->data);
       stall_check (start, "clipboard callback", r->name, "");
       g_object_unref (owner);
@@ -323,7 +345,7 @@ dbus_emitted (GDBusConnection *bus G_GNUC_UNUSED, const char *sender G_GNUC_UNUS
   if (r->owner == nullptr)
     return;
   g_object_ref (r->owner);
-  gint64 start = stall_start ();
+  Stall start = stall_start ();
   r->fn (params, r->data);
   stall_check (start, "D-Bus signal", r->name, "");
   g_object_unref (r->owner);

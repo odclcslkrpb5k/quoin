@@ -63,6 +63,10 @@ typedef enum
 #define GBK_VIEW_ICON_MAX GBK_ICON_SIZE_MAX
 void gbk_view_set_mode (GbkView *v, GbkViewMode mode, int icon_size);
 GbkViewMode gbk_view_mode (const GbkView *v);
+/* Tests: the label the Icons view shows for `h` (an AppImage's name and version once
+ * known), and whether it has the AppImage's own icon yet. */
+const char *gbk_view_label_for_test (GbkView *v, GbkHandle h);
+bool gbk_view_has_app_icon_for_test (GbkView *v, GbkHandle h);
 
 /* Keyboard-style cursor movement, used by the key handler and by tests. */
 typedef enum

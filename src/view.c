@@ -1,4 +1,5 @@
 #include "view.h"
+#include "appicons.h"
 #include "cliptext.h"
 #include "dnd.h"
 #include "lifetime.h"
@@ -62,7 +63,7 @@ struct _GbkView
 
   /* Metrics (style_updated). */
   PangoLayout *layout;
-  PangoAttrList *styles[N_STYLES]; /* name attributes per Style; [STYLE_PLAIN] is nullptr */
+  PangoAttrList *styles[N_STYLES]; /* name attributes per Style */
   int ascii_adv[N_STYLES][128];    /* Pango units per Style; 0 for control chars */
   int text_h, row_h;
 
@@ -104,16 +105,39 @@ struct _GbkView
   GHashTable *git;         /* git states of names (git.h); nullptr: not in a work tree */
   GbkGitState git_inherit; /* the state of names not in `git` */
   bool emblem_tried;
-  int icon_scale;
-
   /* Icons view (gbk_view_set_mode): a grid of big icons with their names below, rows
    * left to right, scrolling down. Every cell is the same size. */
   bool grid;
+  int icon_scale;
   int grid_icon;                /* the icons' size there, px */
   int cell_w, cell_h;
+  guint apps_watch;             /* below */
   size_t per_row;
   gulong vadj_changed_id;
+
+  /* AppImages' own icons and names (appicons.h), Icons view only, this folder only. */
+  GbkAppIcons *apps;
+  GHashTable *app_info;         /* raw name -> AppInfo* */
 };
+
+typedef struct
+{
+  int64_t mtime_ns;             /* the file as asked about */
+  bool answered;
+  char *label;                  /* nullptr: the file's name */
+  cairo_surface_t *icon;        /* nullptr: the generic icon */
+} AppInfo;
+
+static void apps_reset (GbkView *v);
+
+static void
+app_info_free (AppInfo *a)
+{
+  g_free (a->label);
+  if (a->icon != nullptr)
+    cairo_surface_destroy (a->icon);
+  g_free (a);
+}
 
 enum
 {
@@ -216,10 +240,14 @@ update_metrics (GbkView *v)
 {
   g_clear_object (&v->layout);
   v->layout = gtk_widget_create_pango_layout (GTK_WIDGET (v), nullptr);
-  if (v->styles[STYLE_BOLD] == nullptr)
-    for (int s = STYLE_BOLD; s < N_STYLES; s++)
+  if (v->styles[STYLE_PLAIN] == nullptr)
+    for (int s = STYLE_PLAIN; s < N_STYLES; s++)
       {
         v->styles[s] = pango_attr_list_new ();
+        /* Names wrapped in the Icons view: no hyphen that isn't in the name. */
+        pango_attr_list_insert (v->styles[s], pango_attr_insert_hyphens_new (false));
+        if (s == STYLE_PLAIN)
+          continue;
         if (s != STYLE_ITALIC)
           pango_attr_list_insert (v->styles[s], pango_attr_weight_new (PANGO_WEIGHT_BOLD));
         if (s != STYLE_BOLD)
@@ -986,6 +1014,7 @@ gbk_view_set_model (GbkView *v, GbkDirModel *model)
   v->cursor = v->anchor = GBK_HANDLE_NONE;
   v->cursor_hint = 0;
   search_clear (v);
+  apps_reset (v);                      /* another folder */
   reset_anchor (v);
   /* Cached widths are keyed by slot and generation, which restart in every model. */
   g_array_set_size (v->widths, 0);
@@ -1018,6 +1047,7 @@ gbk_view_set_mode (GbkView *v, GbkViewMode mode, int icon_size)
     return;
   v->grid = grid;
   v->grid_icon = size;
+  apps_reset (v);
   clear_icons (v);
   reset_anchor (v);
   relayout (v);
@@ -1138,6 +1168,88 @@ rounded_box (cairo_t *cr, const GdkRGBA *c, int x, int y, int w, int h)
   cairo_restore (cr);
 }
 
+/* ---- AppImages ---- */
+
+/* Forget everything about AppImages here, and stop finding more (another folder, another
+ * size, going away). */
+static void
+apps_reset (GbkView *v)
+{
+  gbk_source_cancel (&v->apps_watch);
+  g_clear_pointer (&v->apps, gbk_app_icons_stop);
+  if (v->app_info != nullptr)
+    g_hash_table_remove_all (v->app_info);
+}
+
+static bool
+on_apps_wake (int fd G_GNUC_UNUSED, GIOCondition condition G_GNUC_UNUSED, void *data)
+{
+  GbkView *v = data;
+  GbkAppIcon *r;
+  bool any = false;
+  while ((r = gbk_app_icons_take (v->apps)) != nullptr)
+    {
+      AppInfo *a = g_hash_table_lookup (v->app_info, r->name);
+      if (a != nullptr && a->mtime_ns == r->mtime_ns)
+        {
+          a->answered = true;
+          a->label = g_steal_pointer (&r->label);
+          a->icon = g_steal_pointer (&r->icon);
+          any = true;
+        }
+      gbk_app_icon_free (r);
+    }
+  if (any)
+    gtk_widget_queue_draw (GTK_WIDGET (v));
+  return true;
+}
+
+/* What is known about `e` as an AppImage in this folder (asked for if it isn't yet), or
+ * nullptr if it isn't one. */
+static const AppInfo *
+app_info (GbkView *v, const GbkEntry *e)
+{
+  const char *name = gbk_entry_name (e);
+  if (!v->grid || e->kind != GBK_KIND_REGULAR || (e->flags & GBK_ENTRY_STAT_FAILED)
+      || !gbk_app_icons_named (name))
+    return nullptr;
+  const GbkLoc *loc = gbk_dir_model_loc (v->model);
+  const char *dir;
+  if (loc == nullptr || !gbk_loc_as_local (loc, &dir))
+    return nullptr;                    /* on another machine: the generic icon */
+  AppInfo *a = g_hash_table_lookup (v->app_info, name);
+  if (a != nullptr && a->mtime_ns == e->mtime_ns)
+    return a;
+  if (v->apps == nullptr)
+    {
+      v->apps = gbk_app_icons_new ();
+      v->apps_watch
+          = gbk_fd_watch (G_OBJECT (v), gbk_app_icons_wake_fd (v->apps), G_IO_IN, on_apps_wake, v);
+    }
+  a = g_new0 (AppInfo, 1);
+  a->mtime_ns = e->mtime_ns;
+  g_hash_table_replace (v->app_info, g_strdup (name), a);
+  gbk_app_icons_want (v->apps, dir, name, e->mtime_ns, e->size,
+                      v->grid_icon * gtk_widget_get_scale_factor (GTK_WIDGET (v)));
+  return a;
+}
+
+const char *
+gbk_view_label_for_test (GbkView *v, GbkHandle h)
+{
+  const GbkEntry *e = gbk_dir_model_get (v->model, h);
+  const AppInfo *a = e != nullptr ? app_info (v, e) : nullptr;
+  return a != nullptr && a->label != nullptr ? a->label : e != nullptr ? gbk_entry_display (e) : "";
+}
+
+bool
+gbk_view_has_app_icon_for_test (GbkView *v, GbkHandle h)
+{
+  const GbkEntry *e = gbk_dir_model_get (v->model, h);
+  const AppInfo *a = e != nullptr ? app_info (v, e) : nullptr;
+  return a != nullptr && a->icon != nullptr;
+}
+
 /* Icons view: one cell. */
 static void
 draw_cell (GbkView *v, cairo_t *cr, GtkStyleContext *sc, GbkHandle h, int x, int y, bool focused,
@@ -1155,11 +1267,26 @@ draw_cell (GbkView *v, cairo_t *cr, GtkStyleContext *sc, GbkHandle h, int x, int
 
   int ic = v->grid_icon;
   int icon_x = x + (v->cell_w - ic) / 2, icon_y = y + GRID_PAD;
-  cairo_surface_t *icon = icon_for (v, e->type);
-  if (icon != nullptr)
+  const AppInfo *app = app_info (v, e);
+  if (app != nullptr && app->icon != nullptr)
     {
-      cairo_set_source_surface (cr, icon, icon_x, icon_y);
+      /* Made at the device scale, like theme icons: drawn at its size in logical pixels. */
+      double s = 1.0 / gtk_widget_get_scale_factor (GTK_WIDGET (v));
+      cairo_save (cr);
+      cairo_translate (cr, icon_x, icon_y);
+      cairo_scale (cr, s, s);
+      cairo_set_source_surface (cr, app->icon, 0, 0);
       cairo_paint (cr);
+      cairo_restore (cr);
+    }
+  else
+    {
+      cairo_surface_t *icon = icon_for (v, e->type);
+      if (icon != nullptr)
+        {
+          cairo_set_source_surface (cr, icon, icon_x, icon_y);
+          cairo_paint (cr);
+        }
     }
   bool is_marked = marked (v, e);
   cairo_surface_t *mark = is_marked ? emblem (v) : nullptr;
@@ -1171,7 +1298,8 @@ draw_cell (GbkView *v, cairo_t *cr, GtkStyleContext *sc, GbkHandle h, int x, int
     }
 
   int label_x = x + PAD_X, label_y = icon_y + ic + ICON_GAP;
-  pango_layout_set_text (v->layout, gbk_entry_display (e), -1);
+  pango_layout_set_text (
+      v->layout, app != nullptr && app->label != nullptr ? app->label : gbk_entry_display (e), -1);
   pango_layout_set_attributes (v->layout, v->styles[style_of (v, e)]);
   GdkRGBA bg;
   if (!selected && git_colour (git_state (v, e), dark, &bg))
@@ -1938,6 +2066,7 @@ gbk_view_dispose (GObject *o)
   GbkView *v = GBK_VIEW (o);
   gbk_source_cancel (&v->search_timeout);
   gbk_source_cancel (&v->autoscroll);
+  apps_reset (v);
   if (v->model != nullptr)
     {
       g_signal_handler_disconnect (v->model, v->model_changed_id);
@@ -1968,6 +2097,7 @@ gbk_view_finalize (GObject *o)
   for (int s = 0; s < N_STYLES; s++)
     g_clear_pointer (&v->styles[s], pango_attr_list_unref);
   g_clear_pointer (&v->git, g_hash_table_unref);
+  g_clear_pointer (&v->app_info, g_hash_table_unref);
   g_array_unref (v->col_x);
   g_array_unref (v->widths);
   g_hash_table_unref (v->selected);
@@ -2042,6 +2172,8 @@ gbk_view_init (GbkView *v)
   v->col_x = g_array_new (false, true, sizeof (int));
   v->widths = g_array_new (false, true, sizeof (WidthCache));
   v->selected = g_hash_table_new (g_direct_hash, g_direct_equal);
+  v->app_info
+      = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify) app_info_free);
   v->search = g_string_new ("");
   v->icons = g_ptr_array_new ();
   v->icons_tried = g_array_new (false, true, sizeof (bool));
